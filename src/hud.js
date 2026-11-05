@@ -1129,7 +1129,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
     // Keyboard diagram: click or press a key, then bind an action or playlist inline (saved immediately).
     // Below it, a list of all bound keys. Tile colors: orange = action, green = playlist, red = reject list.
     // Styled like the site's Settings modal.
-    const KEYBOARD_ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+    const KEYBOARD_ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm?']; // '?' is Shift+/ (hotkey overview)
 
     function bindingKind(b) {
         if (!b) return '';

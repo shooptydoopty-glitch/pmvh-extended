@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVHaven Extended
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.0.0
+// @version      1.0.1
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -4489,7 +4489,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
     // Keyboard diagram: click or press a key, then bind an action or playlist inline (saved immediately).
     // Below it, a list of all bound keys. Tile colors: orange = action, green = playlist, red = reject list.
     // Styled like the site's Settings modal.
-    const KEYBOARD_ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+    const KEYBOARD_ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm?']; // '?' is Shift+/ (hotkey overview)
 
     function bindingKind(b) {
         if (!b) return '';
