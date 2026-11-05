@@ -1890,7 +1890,7 @@
         }
         skipChainCount++;
         if (skipChainCount > SKIP_CHAIN_MAX) {
-            console.warn('[PMVHaven Extended] Auto-skip stopped: too many consecutive skips');
+            console.warn('[PMVH Extended] Auto-skip stopped: too many consecutive skips');
             return;
         }
         // With a sort active, click the next row in sort order instead of dispatching a synthetic N.

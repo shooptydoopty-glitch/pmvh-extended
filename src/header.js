@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         PMVHaven Extended
+// @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
 // @version      {{VERSION}}
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.

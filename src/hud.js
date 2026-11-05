@@ -932,7 +932,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
                 <div data-slot></div>
             </div>`;
         sec.innerHTML = `
-            <h3>PMVHaven Extended<span class="sub">userscript</span></h3>
+            <h3>PMVH Extended<span class="sub">userscript</span></h3>
             <div class="ts-card">
                 <div>
                     <label class="ts-lab"><span style="display:inline-flex;">${TS_SVG.gauge}</span>Performance</label>
@@ -1434,7 +1434,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 });
                 return c;
             };
-            grid.appendChild(col('PMVHaven Extended', Object.entries(DEFAULT_KEYBINDINGS).map(([k, b]) => [
+            grid.appendChild(col('PMVH Extended', Object.entries(DEFAULT_KEYBINDINGS).map(([k, b]) => [
                 k.toUpperCase(), bindingShort(b),
                 sameBinding(keybindings[k], b) ? '' : (keybindings[k] ? 'remapped' : 'unbound'),
             ])));
@@ -7694,7 +7694,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 <tr><td style="color:rgb(100,255,0);">Ctrl/Cmd+K</td><td>Search (videos, playlists) + open Up next</td></tr>
             </table>
             <div style="margin-top:14px;font-size:11px;color:rgba(255,255,255,0.3);">
-                Bind hotkeys to your own key/playlist: Settings (gear in the header) → PMVHaven Extended → Assign hotkeys.<br>
+                Bind hotkeys to your own key/playlist: Settings (gear in the header) → PMVH Extended → Assign hotkeys.<br>
                 Press ? again, or click outside this window, to close.
             </div>
         `;

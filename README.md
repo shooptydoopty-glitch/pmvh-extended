@@ -1,10 +1,10 @@
-# PMVHaven Extended
+# PMVH Extended
 
 A userscript for [PMVHaven](https://pmvhaven.com) that adds playlist tools, filters for videos and playlists, a fullscreen HUD, an "Up next" queue, remappable hotkeys and a seekbar preview.
 
 Everything runs in your browser and uses PMVHaven's own API with your existing session. No accounts, servers or trackers are involved.
 
-> **Unofficial.** PMVHaven Extended is an independent project and is not affiliated with, endorsed by or supported by PMVHaven. "PMVHaven" is a trademark of its owners. Use at your own risk, and respect the site's [terms](https://pmvhaven.com/terms).
+> **Unofficial.** PMVH Extended is an independent project and is not affiliated with, endorsed by or supported by PMVHaven. "PMVHaven" is a trademark of its owners. Use at your own risk, and respect the site's [terms](https://pmvhaven.com/terms).
 
 ## Install
 
@@ -87,7 +87,7 @@ Default hotkeys:
 | <kbd>?</kbd> | Show all hotkeys |
 
 ### Settings and backup
-- A **PMVHaven Extended** section inside the site's own *Settings* dialog (gear icon in the header): performance mode, seekbar preview, volume lock, reject list, hotkey editor.
+- A **PMVH Extended** section inside the site's own *Settings* dialog (gear icon in the header): performance mode, seekbar preview, volume lock, reject list, hotkey editor.
 - **Performance mode** for slower computers:
 
   | Mode | Page updates | Visual effects | Background requests | Live seekbar preview |

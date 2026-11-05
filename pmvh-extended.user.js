@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         PMVHaven Extended
+// @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.2.0
+// @version      1.2.1
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -1986,7 +1986,7 @@ PMVX.scheduler = fn => {
         }
         skipChainCount++;
         if (skipChainCount > SKIP_CHAIN_MAX) {
-            console.warn('[PMVHaven Extended] Auto-skip stopped: too many consecutive skips');
+            console.warn('[PMVH Extended] Auto-skip stopped: too many consecutive skips');
             return;
         }
         // With a sort active, click the next row in sort order instead of dispatching a synthetic N.
@@ -4349,7 +4349,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
                 <div data-slot></div>
             </div>`;
         sec.innerHTML = `
-            <h3>PMVHaven Extended<span class="sub">userscript</span></h3>
+            <h3>PMVH Extended<span class="sub">userscript</span></h3>
             <div class="ts-card">
                 <div>
                     <label class="ts-lab"><span style="display:inline-flex;">${TS_SVG.gauge}</span>Performance</label>
@@ -4851,7 +4851,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 });
                 return c;
             };
-            grid.appendChild(col('PMVHaven Extended', Object.entries(DEFAULT_KEYBINDINGS).map(([k, b]) => [
+            grid.appendChild(col('PMVH Extended', Object.entries(DEFAULT_KEYBINDINGS).map(([k, b]) => [
                 k.toUpperCase(), bindingShort(b),
                 sameBinding(keybindings[k], b) ? '' : (keybindings[k] ? 'remapped' : 'unbound'),
             ])));
@@ -11111,7 +11111,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 <tr><td style="color:rgb(100,255,0);">Ctrl/Cmd+K</td><td>Search (videos, playlists) + open Up next</td></tr>
             </table>
             <div style="margin-top:14px;font-size:11px;color:rgba(255,255,255,0.3);">
-                Bind hotkeys to your own key/playlist: Settings (gear in the header) → PMVHaven Extended → Assign hotkeys.<br>
+                Bind hotkeys to your own key/playlist: Settings (gear in the header) → PMVH Extended → Assign hotkeys.<br>
                 Press ? again, or click outside this window, to close.
             </div>
         `;
