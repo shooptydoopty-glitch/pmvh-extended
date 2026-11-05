@@ -1,111 +1,220 @@
-# PMVH Extended
+<div align="center">
 
-A userscript for [PMVHaven](https://pmvhaven.com) that adds playlist tools, filters for videos and playlists, a fullscreen HUD, an "Up next" queue, remappable hotkeys and a seekbar preview.
+<img src="docs/screenshots/00-hero.png" alt="PMVH Extended — playlists, filters and a fullscreen HUD for PMVHaven" width="100%">
 
-Everything runs in your browser and uses PMVHaven's own API with your existing session. No accounts, servers or trackers are involved.
+<br>
 
-> **Unofficial.** PMVH Extended is an independent project and is not affiliated with, endorsed by or supported by PMVHaven. "PMVHaven" is a trademark of its owners. Use at your own risk, and respect the site's [terms](https://pmvhaven.com/terms).
+<a href="https://raw.githubusercontent.com/shooptydoopty-glitch/pmvh-extended/main/pmvh-extended.user.js"><img alt="Install PMVH Extended" src="https://img.shields.io/badge/Install-userscript-f97316?style=for-the-badge"></a>
+&nbsp;
+<a href="#a-quick-tour"><img alt="Take the tour" src="https://img.shields.io/badge/Take_the_tour-1f1f1f?style=for-the-badge"></a>
+
+<sub>Works with Tampermonkey and Violentmonkey · MIT licensed · Unofficial, not affiliated with PMVHaven</sub>
+
+</div>
+
+<br>
+
+**PMVH Extended** turns [PMVHaven](https://pmvhaven.com) into a proper playlist tool. See at a glance what you have already saved, add videos in one click, line up what plays next, and filter videos and playlists by their tags — all inside the site you already use, styled to fit right in.
+
+<table>
+<tr>
+<td width="33%" valign="top"><b>Playlists everywhere</b><br>Badges on every card, one-click playlist buttons under the player, a right-click menu.</td>
+<td width="33%" valign="top"><b>Fullscreen HUD</b><br>Title, tags, playlists and timeline at the bottom of the screen — without leaving fullscreen.</td>
+<td width="33%" valign="top"><b>Up next queue</b><br>Your own queue next to Recommended, auto-refilled with videos that match your taste.</td>
+</tr>
+<tr>
+<td valign="top"><b>Filter by tags</b><br>Hide videos and even whole playlists by tags, performers, rating, length or watch status.</td>
+<td valign="top"><b>Better playlist pages</b><br>Search tags and performers in the queue, sort it, and skip filtered videos while playing.</td>
+<td valign="top"><b>Keyboard first</b><br>Remap every hotkey, bind keys to playlists, and jump anywhere with <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd>.</td>
+</tr>
+</table>
 
 ## Install
 
 1. Install a userscript manager: [Tampermonkey](https://www.tampermonkey.net/) or [Violentmonkey](https://violentmonkey.github.io/).
-2. Open **[pmvh-extended.user.js](https://raw.githubusercontent.com/shooptydoopty-glitch/pmvh-extended/main/pmvh-extended.user.js)**; your userscript manager offers to install it.
-3. Reload PMVHaven and log in. Your playlists load in the background on first visit.
+2. Open **[pmvh-extended.user.js](https://raw.githubusercontent.com/shooptydoopty-glitch/pmvh-extended/main/pmvh-extended.user.js)** — your userscript manager offers to install it.
+3. Reload PMVHaven and log in. Your playlists load in the background on the first visit.
 
-Updates are picked up automatically by the userscript manager.
+Updates arrive automatically through your userscript manager.
 
-## Features
+## A quick tour
 
-### Playlists everywhere
-- **Playlist badges** on video cards across the site, with the playlist names in the tooltip.
-- **Playlist buttons** under the player on video pages: one click adds or removes the video. The site's own "Add to playlist" button lights up when the video is already saved.
-- **Right-click menu** on any video card: toggle the video in each of your playlists, add it to Up next, open it in a new tab.
-- **Reject list**: choose one playlist as your reject list. Adding a video there removes it from every other playlist, and rejected videos show in red. Cards get a one-click reject button.
+### Your playlists, everywhere
+
+Every video shows whether it is already in one of your playlists, and adding or removing it takes one click — under the player, on any card, or from the right-click menu.
+
+![Playlist buttons under the player](docs/screenshots/03-playlist-buttons.png)
+*① Your playlists under the player: one click adds or removes the video. ② The site's own Add to playlist button lights up when the video is saved.*
+
+<table>
+<tr>
+<td width="50%" valign="top"><img src="docs/screenshots/04-recommended.png" alt="Recommended with playlist badges"><br><sub>① All / In playlist / Not in playlist. ② Playlist badge on saved videos. ③ Add to Up next.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/17-context-menu.png" alt="Right-click menu on a video card"><br><sub>① Right-click any video card to toggle it in your playlists or open it in a new tab.</sub></td>
+</tr>
+</table>
+
+<details>
+<summary>More</summary>
+
+- Badges on the home, browse, search and profile grids, *Recommended*, *More from* and notifications.
+- **Reject list**: pick one playlist as your reject list. Adding a video there removes it from every other playlist; rejected videos show in red, and cards get a one-click reject button.
+- **Watch history**: a video counts as watched at 85 % or when it ends — usable in the filters.
 - Playlists are cached locally and kept in sync across tabs; refresh any time with <kbd>R</kbd>.
-
-### Video page
-- **Recommended** sidebar with playlist badges, an *All / In playlist / Not in playlist* filter and "+ Up next" buttons. The *More from* grid gets badges too.
-- **Watch history**: a video counts as watched at 85 % or when it ends. Used by the *Watched / Unwatched* filters.
 - Players that come back empty after Back/Forward are repaired automatically.
 
-### Fullscreen HUD
-- Move the mouse to the bottom of the screen (or press <kbd>I</kbd>) for a panel with like/dislike/favourite, title, creator, rating, date, tags and performers, your playlist buttons, timeline thumbnails and the next item in Up next.
-- **Click a tag** to require it in the filter; click again to exclude it, a third time to clear it.
-- Up next keeps playing in fullscreen instead of dropping out to the page.
+</details>
+
+### A HUD for fullscreen
+
+Move the mouse to the bottom of the screen — or press <kbd>I</kbd> — and everything about the video is there: rating, tags and performers, your playlist buttons, the timeline and what plays next. Click a tag to require it in your filter, click again to exclude it.
+
+![Fullscreen HUD](docs/screenshots/07-fullscreen-hud.png)
+*① Click a tag to require, exclude or clear it in the filter. ② Playlist buttons. ③ Timeline thumbnails. ④ Next video in Up next.*
+
+A frame preview follows the mouse along the seek bar, in normal and fullscreen mode.
+
+![Seekbar preview](docs/screenshots/06-seekbar-preview.png)
+*① Frame preview while you hover the seek bar.*
+
+<details>
+<summary>More</summary>
+
+- Up next keeps playing in fullscreen instead of dropping you back to the page.
 - On playlist pages, move the mouse to the right edge to slide in the queue.
+- The seekbar preview uses the site's timeline thumbnails; an optional live mode builds a denser frame cache in the background.
 
-### Seekbar preview
-- A frame preview above the seek bar, in normal and fullscreen mode. Choose between a live frame cache, the site's timeline thumbnails only, or off.
+</details>
 
-### Up next queue
-- Your own queue next to *Recommended*, also available from a header button.
-- Add videos from cards, the right-click menu or a hotkey; drag to reorder; played items stay as history.
+### Up next, your way
+
+Line up videos from any card, the right-click menu or a hotkey. The queue lives next to *Recommended* and in the header, survives reloads, and <kbd>N</kbd> follows it.
+
+![Up next queue next to the player](docs/screenshots/05-up-next.png)
+*① The Up next queue sits above Recommended. ② It is also available from the header.*
+
+<details>
+<summary>More</summary>
+
 - **Auto-refill** from Recommended, ranked by how well the tags match your own playlists, optionally through your filter.
 - **Fill from your playlists** by count, minimum rating, maximum length, unwatched only and tag.
-- Survives reloads and navigation within the tab. <kbd>N</kbd> follows Up next while it has items.
+- Drag to reorder; played items stay as history.
 
-### Site-wide video filter
-Available from the funnel button in the header; applies to the home, browse, search and profile grids, Recommended and *More from*.
-- Exclude or require terms in title, uploader, tags and performers (quoted phrases supported).
-- Rating range, maximum length, watched/unwatched, in / not in selected playlists, and any of your saved searches.
-- On/off switch with a count of hidden videos.
+</details>
+
+### Filter what you see
+
+One filter for the whole site, from the funnel in the header: exclude or require terms in titles, uploaders, tags and performers, and narrow by rating, length, watch status, playlists or one of your saved searches.
+
+<img src="docs/screenshots/01-header.png" alt="Header buttons" width="600">
+
+*① Site-wide video filter. ② Up next queue, with the number of queued videos.*
+
+![Video grid with playlist badges and filter buttons](docs/screenshots/16-browse-grid.png)
+*① Only in / not in your playlists. ② Playlist badge on saved videos. ③ Open in a new tab, add to Up next.*
+
+<details>
+<summary>The filter panel</summary>
+
+![Site-wide filter panel](docs/screenshots/02-filter-panel.png)
+*① The funnel in the header opens the filter. ② Terms, rating, length, playlists and watched status. ③ On/off switch.*
+
+- Quoted phrases are supported; an on/off switch keeps your settings.
 - Pagination helpers: larger pages, one continuous grid, paged mode while filtering, keep loading until enough results remain, skip near-empty pages.
-- Quick *In playlist / Not in playlist* buttons on browse grids.
 
-### Playlist pages (`/playlists/<id>`)
-- The queue search searches **title, tags, performers and optionally the description**.
-- A filter drawer over the queue: excluded and required tags, default terms that apply in every playlist, in / not in playlist, watched/unwatched, rating and duration sliders, saved search. Changes apply on <kbd>Enter</kbd> or *Filters*; an on/off switch keeps the settings.
+</details>
+
+### Playlist pages that keep up
+
+The queue search finally looks at **tags, performers and descriptions**, not just titles. A filter drawer slides over the queue, playback skips whatever you filtered out, and the queue can be sorted by rating or upload date.
+
+<table>
+<tr>
+<td width="50%" valign="top"><img src="docs/screenshots/12-playlist-queue.png" alt="Playlist queue with search, filter switch and sort"><br><sub>① Sort the queue. ② Search titles, tags and performers. ③ Filter on/off.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/13-playlist-filters.png" alt="Filter drawer over the queue"><br><sub>① The filter drawer over the queue.</sub></td>
+</tr>
+</table>
+
+<details>
+<summary>More</summary>
+
+- Drawer: excluded and required tags, default terms that apply in every playlist, in / not in playlist, watched/unwatched, rating and duration sliders, saved search. Changes apply on <kbd>Enter</kbd> or *Filters*.
 - Search syntax: `-term`, `"two words"`, `!in`, `!out`, `!in:name`, `!out:name`, `!seen`, `!unseen`.
-- **Filter-aware playback**: next and auto-advance skip hidden videos, and the *Up Next* preview shows the real next video.
-- Sort the queue by site order, rating or upload date (ascending or descending); <kbd>N</kbd> follows the sort order.
-- *Fetch all* loads the complete playlist and reports metadata coverage. Deep links (`?index=N`) open at the right video even beyond the first page.
+- **Filter-aware playback**: next and auto-advance skip hidden videos, and the *Up Next* preview shows the real next video. <kbd>N</kbd> follows the sort order.
+- *Fetch all* loads the complete playlist; deep links (`?index=N`) open at the right video even beyond the first page.
 
-### Playlist browser (`/playlists`)
-- A *Filters* button in the page's tab row, with an on/off switch and a summary, opens an inline panel.
-- Filter playlists **by the tags and performers of the videos inside them**, with optional share thresholds (for example: hide a playlist when more than 10 % of its videos have a tag).
-- **Overlap badge** on every card: how many of its videos are already in your selected playlists, plus a range filter on that share — e.g. *0 % overlap* to find playlists with nothing you have saved yet.
-- Hide filtered playlists or move them to the bottom. Tag data is cached per playlist and refreshed when its video count changes.
-- Tag data costs one request per playlist, so it is fetched **only when you press *Scan page*** — or automatically if you turn on *Auto-scan*.
+</details>
 
-### Notifications
-- Playlist badges per notification, a tag preview, and a button to select all notifications whose video you already saved.
+### Find playlists worth your time
 
-### Hotkeys and command palette
-- **Every hotkey is remappable** in a visual keyboard editor (*Settings → Assign hotkeys*): bind a key to a built-in action or to one of your playlists. Playlist keys toggle the video; pressing again within 3 seconds confirms a removal.
-- <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd> opens a **command palette** that searches cached videos and your playlists.
-- Player keys (<kbd>Space</kbd>/<kbd>K</kbd>, <kbd>F</kbd>, <kbd>J</kbd>, arrows, <kbd>0</kbd>–<kbd>9</kbd>) keep working after in-site navigation and respect the site's *disable keyboard shortcuts* setting.
+On `/playlists`, filter playlists **by what is inside them**: hide a playlist when more than, say, 10 % of its videos carry a tag you don't like. Every card shows how many of its videos you already have — so *0 % overlap* means nothing but new videos.
 
-Default hotkeys:
+![Playlist browser with overlap badges](docs/screenshots/14-playlists-browser.png)
+*① Filters button with on/off and a summary. ② Overlap with your own playlists on every card.*
 
-| Key | Action |
+![Playlist filter panel](docs/screenshots/15-playlists-filter-panel.png)
+*① Exclude a tag above a share of the videos. ② Scan page / Auto-scan. ③ Result. ④ Your playlist counted for the overlap badge.*
+
+<details>
+<summary>More</summary>
+
+- Hide filtered playlists or move them to the bottom; optionally match playlist descriptions too.
+- Tag data costs one request per playlist, so it is fetched **only when you press *Scan page*** — or automatically with *Auto-scan*. It is cached and refreshed when a playlist's video count changes.
+
+</details>
+
+### Keyboard first
+
+Every hotkey is remappable in a visual editor — bind a key to an action or straight to one of your playlists. The editor shows the defaults and the site's own shortcuts, so nothing gets overwritten by accident. <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd> searches your playlists, cached videos and actions from anywhere.
+
+<table>
+<tr>
+<td width="50%" valign="top"><img src="docs/screenshots/10-hotkey-editor.png" alt="Visual hotkey editor"><br><sub>① Click a key to bind it. ② The action or playlist for that key. ③ Defaults for reference.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/08-command-palette.png" alt="Command palette"><br><sub>① <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd> anywhere. ② Actions. ③ Your playlists. ④ Cached videos.</sub><br><br><img src="docs/screenshots/11-hotkey-overview.png" alt="Hotkey overview"><br><sub>① Press <kbd>?</kbd> for every hotkey.</sub></td>
+</tr>
+</table>
+
+| Default key | Action |
 |-----|--------|
-| <kbd>I</kbd> | Show the HUD panel |
+| <kbd>I</kbd> | Show the HUD |
 | <kbd>N</kbd> | Next video (Up next, or the playlist on playlist pages) |
 | <kbd>M</kbd> | Toggle mute |
-| <kbd>Z</kbd> | Set volume to 100 % |
+| <kbd>Z</kbd> | Volume to 100 % |
 | <kbd>R</kbd> | Refresh playlists |
 | <kbd>?</kbd> | Show all hotkeys |
 
-### Settings and backup
-- A **PMVH Extended** section inside the site's own *Settings* dialog (gear icon in the header): performance mode, seekbar preview, volume lock, reject list, hotkey editor.
-- **Performance mode** for slower computers:
+Player keys (<kbd>Space</kbd>/<kbd>K</kbd>, <kbd>F</kbd>, <kbd>J</kbd>, arrows, <kbd>0</kbd>–<kbd>9</kbd>) keep working after in-site navigation and respect the site's *disable keyboard shortcuts* setting.
 
-  | Mode | Page updates | Visual effects | Background requests | Live seekbar preview |
-  |------|--------------|----------------|---------------------|----------------------|
-  | Smooth | every frame | on | 3 at a time | available |
-  | Balanced (default) | batched (≈8/s) | on | 3 at a time | available |
-  | Light | ≈2–3/s | off — also the site's blur and animations | 1 at a time | off |
-- **Export / import** all settings as JSON (copy, download, or load a file).
+### Make it yours
+
+All options live in a **PMVH Extended** section inside the site's own *Settings* dialog (the gear in the header) — including a performance mode for slower computers and a full settings backup.
+
+<img src="docs/screenshots/09-settings.png" alt="PMVH Extended section in the site's Settings dialog" width="640">
+
+*① Performance mode. ② Seekbar preview source. ③ Reject list. ④ Hotkey editor.*
+
+<details>
+<summary>Performance modes</summary>
+
+| Mode | Page updates | Visual effects | Background requests | Live seekbar preview |
+|------|--------------|----------------|---------------------|----------------------|
+| Smooth | every frame | on | 3 at a time | available |
+| Balanced (default) | batched (≈8/s) | on | 3 at a time | available |
+| Light | ≈2–3/s | off — also the site's blur and animations | 1 at a time | off |
+
+</details>
+
+- **Volume lock** keeps the player unmuted at 100 % (off by default).
+- **Export / import** all settings as JSON — copy, download or load a file.
 
 ## Privacy and fair use
 
-All settings, caches and the watch history are stored in your browser's `localStorage`. The script only talks to `pmvhaven.com`, using the session you are already logged in with.
+Everything runs in your browser. Settings, caches and watch history stay in `localStorage`; the script only talks to `pmvhaven.com`, with the session you are already logged in with. No accounts, servers or trackers.
 
-The script is built to be light on PMVHaven's servers: requests are made on your own actions where possible, results are cached, duplicate requests are shared, and rate limits (HTTP 429) are respected. Heavier background work is opt-in — the live seekbar preview and automatic tag scanning on `/playlists` are off by default.
+PMVH Extended is built to be light on PMVHaven's servers: requests follow your own actions where possible, results are cached, duplicate requests are shared and rate limits (HTTP 429) are respected. Heavier background work — the live seekbar preview and automatic tag scanning on `/playlists` — is opt-in.
 
 ## Development
 
-The userscript is built from the files in `src/`:
+The userscript is built from `src/` with no dependencies:
 
 ```sh
 node build.js   # writes pmvh-extended.user.js
@@ -114,12 +223,16 @@ node build.js   # writes pmvh-extended.user.js
 | File | Contents |
 |------|----------|
 | `src/header.js` | Userscript metadata |
-| `src/core.js` | Shared namespace and startup helpers |
-| `src/filter.js` | Playlist-page filter and the `/playlists` browser filter |
+| `src/core.js` | Shared namespace, startup and performance helpers |
+| `src/filter.js` | Playlist-page filter and the `/playlists` filter |
 | `src/hud.js` | Playlist cache, badges, HUD, Up next, site-wide filter, settings, hotkeys, seekbar preview |
 | `src/browse.js` | In / not-in-playlist buttons on browse grids |
 
-Bug reports and pull requests are welcome.
+Bug reports and pull requests are welcome. How the screenshots were made is described in [docs/screenshots](docs/screenshots/README.md).
+
+## Disclaimer
+
+PMVH Extended is an independent, unofficial project. It is not affiliated with, endorsed by or supported by PMVHaven; "PMVHaven" is a trademark of its owners. Use it at your own risk and respect the site's [terms](https://pmvhaven.com/terms).
 
 ## License
 

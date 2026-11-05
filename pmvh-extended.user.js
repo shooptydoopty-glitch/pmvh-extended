@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.2.1
+// @version      1.2.2
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -11104,7 +11104,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 ${rows}
                 <tr><td colspan="2" style="color:rgba(255,255,255,0.4);padding-top:8px;">Player (only when the site leaves the key alone):</td></tr>
                 ${playerKeyRows().map(([keys, label]) => `<tr><td style="color:rgb(100,255,0);padding-right:16px;">${escHtml(keys)}</td><td>${escHtml(label)}</td></tr>`).join('')}
-                <tr><td colspan="2" style="color:rgba(255,255,255,0.4);padding-top:8px;">In the Negative Filter text box (playlist pages):</td></tr>
+                <tr><td colspan="2" style="color:rgba(255,255,255,0.4);padding-top:8px;">In the playlist filter box (playlist pages):</td></tr>
                 <tr><td style="color:rgb(100,255,0);">Enter</td><td>Apply filter</td></tr>
                 <tr><td style="color:rgb(100,255,0);">Escape</td><td>Clear filter</td></tr>
                 <tr><td colspan="2" style="color:rgba(255,255,255,0.4);padding-top:8px;">Anywhere:</td></tr>
