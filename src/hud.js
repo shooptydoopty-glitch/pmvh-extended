@@ -180,6 +180,7 @@
     };
 
     try { PMVX.state = State; } catch {}
+    PMVX.filterChecks.push(() => State.recFilterMode !== 'all');
 
     // ---------------------------------------------------------------------
     // Utilities
@@ -567,6 +568,10 @@
             const method0 = (args[1]?.method || (args[0] instanceof Request ? args[0].method : 'GET')).toUpperCase();
             const mut = method0 !== 'GET' && u0.match(/\/api\/videos\/([a-f0-9]{24})\//);
             if (mut) forgetVideo(mut[1]);
+            // The site's own favourite toggles keep the card hearts in step.
+            if (mut && /\/favorite$/.test(u0) && typeof args[1]?.body === 'string') {
+                try { const a = JSON.parse(args[1].body).action; if (a) noteFavourite(mut[1], a === 'favorite'); } catch {}
+            }
             // Own lookups (marked quiet) register themselves.
             if (m0 && method0 === 'GET' && !quietUrls.has(u0) && !pendingVideoApiFetches.has(m0[1])) {
                 let resolve;
@@ -871,7 +876,7 @@ ${R} .ts-btn.accent{background:rgba(249,115,22,.2);border-color:rgba(249,115,22,
 ${R} .ts-btn.accent:hover{background:rgba(249,115,22,.3);border-color:rgba(249,115,22,.6);}
 ${R} .ts-row{display:flex;gap:8px;flex-wrap:wrap;} ${R} .ts-row > .ts-btn{flex:1;}
 ${R} textarea{display:block;width:100%;height:110px;padding:8px 12px;resize:vertical;background:#1E1E1E;border:1px solid #2A2A2A;border-radius:8px;
-  color:#fff;font-size:12px;line-height:16px;font-family:ui-monospace,monospace;outline:none;}
+  color:#fff;font-size:12px;line-height:16px;font-family:inherit;font-variant-numeric:tabular-nums;outline:none;}
 ${R} textarea:focus{outline:none;box-shadow:0 0 0 2px rgb(249,115,22);}
 ${R} textarea::placeholder{color:rgb(107,114,128);}
 `;
@@ -918,11 +923,97 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         return { el: wrap, close, paint };
     }
 
+    // A settings card (ts-* styles) with a label, a description and a control under it.
+    function toolsCard(icon, iconColor, label, desc, control) {
+        const c = document.createElement('div');
+        c.className = 'ts-card';
+        c.innerHTML = `<div><label class="ts-lab"><span style="display:inline-flex;${iconColor ? `color:${iconColor};` : ''}">${icon}</span>${label}</label><p class="ts-desc">${desc}</p></div>`;
+        if (control) c.appendChild(control);
+        return c;
+    }
+
+    function moreSettingsCard() {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'ts-btn';
+        b.style.width = '100%';
+        b.innerHTML = `${TS_SVG.gear}Open full settings`;
+        b.onclick = () => {
+            // Close the site's modal (Escape), then go to the section on /settings.
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            document.getElementById('pmv-ts-modal')?.remove();
+            siteNavigate('/settings#pmvx');
+        };
+        return toolsCard(TS_SVG.gear, '', 'More settings', 'Hotkeys, playlist names &amp; colours and backup are on the full settings page', b);
+    }
+
+    function hotkeysCard() {
+        const hk = document.createElement('button');
+        hk.type = 'button';
+        hk.className = 'ts-btn accent';
+        hk.style.width = '100%';
+        hk.innerHTML = `${TS_SVG.keyboard}Assign hotkeys`;
+        hk.onclick = () => buildKeybindingEditor();
+        return toolsCard(TS_SVG.keyboard, '', 'Hotkeys', 'Remap every hotkey, including the playlist buttons', hk);
+    }
+
+    function backupCard() {
+        const keys = Object.keys(collectPmvSettings());
+
+        const bk = document.createElement('div');
+        bk.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+        bk.innerHTML = `
+            <div class="ts-meta">${keys.length} stored key${keys.length === 1 ? '' : 's'}: ${escHtml(keys.map(k => k.replace(/^pmv[a-z]*_?/, '')).join(', ') || '(none)')}</div>
+            <textarea spellcheck="false" placeholder="Export fills this box. To import, paste JSON here or load a file."></textarea>
+            <div class="ts-row">
+                <button type="button" class="ts-btn" data-k="export" title="Fill the box and copy to the clipboard">${TS_SVG.copy}Export</button>
+                <button type="button" class="ts-btn" data-k="download">${TS_SVG.download}Download</button>
+                <button type="button" class="ts-btn" data-k="file" title="Load a .json file into the box">${TS_SVG.upload}Load file</button>
+            </div>
+            <button type="button" class="ts-btn accent" data-k="import">Import (reloads the page)</button>
+            <input type="file" accept="application/json,.json" hidden>`;
+        const ta = bk.querySelector('textarea');
+        const fileInput = bk.querySelector('input[type=file]');
+        const exportJson = () => JSON.stringify(collectPmvSettings(), null, 2);
+        bk.querySelector('[data-k="export"]').onclick = async () => {
+            ta.value = exportJson();
+            ta.select();
+            try { await navigator.clipboard.writeText(ta.value); toast('Settings copied to clipboard', 'green'); } catch {}
+        };
+        bk.querySelector('[data-k="download"]').onclick = () => {
+            const blob = new Blob([exportJson()], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `pmvhaven-settings-${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        };
+        bk.querySelector('[data-k="file"]').onclick = () => fileInput.click();
+        fileInput.onchange = async () => {
+            const f = fileInput.files?.[0];
+            if (!f) return;
+            try { ta.value = await f.text(); } catch { toast('Could not read file'); }
+            fileInput.value = '';
+        };
+        bk.querySelector('[data-k="import"]').onclick = () => {
+            let parsed;
+            try { parsed = JSON.parse(ta.value); }
+            catch { toast('Invalid JSON'); return; }
+            if (!parsed || typeof parsed !== 'object') { toast('Invalid JSON'); return; }
+            const count = applyPmvSettings(parsed);
+            toast(`${count} setting(s) imported - reloading`);
+            setTimeout(() => location.reload(), 1200);
+        };
+        return toolsCard(TS_SVG.database, '', 'Backup', 'Filters, Up next, watch history, hotkeys and playlist names', bk);
+    }
+
     function buildToolsSettingsSection() {
         ensureToolsSettingsStyle();
         const sec = document.createElement('div');
         sec.setAttribute('data-pmv-tools-settings', '1');
-        const keys = Object.keys(collectPmvSettings());
         const card = (icon, iconColor, label, desc) => `
             <div class="ts-card">
                 <div>
@@ -949,8 +1040,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
                 <button type="button" class="ts-sw" role="switch" data-vol><span class="k"></span></button>
             </div></div>
             ${card(TS_SVG.ban, 'rgb(248,113,113)', 'Reject list', 'Adding a video there removes it from every other playlist and shows it red instead of green. The Reject hotkey also skips to the next video.')}
-            ${card(TS_SVG.keyboard, '', 'Hotkeys', 'Remap every hotkey, including the playlist buttons')}
-            ${card(TS_SVG.database, '', 'Backup', 'Filters, Up next, watch history and hotkeys')}
+            <div class="ts-card" data-more></div>
         `;
         const slots = sec.querySelectorAll('[data-slot]');
 
@@ -1007,64 +1097,8 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         });
         slots[1].replaceWith(rejectSel.el);
 
-        // Hotkeys (the editor opens on top of the modal)
-        const hk = document.createElement('button');
-        hk.type = 'button';
-        hk.className = 'ts-btn accent';
-        hk.style.width = '100%';
-        hk.innerHTML = `${TS_SVG.keyboard}Assign hotkeys`;
-        hk.onclick = () => buildKeybindingEditor();
-        slots[2].replaceWith(hk);
-
-        // Backup
-        const bk = document.createElement('div');
-        bk.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
-        bk.innerHTML = `
-            <div class="ts-meta">${keys.length} stored key${keys.length === 1 ? '' : 's'}: ${escHtml(keys.map(k => k.replace(/^pmv[a-z]*_?/, '')).join(', ') || '(none)')}</div>
-            <textarea spellcheck="false" placeholder="Export fills this box. To import, paste JSON here or load a file."></textarea>
-            <div class="ts-row">
-                <button type="button" class="ts-btn" data-k="export" title="Fill the box and copy to the clipboard">${TS_SVG.copy}Export</button>
-                <button type="button" class="ts-btn" data-k="download">${TS_SVG.download}Download</button>
-                <button type="button" class="ts-btn" data-k="file" title="Load a .json file into the box">${TS_SVG.upload}Load file</button>
-            </div>
-            <button type="button" class="ts-btn accent" data-k="import">Import (reloads the page)</button>
-            <input type="file" accept="application/json,.json" hidden>`;
-        slots[3].replaceWith(bk);
-        const ta = bk.querySelector('textarea');
-        const fileInput = bk.querySelector('input[type=file]');
-        const exportJson = () => JSON.stringify(collectPmvSettings(), null, 2);
-        bk.querySelector('[data-k="export"]').onclick = async () => {
-            ta.value = exportJson();
-            ta.select();
-            try { await navigator.clipboard.writeText(ta.value); toast('Settings copied to clipboard', 'green'); } catch {}
-        };
-        bk.querySelector('[data-k="download"]').onclick = () => {
-            const blob = new Blob([exportJson()], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `pmvhaven-settings-${new Date().toISOString().slice(0, 10)}.json`;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
-        };
-        bk.querySelector('[data-k="file"]').onclick = () => fileInput.click();
-        fileInput.onchange = async () => {
-            const f = fileInput.files?.[0];
-            if (!f) return;
-            try { ta.value = await f.text(); } catch { toast('Could not read file'); }
-            fileInput.value = '';
-        };
-        bk.querySelector('[data-k="import"]').onclick = () => {
-            let parsed;
-            try { parsed = JSON.parse(ta.value); }
-            catch { toast('Invalid JSON'); return; }
-            if (!parsed || typeof parsed !== 'object') { toast('Invalid JSON'); return; }
-            const count = applyPmvSettings(parsed);
-            toast(`${count} setting(s) imported - reloading`);
-            setTimeout(() => location.reload(), 1200);
-        };
+        // Advanced settings live on the site's full settings page.
+        sec.querySelector('[data-more]').replaceWith(moreSettingsCard());
 
         // A click elsewhere in the modal folds an open list.
         sec.addEventListener('click', e => {
@@ -1097,6 +1131,355 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         toolsSettingsQueued = true;
         requestAnimationFrame(() => { toolsSettingsQueued = false; try { injectToolsSettings(); } catch {} });
     }).observe(document.body, { childList: true, subtree: true });
+
+    // ---------------------------------------------------------------------
+    // /settings page: playlist names & colours
+    // ---------------------------------------------------------------------
+    // A section in the site's full settings page (same card style as its own sections) for the
+    // per-playlist short names and colours in pmv_playlist_config_v1. Saved on change.
+
+    function savePlaylistConfig() {
+        try {
+            const raw = JSON.parse(localStorage.getItem(PLAYLIST_CONFIG_KEY) || '{}') || {};
+            raw.styles = playlistConfig.styles;
+            if (!raw.order) raw.order = playlistConfig.order;
+            if (!Object.keys(raw.styles).length && !(raw.order || []).length) localStorage.removeItem(PLAYLIST_CONFIG_KEY);
+            else localStorage.setItem(PLAYLIST_CONFIG_KEY, JSON.stringify(raw));
+        } catch {}
+        // Badges and chips pick the new names up on the next pass.
+        document.querySelectorAll('[data-playlist-name], [data-pmv-rec-badge]').forEach(el => el.remove());
+        document.querySelectorAll('[data-pmv-checked], [data-pmv-rec-checked], [data-pmv-mf-checked]').forEach(el => {
+            delete el.dataset.pmvChecked; delete el.dataset.pmvRecChecked; delete el.dataset.pmvMfChecked;
+        });
+        try { scheduleBadges(); } catch {}
+    }
+
+    // Every entry for a playlist: by id, and legacy ones by (lowercased) name.
+    function playlistStyleKeys(p) {
+        const name = p.name || '';
+        return [p.id, name.trim().toLowerCase(), name].filter((k, i, a) => k && a.indexOf(k) === i);
+    }
+    function setPlaylistStyle(p, patch) {
+        const cur = getPlaylistStyle(p.name, p.id) || {};
+        const explicit = playlistStyleKeys(p).map(k => playlistConfig.styles[k]).find(Boolean) || {};
+        playlistStyleKeys(p).forEach(k => delete playlistConfig.styles[k]);
+        const next = { label: explicit.label || null, color: explicit.color || null, ...patch };
+        if (!next.label) delete next.label;
+        if (!next.color) delete next.color;
+        if (Object.keys(next).length) playlistConfig.styles[p.id] = next;
+        return cur;
+    }
+
+    function settingsPageList() {
+        if (location.pathname.replace(/\/+$/, '') !== '/settings') return null;
+        for (const h1 of document.querySelectorAll('h1')) {
+            if (h1.textContent.trim() !== 'Settings') continue;
+            const wrap = h1.closest('.max-w-4xl');
+            const list = wrap && [...wrap.children].find(c => c.classList.contains('space-y-6'));
+            if (list) return list;
+        }
+        return null;
+    }
+
+    function injectSettingsPageSection() {
+        const list = settingsPageList();
+        if (!list || list.querySelector(':scope > #pmvx-settings-names')) return;
+        if (!document.getElementById('pmvx-settings-names-style')) {
+            const st = document.createElement('style');
+            st.id = 'pmvx-settings-names-style';
+            st.textContent = `
+#pmvx-settings-names .pn-row{display:flex;align-items:center;gap:12px;padding:8px 12px;background:#161616;border:1px solid #1F1F1F;border-radius:8px;}
+#pmvx-settings-names .pn-name{flex:1;min-width:0;color:#fff;font-size:14px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+#pmvx-settings-names .pn-name small{color:rgb(107,114,128);font-weight:400;margin-left:6px;font-variant-numeric:tabular-nums;}
+#pmvx-settings-names input[type=text]{width:180px;max-width:40%;background:#1A1A1A;border:1px solid #2A2A2A;border-radius:8px;padding:6px 10px;color:#fff;font-size:13px;outline:none;font-family:inherit;}
+#pmvx-settings-names input[type=text]:focus{border-color:rgba(249,115,22,.6);}
+#pmvx-settings-names input[type=color]{width:28px;height:28px;padding:0;border:1px solid #2A2A2A;border-radius:9999px;background:none;cursor:pointer;flex-shrink:0;overflow:hidden;}
+#pmvx-settings-names input[type=color]::-webkit-color-swatch-wrapper{padding:0;}
+#pmvx-settings-names input[type=color]::-webkit-color-swatch{border:none;border-radius:9999px;}
+#pmvx-settings-names .pn-reset{color:rgb(107,114,128);background:none;border:none;cursor:pointer;padding:6px;border-radius:8px;font-size:13px;line-height:1;}
+#pmvx-settings-names .pn-reset:hover{color:rgb(248,113,113);background:rgba(239,68,68,.1);}
+#pmvx-settings-names .pn-reset[disabled]{visibility:hidden;}
+#pmvx-settings-names .pn-btn{padding:6px 12px;border-radius:8px;border:1px solid #2A2A2A;background:none;color:rgb(156,163,175);font-size:12px;font-weight:500;cursor:pointer;}
+#pmvx-settings-names .pn-btn:hover{border-color:rgba(239,68,68,.5);background:rgba(239,68,68,.1);color:rgb(248,113,113);}`;
+            document.head.appendChild(st);
+        }
+        ensureToolsSettingsStyle();
+        const sec = document.createElement('div');
+        sec.id = 'pmvx-settings-names';
+        sec.className = 'bg-gradient-to-br from-[#1A1A1A] to-[#0F0F0F] border border-[#2A2A2A] rounded-xl p-6 shadow-2xl';
+        sec.innerHTML = `
+            <h2 class="text-xl font-semibold text-white mb-6 flex items-center gap-2 border-b border-[#2A2A2A] pb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-orange-400"><path d="M16 5H3"/><path d="M11 12H3"/><path d="M11 19H3"/><path d="M21 16V5"/><circle cx="18" cy="16" r="3"/></svg>
+                PMVH Extended
+                <span class="text-sm text-gray-500 font-normal" style="margin-left:auto;">Quick settings: gear at the top right</span>
+            </h2>
+            <div data-pmv-tools-settings="1" data-body></div>`;
+        const body = sec.querySelector('[data-body]');
+        const names = document.createElement('div');
+        names.className = 'ts-card';
+        names.innerHTML = `
+            <div>
+                <label class="ts-lab"><span style="display:inline-flex;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 5H3"/><path d="M11 12H3"/><path d="M11 19H3"/><path d="M21 16V5"/><circle cx="18" cy="16" r="3"/></svg></span>Playlist names &amp; colours</label>
+                <p class="ts-desc">Short name shown on playlist buttons, badges and the sidebar (empty = the playlist's own name) and its colour. Saved as you type.</p>
+            </div>
+            <div class="space-y-2" data-rows></div>
+            <div style="display:flex;align-items:center;gap:12px;">
+                <span class="ts-meta" data-status></span>
+                <div style="flex:1"></div>
+                <button type="button" class="pn-btn" data-reset-all>Reset all names &amp; colours</button>
+            </div>`;
+        body.append(hotkeysCard(), names, backupCard());
+        const rowsEl = names.querySelector('[data-rows]');
+        const status = names.querySelector('[data-status]');
+        const flash = t => { status.textContent = t; clearTimeout(flash.t); flash.t = setTimeout(() => { status.textContent = ''; }, 1800); };
+
+        const render = () => {
+            rowsEl.textContent = '';
+            const list = [...State.playlists.values()].sort((a, b) =>
+                playlistSortIndex(a.name) - playlistSortIndex(b.name) || (a.name || '').localeCompare(b.name || ''));
+            if (!list.length) {
+                const e = document.createElement('div');
+                e.className = 'text-sm text-gray-500';
+                e.textContent = 'No playlists loaded yet — open any page while logged in, then come back.';
+                rowsEl.appendChild(e);
+                return;
+            }
+            list.forEach(p => {
+                const explicit = playlistStyleKeys(p).map(k => playlistConfig.styles[k]).find(Boolean) || null;
+                const st = getPlaylistStyle(p.name, p.id) || {};
+                const row = document.createElement('div');
+                row.className = 'pn-row';
+                const color = document.createElement('input');
+                color.type = 'color';
+                color.value = '#' + (isRejectList(p.id) ? REJECT_HEX : (st.color || FALLBACK_COLOR));
+                color.disabled = isRejectList(p.id);
+                color.title = isRejectList(p.id) ? 'The reject list is always red' : 'Colour';
+                const name = document.createElement('div');
+                name.className = 'pn-name';
+                name.title = p.name || p.id;
+                name.textContent = p.name || p.id;
+                const n = document.createElement('small');
+                n.textContent = `${p.ids.size}`;
+                name.appendChild(n);
+                const label = document.createElement('input');
+                label.type = 'text';
+                label.placeholder = 'Short name';
+                label.value = explicit?.label || '';
+                const reset = document.createElement('button');
+                reset.type = 'button';
+                reset.className = 'pn-reset';
+                reset.textContent = '✕';
+                reset.title = 'Reset name and colour';
+                reset.disabled = !explicit;
+                let t = null;
+                label.addEventListener('input', () => {
+                    clearTimeout(t);
+                    t = setTimeout(() => {
+                        setPlaylistStyle(p, { label: label.value.trim() || null });
+                        savePlaylistConfig();
+                        reset.disabled = false;
+                        flash('Saved');
+                    }, 400);
+                });
+                color.addEventListener('change', () => {
+                    setPlaylistStyle(p, { color: color.value.replace('#', '').toLowerCase() });
+                    savePlaylistConfig();
+                    reset.disabled = false;
+                    flash('Saved');
+                });
+                reset.addEventListener('click', () => {
+                    playlistStyleKeys(p).forEach(k => delete playlistConfig.styles[k]);
+                    savePlaylistConfig();
+                    flash('Reset');
+                    render();
+                });
+                row.append(color, name, label, reset);
+                rowsEl.appendChild(row);
+            });
+        };
+        names.querySelector('[data-reset-all]').addEventListener('click', () => {
+            if (!confirm('Reset the short names and colours of all playlists?')) return;
+            Object.keys(playlistConfig.styles).forEach(k => delete playlistConfig.styles[k]);
+            savePlaylistConfig();
+            flash('All reset');
+            render();
+        });
+        render();
+        window.addEventListener('pmv:cache-ready', () => { if (sec.isConnected) render(); });
+        list.appendChild(sec);
+        if (location.hash === '#pmvx') setTimeout(() => sec.scrollIntoView({ block: 'start', behavior: 'smooth' }), 100);
+    }
+
+    // Vue may re-render the page and drop the section; put it back.
+    let settingsPageQueued = false;
+    new MutationObserver(() => {
+        if (settingsPageQueued || location.pathname.replace(/\/+$/, '') !== '/settings') return;
+        settingsPageQueued = true;
+        requestAnimationFrame(() => { settingsPageQueued = false; try { injectSettingsPageSection(); } catch {} });
+    }).observe(document.body, { childList: true, subtree: true });
+
+    // ---------------------------------------------------------------------
+    // Sidebar: "Saved content" group
+    // ---------------------------------------------------------------------
+    // A group under Explore in the site's sidebar: Favorites (the Favorites tab of your profile) and
+    // each of your playlists. Built from clones of the sidebar's own header row and links, so it
+    // matches their style; re-added when Vue re-renders the sidebar. Collapsed state is remembered.
+
+    const SAVED_NAV_KEY = 'pmv_saved_nav_open_v1';
+    const SAVED_NAV_ICON = {
+        bookmark: '<path d="M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z"/>',
+        heart: '<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>',
+        list: '<path d="M16 5H3"/><path d="M11 12H3"/><path d="M11 19H3"/><path d="M21 16V5"/><circle cx="18" cy="16" r="3"/>',
+        ban: '<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+        chevronDown: '<path d="m6 9 6 6 6-6"/>',
+        chevronRight: '<path d="m9 18 6-6-6-6"/>',
+    };
+    let savedNavOpen = (() => { try { return localStorage.getItem(SAVED_NAV_KEY) !== '0'; } catch { return true; } })();
+    let savedNavSig = '';
+
+    // Swaps the drawing of a cloned site icon, keeping its size and classes.
+    function setNavIcon(svgEl, paths) {
+        if (!svgEl) return;
+        svgEl.setAttribute('viewBox', '0 0 24 24');
+        svgEl.innerHTML = `<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</g>`;
+    }
+
+    function siteNavigate(href) {
+        const router = document.querySelector('#__nuxt')?.__vue_app__?.config?.globalProperties?.$router;
+        if (router) router.push(href).catch(() => { location.href = href; });
+        else location.href = href;
+    }
+
+    function savedNavLink(template, href, label, icon, extraTitle) {
+        const a = template.cloneNode(true);
+        [...a.attributes].forEach(at => { if (at.name !== 'class' && !at.name.startsWith('data-v-')) a.removeAttribute(at.name); });
+        a.href = href;
+        a.title = extraTitle || label;
+        a.dataset.pmvSavedNav = '1';
+        a.classList.remove('router-link-active', 'router-link-exact-active');
+        const svgEl = a.querySelector('svg');
+        const span = a.querySelector('span.flex-1') || document.createElement('span');
+        // Keep only the icon and the label: drop badges and Vue comment nodes.
+        a.textContent = '';
+        if (svgEl) { setNavIcon(svgEl, icon); a.appendChild(svgEl); }
+        span.className = 'flex-1';
+        // min-width:0 lets a long name shrink (ellipsis) instead of widening the sidebar.
+        span.style.cssText = 'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;';
+        a.style.minWidth = '0';
+        a.style.maxWidth = '100%';
+        a.style.overflow = 'hidden';
+        span.textContent = label;
+        a.appendChild(span);
+        a.addEventListener('click', e => {
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+            e.preventDefault();
+            siteNavigate(href);
+        });
+        return a;
+    }
+
+    function injectSavedNav() {
+        const exploreToggle = document.querySelector('aside button[aria-label="Toggle Explore submenu"]');
+        const exploreGroup = exploreToggle?.closest('div.mt-1');
+        if (!exploreGroup) return;
+        const existing = document.getElementById('pmvx-saved-nav');
+        const playlists = [...State.playlists.values()].sort((a, b) =>
+            playlistSortIndex(a.name) - playlistSortIndex(b.name) || (a.name || '').localeCompare(b.name || ''));
+        // Logged out (no playlists known): no group.
+        if (!playlists.length) { existing?.remove(); return; }
+        const sig = savedNavOpen + '|' + playlists.map(p => p.id + ':' + getPlaylistDisplayName(p.name, p.id)).join('|');
+        if (existing && existing.previousElementSibling === exploreGroup && savedNavSig === sig) return;
+
+        const headRowTpl = exploreToggle.closest('div.flex.items-center.justify-between');
+        const linkTpl = exploreGroup.querySelector('#watch-videos-group a') || exploreGroup.querySelector('a');
+        if (!headRowTpl || !linkTpl) return;
+
+        const group = document.createElement('div');
+        group.id = 'pmvx-saved-nav';
+        group.className = exploreGroup.className;
+        group.style.minWidth = '0';
+        group.style.maxWidth = '100%';
+
+        // Header: a clone of Explore's row, as a toggle.
+        const head = headRowTpl.cloneNode(true);
+        head.querySelectorAll('[aria-controls],[aria-expanded]').forEach(el => { el.removeAttribute('aria-controls'); el.removeAttribute('aria-expanded'); });
+        const headLink = head.querySelector('a');
+        const toggle = head.querySelector('button');
+        if (headLink) {
+            headLink.removeAttribute('href');
+            headLink.removeAttribute('aria-label');
+            // No role="button": the playlist-page filter finds queue rows by [role="button"].
+            headLink.setAttribute('aria-expanded', savedNavOpen ? 'true' : 'false');
+            headLink.classList.remove('router-link-active', 'router-link-exact-active');
+            headLink.style.cursor = 'pointer';
+            const icon = headLink.querySelector('svg');
+            const iconClone = icon ? icon.cloneNode(false) : null;
+            headLink.textContent = '';
+            if (iconClone) { setNavIcon(iconClone, SAVED_NAV_ICON.bookmark); headLink.appendChild(iconClone); }
+            headLink.appendChild(document.createTextNode(' Saved content '));
+        }
+        if (toggle) {
+            toggle.setAttribute('aria-label', 'Toggle Saved content submenu');
+            setNavIcon(toggle.querySelector('svg'), savedNavOpen ? SAVED_NAV_ICON.chevronDown : SAVED_NAV_ICON.chevronRight);
+        }
+        const flip = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            savedNavOpen = !savedNavOpen;
+            try { localStorage.setItem(SAVED_NAV_KEY, savedNavOpen ? '1' : '0'); } catch {}
+            injectSavedNav();
+        };
+        headLink?.addEventListener('click', flip);
+        toggle?.addEventListener('click', flip);
+        group.appendChild(head);
+
+        if (savedNavOpen) {
+            const items = document.createElement('div');
+            items.className = exploreGroup.querySelector('#watch-videos-group')?.className || 'mt-1 space-y-1 pl-3';
+            items.appendChild(savedNavLink(linkTpl, '/profile#favorites', 'Favorites', SAVED_NAV_ICON.heart));
+            playlists.forEach(p => {
+                const name = getPlaylistDisplayName(p.name, p.id) || p.name || p.id;
+                const rej = isRejectList(p.id);
+                const a = savedNavLink(linkTpl, `/playlists/${p.id}`, name, rej ? SAVED_NAV_ICON.ban : SAVED_NAV_ICON.list,
+                    `${p.name || p.id} — ${p.ids.size} videos`);
+                const n = document.createElement('span');
+                n.textContent = String(p.ids.size);
+                n.style.cssText = 'flex-shrink:0;font-size:11px;color:rgb(107,114,128);font-variant-numeric:tabular-nums;';
+                a.appendChild(n);
+                items.appendChild(a);
+            });
+            group.appendChild(items);
+        }
+
+        savedNavSig = sig;
+        if (existing) existing.replaceWith(group);
+        exploreGroup.after(group);
+    }
+
+    // /profile#favorites: open the Favorites tab once the profile has rendered.
+    let favTabTries = 0;
+    function openFavoritesTabIfAsked() {
+        if (location.pathname.replace(/\/+$/, '') !== '/profile' || location.hash !== '#favorites') { favTabTries = 0; return; }
+        if (favTabTries > 40) return;
+        favTabTries++;
+        const tab = [...document.querySelectorAll('button')].find(b =>
+            b.classList.contains('pb-3') && /^Favorites\b/.test(b.textContent.trim()));
+        if (!tab) return;
+        favTabTries = 99;
+        if (!tab.className.includes('text-orange-400')) tab.click();
+    }
+
+    let savedNavQueued = false;
+    new MutationObserver(() => {
+        if (savedNavQueued) return;
+        savedNavQueued = true;
+        requestAnimationFrame(() => {
+            savedNavQueued = false;
+            try { injectSavedNav(); } catch {}
+            try { openFavoritesTabIfAsked(); } catch {}
+        });
+    }).observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('pmv:cache-ready', () => { try { injectSavedNav(); } catch {} });
 
     // The site's gear: the header button whose lucide:settings icon has the r=3 center circle.
     function siteSettingsButton() {
@@ -1535,7 +1918,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             position: fixed; top: 18%; left: 50%; transform: translateX(-50%);
             background: rgba(20,20,20,0.98); border: 1px solid rgba(255,255,255,0.15);
             border-radius: 10px; z-index: 9999999; width: 480px; max-width: 90vw;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.7); font-family: ui-monospace, monospace;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.7); font-family:inherit;font-variant-numeric:tabular-nums;
             backdrop-filter: blur(10px);
         `;
         box.innerHTML = `
@@ -2578,6 +2961,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     function getCurrentVideoId() {
+        // Playlist pages: the active queue row (border-orange-500) is the playing video. It wins over
+        // currentVideoData, which lags a step when the queue advances, and over the player's poster,
+        // whose hex is a thumbnail asset id; either would leave the playlist pills on the wrong video.
+        if (location.pathname.startsWith('/playlists/')) {
+            const active = getActiveQueueVideoId();
+            if (active) return active;
+        }
         if (State.currentVideoData?.id) return State.currentVideoData.id;
 
         // On /video/ pages the URL hex is the one reliable id before any API response: a mapped slug id
@@ -2872,10 +3262,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             saveCacheSoon();
             refreshQueuePlaylistChips(videoId);
         }
-        // Grace-window marker: lets the playlist-page filter keep this video visible briefly
-        // instead of hiding it the moment it is added.
-        if (!PMVX.justAddedIds) PMVX.justAddedIds = new Map();
-        PMVX.justAddedIds.set(videoId, Date.now());
+        // Filters keep this video visible until they are applied again (see PMVX.markActed).
+        PMVX.markActed(videoId);
 
         // The reject list is exclusive: a video on it is on no other playlist, and saving it to any
         // other playlist removes it from the reject list. Handled here so every surface (HUD row,
@@ -2901,9 +3289,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         State.reverse.get(videoId)?.delete(playlistId);
         saveCacheSoon();
         refreshQueuePlaylistChips(videoId);
-        // Same grace window for removal while filtering on "in list".
-        if (!PMVX.justAddedIds) PMVX.justAddedIds = new Map();
-        PMVX.justAddedIds.set(videoId, Date.now());
+        // Same for removal while filtering on "in list".
+        PMVX.markActed(videoId);
         return true;
     }
 
@@ -3716,7 +4103,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         played.style.cssText = 'height:100%;width:0%;background:rgba(255,255,255,.35);';
 
         const time = document.createElement('div');
-        time.style.cssText = 'position:absolute;right:14px;bottom:5px;font-size:10px;color:rgba(255,255,255,.28);font-family:ui-monospace,monospace;letter-spacing:.05em;';
+        time.style.cssText = 'position:absolute;right:14px;bottom:5px;font-size:10px;color:rgba(255,255,255,.28);font-family:inherit;font-variant-numeric:tabular-nums;letter-spacing:.05em;';
 
         track.appendChild(played);
         bar.appendChild(track);
@@ -5156,13 +5543,40 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     // ✕ on a card: reject the video (see toggleRejectVideo) without opening it. Only present while a
     // reject list is chosen; red if rejected, grey otherwise. `resolveId` gives the API _id
-    // (directly, or via lookup on slug cards).
+    // (directly, or via lookup on slug cards). Kept apart from "+" (pushed to the end of its row) so
+    // the two are not mixed up. While a card filter is active, rejecting takes two clicks: the first
+    // turns the button red ("Reject?"), a second within REJECT_ARM_MS rejects.
+    const REJECT_ARM_MS = 3000;
     function styleRejectCardBtn(btn, on) {
+        const armed = !on && btn.dataset.armed === '1';
         btn.style.cursor = 'pointer';
-        btn.style.background = on ? `rgba(${REJECT_RGB},0.18)` : 'rgba(255,255,255,0.05)';
-        btn.style.borderColor = on ? `rgba(${REJECT_RGB},0.55)` : 'rgba(255,255,255,0.1)';
-        btn.style.color = on ? `rgb(${REJECT_RGB})` : 'rgb(156,163,175)';
-        btn.title = on ? 'Remove from reject list' : 'Reject (move to the reject list, remove from every other playlist)';
+        btn.style.background = armed ? `rgba(${REJECT_RGB},0.85)` : on ? `rgba(${REJECT_RGB},0.18)` : 'rgba(255,255,255,0.05)';
+        btn.style.borderColor = armed ? `rgb(${REJECT_RGB})` : on ? `rgba(${REJECT_RGB},0.55)` : 'rgba(255,255,255,0.1)';
+        btn.style.color = armed ? '#fff' : on ? `rgb(${REJECT_RGB})` : 'rgb(156,163,175)';
+        btn.textContent = armed ? '\u2715 Reject?' : '\u2715';
+        btn.title = armed ? 'Click again to reject'
+            : on ? 'Remove from reject list'
+            : 'Reject (move to the reject list, remove from every other playlist)';
+    }
+
+    function disarmRejectBtn(btn) {
+        clearTimeout(btn._pmvArmTimer);
+        if (btn.dataset.armed !== '1') return;
+        delete btn.dataset.armed;
+        styleRejectCardBtn(btn, btn.dataset.on === '1');
+    }
+
+    // Keeps the ✕ away from "+": last and right-aligned in a flex row, floated right otherwise.
+    function placeRejectBtnApart(btn, parent) {
+        const d = getComputedStyle(parent).display;
+        if (d.includes('flex')) {
+            btn.style.order = '99';
+            btn.style.marginLeft = 'auto';
+        } else {
+            btn.style.cssFloat = 'right';
+            btn.style.marginLeft = '8px';
+        }
+        parent.appendChild(btn);
     }
 
     function rejectCardButtonEl(card, resolveId, initialOn) {
@@ -5170,9 +5584,103 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         btn.type = 'button';
         btn.dataset.pmvRejectBtn = '1';
         btn.dataset.pmvBadge = '1';
-        btn.textContent = '\u2715';
         btn.className = Q_CHIP;
+        btn.dataset.on = initialOn ? '1' : '';
         styleRejectCardBtn(btn, initialOn);
+        btn.addEventListener('mousedown', e => e.stopPropagation());
+        btn.addEventListener('click', async e => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (btn.dataset.busy) return;
+            const on = btn.dataset.on === '1';
+            if (!on && btn.dataset.armed !== '1' && PMVX.anyCardFilterActive()) {
+                btn.dataset.armed = '1';
+                styleRejectCardBtn(btn, false);
+                clearTimeout(btn._pmvArmTimer);
+                btn._pmvArmTimer = setTimeout(() => disarmRejectBtn(btn), REJECT_ARM_MS);
+                return;
+            }
+            disarmRejectBtn(btn);
+            btn.dataset.busy = '1';
+            btn.style.opacity = '0.5';
+            try {
+                const id = await resolveId();
+                if (!id) { toast('Video not found'); return; }
+                const now = await toggleRejectVideo(id);
+                if (now === null) return;
+                btn.dataset.on = now ? '1' : '';
+                styleRejectCardBtn(btn, now);
+                // Re-render this card's badges and tint on the next pass.
+                card.querySelectorAll('[data-playlist-name]').forEach(el => el.remove());
+                delete card.dataset.pmvChecked;
+                delete card.dataset.pmvRecChecked;
+                delete card.dataset.pmvMfChecked;
+                scheduleBadges();
+            } catch {
+                toast('Reject failed');
+            } finally {
+                delete btn.dataset.busy;
+                btn.style.opacity = '';
+            }
+        });
+        return btn;
+    }
+
+    // Badge passes call this for existing buttons; it leaves an armed button alone.
+    function refreshRejectCardBtn(btn, on) {
+        btn.dataset.on = on ? '1' : '';
+        if (on) disarmRejectBtn(btn);
+        styleRejectCardBtn(btn, on);
+    }
+
+    // Heart on a card: favourite / unfavourite without opening the video.
+    //   GET /api/users/favorite-ids -> { favorites: [id, ...] }   (state, loaded once per page load)
+    //   PUT /api/videos/<id>/favorite  { action: "favorite" | "unfavorite" }
+    const FAV_RGB = '244,114,182'; // pink-400, the site's favourites colour
+    const HEART_SVG = on => `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="${on ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`;
+    let favIds = null;          // Set once loaded; null = unknown (logged out or not loaded yet)
+    let favLoad = null;
+    function loadFavIds() {
+        if (favLoad) return favLoad;
+        favLoad = fetch('/api/users/favorite-ids', { credentials: 'include', headers: { accept: 'application/json' } })
+            .then(r => r.ok ? r.json() : null)
+            .then(j => {
+                const list = j?.favorites || j?.data?.favorites;
+                if (Array.isArray(list)) { favIds = new Set(list); refreshFavButtons(); }
+            })
+            .catch(() => {});
+        return favLoad;
+    }
+    function isFavourite(id) { return !!(id && favIds?.has(id)); }
+    function noteFavourite(id, on) {
+        if (!favIds) favIds = new Set();
+        if (on) favIds.add(id); else favIds.delete(id);
+        refreshFavButtons();
+    }
+    function styleFavCardBtn(btn, on) {
+        btn.style.cursor = 'pointer';
+        btn.style.background = on ? `rgba(${FAV_RGB},0.18)` : 'rgba(255,255,255,0.05)';
+        btn.style.borderColor = on ? `rgba(${FAV_RGB},0.55)` : 'rgba(255,255,255,0.1)';
+        btn.style.color = on ? `rgb(${FAV_RGB})` : 'rgb(156,163,175)';
+        btn.title = on ? 'Remove from favourites' : 'Add to favourites';
+        btn.innerHTML = HEART_SVG(on);
+    }
+    function refreshFavButtons() {
+        document.querySelectorAll('[data-pmv-fav-btn]').forEach(btn => {
+            const id = btn._pmvFavId?.();
+            styleFavCardBtn(btn, isFavourite(id));
+        });
+    }
+    // `knownId` gives the API _id if it is known without a request; `resolveId` may fetch it.
+    function favCardButtonEl(knownId, resolveId) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.pmvFavBtn = '1';
+        btn.dataset.pmvBadge = '1';
+        btn.className = Q_CHIP;
+        btn._pmvFavId = knownId;
+        styleFavCardBtn(btn, isFavourite(knownId()));
+        loadFavIds();
         btn.addEventListener('mousedown', e => e.stopPropagation());
         btn.addEventListener('click', async e => {
             e.preventDefault();
@@ -5183,17 +5691,21 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             try {
                 const id = await resolveId();
                 if (!id) { toast('Video not found'); return; }
-                const now = await toggleRejectVideo(id);
-                if (now === null) return;
-                styleRejectCardBtn(btn, now);
-                // Re-render this card's badges and tint on the next pass.
-                card.querySelectorAll('[data-playlist-name]').forEach(el => el.remove());
-                delete card.dataset.pmvChecked;
-                delete card.dataset.pmvRecChecked;
-                delete card.dataset.pmvMfChecked;
-                scheduleBadges();
+                await loadFavIds();
+                const wasOn = isFavourite(id);
+                const res = await fetch(`/api/videos/${id}/favorite`, {
+                    method: 'PUT',
+                    headers: { 'content-type': 'application/json', accept: 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ action: wasOn ? 'unfavorite' : 'favorite' }),
+                });
+                if (!res.ok) { toast(res.status === 401 ? 'Log in to favourite videos' : `Favourite failed (${res.status})`, 'red'); return; }
+                // noteFavourite already ran from the fetch hook; keep the page's own state in step too.
+                if (State.currentVideoData?.id === id) State.currentVideoData.isFavorited = !wasOn;
+                PMVX.markActed(id);
+                toast(wasOn ? '✕ Removed from favourites' : '♥ Added to favourites', wasOn ? null : 'green');
             } catch {
-                toast('Reject failed');
+                toast('Favourite failed', 'red');
             } finally {
                 delete btn.dataset.busy;
                 btn.style.opacity = '';
@@ -5272,10 +5784,16 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 targetRow.appendChild(aqBtn);
             }
 
+            if (!targetRow.querySelector('[data-pmv-fav-btn]')) {
+                const fb = favCardButtonEl(() => card.dataset.videoId || videoId, async () => card.dataset.videoId || videoId);
+                const aq = targetRow.querySelector('[data-pmv-addqueue]');
+                if (aq) aq.after(fb); else targetRow.appendChild(fb);
+            }
+
             const rjBtn = targetRow.querySelector('[data-pmv-reject-btn]');
             if (!rejectPlaylistId) rjBtn?.remove();
-            else if (rjBtn) styleRejectCardBtn(rjBtn, isRejected(videoId));
-            else targetRow.appendChild(rejectCardButtonEl(card, async () => videoId, isRejected(videoId)));
+            else if (rjBtn) refreshRejectCardBtn(rjBtn, isRejected(videoId));
+            else placeRejectBtnApart(rejectCardButtonEl(card, async () => videoId, isRejected(videoId)), targetRow);
 
             if (!State.ready) {
                 if (!targetRow.querySelector('[data-playlist-loading]')) {
@@ -5591,10 +6109,21 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 })
                 .catch(() => noteLookupFailure(slugId));
         });
-        // Before the ✕, so the two read "+ ✕" like on the other cards.
+        // Heart right after "+"; the resolved id is cached, so later clicks need no request.
+        const favBtn = favCardButtonEl(() => knownApiIdForCard(card, slugId), async () => {
+            const id = knownApiIdForCard(card, slugId);
+            if (id) return id;
+            const v = await fetchVideoDeduped(slugId).catch(() => { noteLookupFailure(slugId); return null; });
+            if (!v?._id) return null;
+            State.slugToApiId.set(slugId, v._id);
+            return v._id;
+        });
+        favBtn.style.marginTop = '2px';
+        favBtn.style.marginLeft = '4px';
+        // Before the ✕ in DOM order, so a floated ✕ sits on the same line at the far right.
         const rj = infoDiv.querySelector('[data-pmv-reject-btn]');
-        if (rj) infoDiv.insertBefore(aqBtn, rj);
-        else infoDiv.appendChild(aqBtn);
+        if (rj) { infoDiv.insertBefore(aqBtn, rj); infoDiv.insertBefore(favBtn, rj); }
+        else infoDiv.append(aqBtn, favBtn);
     }
 
     // ✕ on a Recommended / More from card. Placed from the card alone, id resolved
@@ -5603,7 +6132,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const existing = infoDiv.querySelector('[data-pmv-reject-btn]');
         if (!rejectPlaylistId) { existing?.remove(); return; }
         const known = knownApiIdForCard(card, slugId);
-        if (existing) { styleRejectCardBtn(existing, isRejected(known)); return; }
+        if (existing) { refreshRejectCardBtn(existing, isRejected(known)); return; }
         const btn = rejectCardButtonEl(card, async () => {
             const id = knownApiIdForCard(card, slugId);
             if (id) return id;
@@ -5613,17 +6142,17 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             return v._id;
         }, isRejected(known));
         btn.style.marginTop = '2px';
-        btn.style.marginLeft = '4px';
-        infoDiv.appendChild(btn);
+        placeRejectBtnApart(btn, infoDiv);
     }
 
     function placeRecBadge(card, videoId) {
         const inPl = isVideoInPlaylist(videoId);
 
-        if (State.recFilterMode === 'in' && !inPl) {
+        const pinned = PMVX.isActed(videoId);
+        if (State.recFilterMode === 'in' && !inPl && !pinned) {
             card.style.setProperty('display', 'none', 'important'); return;
         }
-        if (State.recFilterMode === 'out' && inPl) {
+        if (State.recFilterMode === 'out' && inPl && !pinned) {
             card.style.setProperty('display', 'none', 'important'); return;
         }
         card.style.removeProperty('display');
@@ -6188,6 +6717,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
             btn.addEventListener('click', () => {
                 State.recFilterMode = mode;
+                PMVX.clearActed();
                 document.querySelectorAll('#pmv-rec-filter button[data-pmv-rec-mode]').forEach(b => {
                     applyRecChipClass(b, b.dataset.pmvRecMode === mode);
                 });
@@ -6715,7 +7245,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             tip.appendChild(canvas);
             const label = document.createElement('div');
             label.style.cssText = 'position:absolute;left:50%;bottom:4px;transform:translateX(-50%);display:none;' +
-                'padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.75);color:#fff;font-size:11px;font-family:ui-monospace,monospace;';
+                'padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.75);color:#fff;font-size:11px;font-family:inherit;font-variant-numeric:tabular-nums;';
             tip.appendChild(label);
             Scrub.tip = tip;
             Scrub.img = img;
@@ -7678,7 +8208,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             background: rgba(20,20,20,0.97); border: 1px solid rgba(255,255,255,0.15);
             border-radius: 12px; padding: 18px 22px; z-index: 999999;
             color: rgba(255,255,255,0.85); font-size: 13px;
-            font-family: ui-monospace, monospace; line-height: 1.9;
+            font-family:inherit;font-variant-numeric:tabular-nums; line-height: 1.9;
             min-width: 340px; backdrop-filter: blur(10px);
         `;
         box.innerHTML = `
@@ -7694,7 +8224,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 <tr><td style="color:rgb(100,255,0);">Ctrl/Cmd+K</td><td>Search (videos, playlists) + open Up next</td></tr>
             </table>
             <div style="margin-top:14px;font-size:11px;color:rgba(255,255,255,0.3);">
-                Bind hotkeys to your own key/playlist: Settings (gear in the header) → PMVH Extended → Assign hotkeys.<br>
+                Bind hotkeys to your own key/playlist: the site's full Settings page (/settings) → PMVH Extended → Assign hotkeys.<br>
                 Press ? again, or click outside this window, to close.
             </div>
         `;

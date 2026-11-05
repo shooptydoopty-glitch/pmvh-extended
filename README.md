@@ -18,7 +18,7 @@
 
 <table>
 <tr>
-<td width="33%" valign="top"><b>Playlists everywhere</b><br>Badges on every card, one-click playlist buttons under the player, a right-click menu.</td>
+<td width="33%" valign="top"><b>Playlists everywhere</b><br>Badges on every card, one-click playlist buttons under the player, favourites and your playlists in the sidebar.</td>
 <td width="33%" valign="top"><b>Fullscreen HUD</b><br>Title, tags, playlists and timeline at the bottom of the screen — without leaving fullscreen.</td>
 <td width="33%" valign="top"><b>Up next queue</b><br>Your own queue next to Recommended, auto-refilled with videos that match your taste.</td>
 </tr>
@@ -48,8 +48,8 @@ Every video shows whether it is already in one of your playlists, and adding or 
 
 <table>
 <tr>
-<td width="50%" valign="top"><img src="docs/screenshots/04-recommended.png" alt="Recommended with playlist badges"><br><sub>① All / In playlist / Not in playlist. ② Playlist badge on saved videos. ③ Add to Up next.</sub></td>
-<td width="50%" valign="top"><img src="docs/screenshots/17-context-menu.png" alt="Right-click menu on a video card"><br><sub>① Right-click any video card to toggle it in your playlists or open it in a new tab.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/04-recommended.png" alt="Recommended with playlist badges"><br><sub>① All / In playlist / Not in playlist. ② Playlist badge on saved videos. ③ Add to Up next, add to favourites. ④ Reject, kept apart from the other buttons.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/17-context-menu.png" alt="Right-click menu on a video card"><br><sub>① Right-click any video card to toggle it in your playlists or open it in a new tab.</sub><br><br><img src="docs/screenshots/19-sidebar.png" alt="Saved content in the sidebar" width="220"><br><sub>① <i>Saved content</i> in the site's sidebar: your favourites and every playlist, with its size.</sub></td>
 </tr>
 </table>
 
@@ -57,7 +57,9 @@ Every video shows whether it is already in one of your playlists, and adding or 
 <summary>More</summary>
 
 - Badges on the home, browse, search and profile grids, *Recommended*, *More from* and notifications.
-- **Reject list**: pick one playlist as your reject list. Adding a video there removes it from every other playlist; rejected videos show in red, and cards get a one-click reject button.
+- **Favourites from any card**: the heart on a card adds or removes the video from your site favourites without opening it.
+- **Reject list**: pick one playlist as your reject list. Adding a video there removes it from every other playlist; rejected videos show in red, and cards get a reject button at the far end of their row. While a filter is on, it asks for a second click first.
+- Saving, removing or rejecting never makes a card vanish under your cursor: filters pick the change up the next time you apply them.
 - **Watch history**: a video counts as watched at 85 % or when it ends — usable in the filters.
 - Playlists are cached locally and kept in sync across tabs; refresh any time with <kbd>R</kbd>.
 - Players that come back empty after Back/Forward are repaired automatically.
@@ -110,7 +112,7 @@ One filter for the whole site, from the funnel in the header: exclude or require
 *① Site-wide video filter. ② Up next queue, with the number of queued videos.*
 
 ![Video grid with playlist badges and filter buttons](docs/screenshots/16-browse-grid.png)
-*① Only in / not in your playlists. ② Playlist badge on saved videos. ③ Open in a new tab, add to Up next.*
+*① Right in the site's own filter menu: only videos in, or not in, your playlists — and which playlists count. It applies with the site's* Apply *and is stored with your saved filters. ② Playlist badge on saved videos. ③ Open in a new tab, add to Up next, add to favourites. ④ Reject.*
 
 <details>
 <summary>The filter panel</summary>
@@ -149,16 +151,18 @@ The queue search finally looks at **tags, performers and descriptions**, not jus
 On `/playlists`, filter playlists **by what is inside them**: hide a playlist when more than, say, 10 % of its videos carry a tag you don't like. Every card shows how many of its videos you already have — so *0 % overlap* means nothing but new videos.
 
 ![Playlist browser with overlap badges](docs/screenshots/14-playlists-browser.png)
-*① Filters button with on/off and a summary. ② Overlap with your own playlists on every card.*
+*① Filters button with on/off and a summary. ② Overlap with your own playlists on every card. ③ Follow a playlist straight from its card.*
 
 ![Playlist filter panel](docs/screenshots/15-playlists-filter-panel.png)
-*① Exclude a tag above a share of the videos. ② Scan page / Auto-scan. ③ Result. ④ Your playlist counted for the overlap badge.*
+*① Exclude a tag above a share of the videos; the count shows how many playlists on the page it removes. ② Scan page / Auto-scan. ③ Result. ④ Your playlist counted for the overlap badge.*
 
 <details>
 <summary>More</summary>
 
 - Hide filtered playlists or move them to the bottom; optionally match playlist descriptions too.
-- Tag data costs one request per playlist, so it is fetched **only when you press *Scan page*** — or automatically with *Auto-scan*. It is cached and refreshed when a playlist's video count changes.
+- Tag data is fetched **only when you press *Scan page*** — or automatically with *Auto-scan*. Playlists with more than 300 videos are sampled (first, last and a few pages in between, about 300 videos) so even huge playlists scan quickly; a ≈ on the card marks a sample, and clicking it scans that playlist in full.
+- Results are cached and refreshed once a playlist's video count changes by more than 10 %.
+- Every filter shows how many playlists it removes, so it is easy to see which one hides too much.
 
 </details>
 
@@ -186,11 +190,14 @@ Player keys (<kbd>Space</kbd>/<kbd>K</kbd>, <kbd>F</kbd>, <kbd>J</kbd>, arrows, 
 
 ### Make it yours
 
-All options live in a **PMVH Extended** section inside the site's own *Settings* dialog (the gear in the header) — including a performance mode for slower computers and a full settings backup.
+Quick options live in a **PMVH Extended** section inside the site's own *Settings* dialog (the gear in the header); the bigger ones sit on the site's full **Settings** page.
 
-<img src="docs/screenshots/09-settings.png" alt="PMVH Extended section in the site's Settings dialog" width="640">
-
-*① Performance mode. ② Seekbar preview source. ③ Reject list. ④ Hotkey editor.*
+<table>
+<tr>
+<td width="50%" valign="top"><img src="docs/screenshots/09-settings.png" alt="PMVH Extended section in the site's Settings dialog"><br><sub>① Performance mode. ② Seekbar preview source. ③ Volume lock. ④ Reject list. ⑤ A shortcut to the full settings page.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/18-full-settings.png" alt="PMVH Extended on the site's full Settings page"><br><sub>① Hotkey editor. ② Short names and colours for your playlists. ③ Settings backup.</sub></td>
+</tr>
+</table>
 
 <details>
 <summary>Performance modes</summary>
@@ -204,6 +211,7 @@ All options live in a **PMVH Extended** section inside the site's own *Settings*
 </details>
 
 - **Volume lock** keeps the player unmuted at 100 % (off by default).
+- **Playlist names & colours**: give long playlist names a short label for the buttons, badges and sidebar, and pick their colour.
 - **Export / import** all settings as JSON — copy, download or load a file.
 
 ## Privacy and fair use
@@ -226,7 +234,7 @@ node build.js   # writes pmvh-extended.user.js
 | `src/core.js` | Shared namespace, startup and performance helpers |
 | `src/filter.js` | Playlist-page filter and the `/playlists` filter |
 | `src/hud.js` | Playlist cache, badges, HUD, Up next, site-wide filter, settings, hotkeys, seekbar preview |
-| `src/browse.js` | In / not-in-playlist buttons on browse grids |
+| `src/browse.js` | In / not-in-playlist filter in the site's filter menu, stored with saved filters |
 
 Bug reports and pull requests are welcome. How the screenshots were made is described in [docs/screenshots](docs/screenshots/README.md).
 

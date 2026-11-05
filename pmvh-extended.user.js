@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.2.2
+// @version      1.2.14
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -80,6 +80,22 @@ function applyEffectsMode() {
     root.appendChild(st);
 }
 applyEffectsMode();
+
+// Videos the user just acted on (saved, removed, rejected). Filters keep showing them until the
+// filter is applied again or the page changes, so an action never makes a card vanish under the
+// cursor. Each filter module calls clearActed() when the user re-applies it.
+let actedPath = location.pathname;
+PMVX.acted = new Set();
+function actedFresh() {
+    if (location.pathname !== actedPath) { actedPath = location.pathname; PMVX.acted.clear(); }
+}
+PMVX.markActed = id => { if (!id) return; actedFresh(); PMVX.acted.add(id); };
+PMVX.isActed = id => { actedFresh(); return !!id && PMVX.acted.has(id); };
+PMVX.clearActed = () => PMVX.acted.clear();
+
+// Card filters register a check here; true while any of them can hide cards on this page.
+PMVX.filterChecks = [];
+PMVX.anyCardFilterActive = () => PMVX.filterChecks.some(fn => { try { return !!fn(); } catch { return false; } });
 
 // Coalesces calls into one run per frame, spaced at least `scanMs` apart.
 PMVX.scheduler = fn => {
@@ -264,6 +280,7 @@ PMVX.scheduler = fn => {
     function filterLive() { return sessionFilterArmed && NF.enabled; }
     function setFilterEnabled(on, { refilter = true } = {}) {
         NF.enabled = !!on;
+        PMVX.clearActed();
         try { localStorage.setItem(ENABLED_KEY, on ? '1' : '0'); } catch {}
         try { NF.renderPower?.(); } catch {}
         try { refreshPendingMarks(); } catch {}
@@ -275,6 +292,13 @@ PMVX.scheduler = fn => {
 
     // True if any filter (text, default terms, playlist, saved search, ranges) is active.
     // Use this, not NF.lastOwnValue, for re-evaluation decisions, or button-only filters are missed.
+    PMVX.filterChecks.push(() => location.pathname.startsWith('/playlists/') && hasAnyActiveFilter());
+    // Queue rows on a playlist page: the site's [role="button"] rows. Anything in the sidebar, a nav or
+    // the script's own UI is not a row, so a stray role="button" elsewhere cannot hijack the filter.
+    function queueRows() {
+        return [...document.querySelectorAll('[role="button"]')].filter(r => !r.closest('aside, nav, [id^="pmv"]'));
+    }
+
     function hasAnyActiveFilter() {
         return filterLive() && (
             !!NF.lastOwnValue
@@ -823,14 +847,9 @@ PMVX.scheduler = fn => {
         autoFetchAllIfNeeded(effectiveValue, hasOwnFilter, needsMeta);
 
         // All queue rows.
-        const rows = document.querySelectorAll('[role="button"]');
+        const rows = queueRows();
         let shown = 0, hidden = 0;
         let activeHidden = false;
-
-        // Grace window: rows just added/removed (PMVX.justAddedIds: Map<id, timestamp>)
-        // stay in place briefly.
-        const GRACE_MS = 2500;
-        const justAddedIds = PMVX.justAddedIds;
 
         // Dedup: the page=1 limit bump can make Vue's pagination return videos already in the
         // enlarged first page. Only the first row per video ID counts; later duplicates are hidden,
@@ -865,14 +884,11 @@ PMVX.scheduler = fn => {
 
             const visible = rowPassesFilter(row, tokens, rowVid, descOn);
 
-            if (!visible) {
-                const addedAt = rowVid && justAddedIds?.get(rowVid);
-                if (addedAt && (Date.now() - addedAt < GRACE_MS)) {
-                    // Just added/removed: keep the row for a moment.
-                    row.style.display = '';
-                    shown++;
-                    return;
-                }
+            if (!visible && PMVX.isActed(rowVid)) {
+                // Just saved/removed/rejected: stays until the filter is applied again.
+                row.style.display = '';
+                shown++;
+                return;
             }
 
             row.style.display = visible ? '' : 'none';
@@ -954,7 +970,7 @@ PMVX.scheduler = fn => {
         if (sortedRowIds) {
             nextVisible = getSortAwareNextRow();
         } else {
-            const rows = Array.from(document.querySelectorAll('[role="button"]'));
+            const rows = queueRows();
             const activeIdx = rows.findIndex(r => r.classList.contains('border-orange-500'));
             nextVisible = null;
             for (let i = activeIdx + 1; i < rows.length; i++) {
@@ -1092,7 +1108,7 @@ PMVX.scheduler = fn => {
     // Next row according to the active sort (filtered); used by triggerNextKey()/attachNIntercept().
     function getSortAwareNextRow() {
         if (!sortedRowIds) return null;
-        const rows = Array.from(document.querySelectorAll('[role="button"]'));
+        const rows = queueRows();
         const byId = new Map(rows.map(r => [getRowVideoId(r), r]));
         const activeRow = rows.find(r => r.classList.contains('border-orange-500'));
         const activeId = activeRow ? getRowVideoId(activeRow) : null;
@@ -1117,7 +1133,7 @@ PMVX.scheduler = fn => {
     }
 
     function applySort(mode) {
-        const list = document.querySelector('[role="button"]')?.parentElement;
+        const list = queueRows()[0]?.parentElement;
         if (!list) return;
         const rows = Array.from(list.querySelectorAll(':scope > [role="button"]'));
         if (!rows.length) return;
@@ -1157,7 +1173,7 @@ PMVX.scheduler = fn => {
 
     // Clears the CSS order override, restoring Vue's DOM order.
     function resetSort() {
-        const list = document.querySelector('[role="button"]')?.parentElement;
+        const list = queueRows()[0]?.parentElement;
         if (list) {
             Array.from(list.querySelectorAll(':scope > [role="button"]'))
                 .forEach(r => r.style.removeProperty('order'));
@@ -1261,7 +1277,7 @@ PMVX.scheduler = fn => {
 .pmvnf-toggle svg{width:12px;height:12px;}
 .pmvnf-chev{padding:0 6px;} .pmvnf-chev svg{transition:transform .15s;} .pmvnf-chev[data-open="1"] svg{transform:rotate(180deg);}
 .pmvnf-toggle.pending{box-shadow:0 0 0 2px rgba(249,115,22,0.45);}
-.pmvnf-toggle .badge{min-width:16px;height:16px;padding:0 4px;border-radius:9999px;background:rgba(0,0,0,0.3);font-size:10px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;font-family:ui-monospace,monospace;}
+.pmvnf-toggle .badge{min-width:16px;height:16px;padding:0 4px;border-radius:9999px;background:rgba(0,0,0,0.3);font-size:10px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;font-family:inherit;font-variant-numeric:tabular-nums;}
 .pmvnf-toggle .badge:empty{display:none;}
 .pmvnf-chips{display:flex;flex-wrap:wrap;gap:4px;}
 .pmvnf-chips:empty{display:none;}
@@ -1271,14 +1287,14 @@ PMVX.scheduler = fn => {
 .pmvnf-tag .x:hover{opacity:1;background:rgba(255,255,255,0.12);}
 .pmvnf-tag.pos{background:rgba(249,115,22,0.2);color:rgb(253,186,116);}
 .pmvnf-tag.neg{background:rgba(239,68,68,0.2);color:rgb(252,165,165);} .pmvnf-tag.neg .txt{text-decoration:line-through;}
-.pmvnf-tag.raw{background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.6);font-family:ui-monospace,monospace;}
+.pmvnf-tag.raw{background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.6);font-family:inherit;font-variant-numeric:tabular-nums;}
 .pmvnf-tag.def{opacity:.75;outline:1px dashed rgba(255,255,255,0.15);outline-offset:-1px;}
 #pmvnf-panel{position:absolute;left:0;right:0;bottom:0;z-index:30;display:none;flex-direction:column;background:#1A1A1A;}
 #pmvnf-panel[data-open="1"]{display:flex;}
 .pmvnf-body{flex:1;min-height:0;overflow-y:auto;padding:12px 16px 8px;display:flex;flex-direction:column;gap:12px;}
 .pmvnf-sec{display:flex;flex-direction:column;gap:5px;}
 .pmvnf-lab{font-size:10px;font-weight:600;color:rgb(156,163,175);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;gap:6px;}
-.pmvnf-lab .r{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:400;color:rgba(255,255,255,0.35);font-family:ui-monospace,monospace;}
+.pmvnf-lab .r{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:400;color:rgba(255,255,255,0.35);font-family:inherit;font-variant-numeric:tabular-nums;}
 #pmvnf-panel input[type=text]{width:100%;padding:6px 10px;border-radius:4px;border:none;outline:none;background:#272727;color:rgb(229,231,235);font-size:12px;font-family:inherit;transition:background .15s;}
 #pmvnf-panel input[type=text]:focus{background:#323232;outline:none !important;box-shadow:none !important;}
 #pmvnf-panel input::placeholder{color:rgb(107,114,128);}
@@ -1315,8 +1331,8 @@ PMVX.scheduler = fn => {
 .pmvnf-apply.pending{box-shadow:0 0 0 2px rgba(249,115,22,0.35);}
 .pmvnf-close{margin-left:auto;background:transparent;border:none;color:rgb(156,163,175);cursor:pointer;font-size:11px;font-family:inherit;padding:4px 6px;border-radius:4px;}
 .pmvnf-close:hover{background:#272727;color:#fff;}
-#pmvnf-counter{font-size:10px;color:rgba(255,255,255,0.4);font-family:ui-monospace,monospace;white-space:nowrap;}
-#pmvnf-fetchall-status{font-size:10px;color:rgba(255,255,255,0.3);white-space:nowrap;font-family:ui-monospace,monospace;}
+#pmvnf-counter{font-size:10px;color:rgba(255,255,255,0.4);font-family:inherit;font-variant-numeric:tabular-nums;white-space:nowrap;}
+#pmvnf-fetchall-status{font-size:10px;color:rgba(255,255,255,0.3);white-space:nowrap;font-family:inherit;font-variant-numeric:tabular-nums;}
 #pmvnf-qfoot{display:flex;align-items:center;gap:8px;padding:6px 12px;border-top:1px solid #2A2A2A;background:#1A1A1A;flex-shrink:0;}
 /* native custom-select look (scaled to the sidebar) */
 .pmvnf-sel{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border-radius:6px;cursor:pointer;text-align:left;
@@ -1325,7 +1341,7 @@ PMVX.scheduler = fn => {
 .pmvnf-sel[data-open="1"]{border-color:rgb(249,115,22);}
 .pmvnf-sel .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .pmvnf-sel .t.ph{color:rgb(107,114,128);}
-.pmvnf-sel .n{color:rgba(255,255,255,0.4);font-size:10px;font-family:ui-monospace,monospace;}
+.pmvnf-sel .n{color:rgba(255,255,255,0.4);font-size:10px;font-family:inherit;font-variant-numeric:tabular-nums;}
 .pmvnf-sel svg{width:14px;height:14px;color:rgb(156,163,175);flex-shrink:0;transition:transform .15s;}
 .pmvnf-sel[data-open="1"] svg{transform:rotate(180deg);}
 .pmvnf-sel.native{width:auto;padding:6px 8px;border-radius:4px;background:#272727;border:none;color:rgb(209,213,219);font-size:11px;font-weight:500;}
@@ -1516,7 +1532,7 @@ PMVX.scheduler = fn => {
     // Fetch all footer under the queue list (not in the drawer). Re-attached when missing.
     function injectQueueFooter() {
         if (document.getElementById('pmvnf-qfoot')) return;
-        const list = document.querySelector('[role="button"]')?.closest('.overflow-y-auto');
+        const list = queueRows()[0]?.closest('.overflow-y-auto');
         const card = list?.parentElement;
         if (!list || !card) return;
         const foot = mk('div'); foot.id = 'pmvnf-qfoot';
@@ -1582,22 +1598,28 @@ PMVX.scheduler = fn => {
         const body = mk('div', 'pmvnf-body');
         panel.appendChild(body);
         (card || document.body).appendChild(panel);
+        // The drawer fills the card below the header. A filter that leaves only a few rows shrinks the
+        // card, so while the drawer is open the card keeps a minimum height (header + DRAWER_MIN).
         const placePanel = () => {
             if (!card || !header) return;
-            const top = header.getBoundingClientRect().bottom - card.getBoundingClientRect().top;
-            panel.style.top = Math.max(0, Math.round(top)) + 'px';
+            const top = Math.max(0, Math.round(header.getBoundingClientRect().bottom - card.getBoundingClientRect().top));
+            panel.style.top = top + 'px';
             const foot = document.getElementById('pmvnf-qfoot');
-            panel.style.bottom = (foot ? Math.round(foot.getBoundingClientRect().height) : 0) + 'px';
+            const footH = foot ? Math.round(foot.getBoundingClientRect().height) : 0;
+            panel.style.bottom = footH + 'px';
+            const want = UI.open ? (top + Math.round(Math.min(520, window.innerHeight * 0.7)) + footH) + 'px' : '';
+            if (card.style.minHeight !== want) card.style.minHeight = want;
         };
         placePanel();
-        try { new ResizeObserver(placePanel).observe(header); } catch {}
+        try { const ro = new ResizeObserver(placePanel); ro.observe(header); ro.observe(card); } catch {}
         const setOpen = (v) => {
             UI.open = v;
             panel.dataset.open = v ? '1' : '0';
             chev.dataset.open = v ? '1' : '0';
             chev.title = v ? 'Collapse filters' : 'Expand filters';
             try { localStorage.setItem(UI_OPEN_KEY, v ? '1' : '0'); } catch {}
-            if (v) { placePanel(); loadSavedSearchList(); }
+            placePanel();
+            if (v) loadSavedSearchList();
             else closeDd();
         };
         toggle.onclick = () => applyAll();
@@ -1837,6 +1859,7 @@ PMVX.scheduler = fn => {
     function onOwnInput(value) {
         // First Enter/Filter press arms filtering (see sessionFilterArmed).
         sessionFilterArmed = true;
+        PMVX.clearActed();
         // Applying implies the filter switch turns on.
         if (!NF.enabled) setFilterEnabled(true, { refilter: false });
 
@@ -1893,7 +1916,7 @@ PMVX.scheduler = fn => {
     let watchedListContainer = null;
 
     function watchVideoList() {
-        const list = document.querySelector('[role="button"]')?.parentElement;
+        const list = queueRows()[0]?.parentElement;
         if (!list) return;
 
         // Reattach if Vue replaced the container (the old observer would watch a detached node).
@@ -1931,7 +1954,7 @@ PMVX.scheduler = fn => {
 
     // First visible row after the current active row.
     function findNextVisibleRow() {
-        const rows = Array.from(document.querySelectorAll('[role="button"]'));
+        const rows = queueRows();
         const activeIdx = rows.findIndex(r => r.classList.contains('border-orange-500'));
         for (let i = activeIdx + 1; i < rows.length; i++) {
             if (!rowShouldBeHidden(rows[i])) return rows[i];
@@ -1965,7 +1988,7 @@ PMVX.scheduler = fn => {
             if (!nextRow) return; // no visible next: native N
 
             // Would Vue's own next row be filtered?
-            const rows = Array.from(document.querySelectorAll('[role="button"]'));
+            const rows = queueRows();
             const activeIdx = rows.findIndex(r => r.classList.contains('border-orange-500'));
             const vueNext = rows[activeIdx + 1];
 
@@ -2003,7 +2026,7 @@ PMVX.scheduler = fn => {
     function watchActiveRow() {
         if (activeRowObserver) return;
 
-        const container = document.querySelector('[role="button"]')?.parentElement;
+        const container = queueRows()[0]?.parentElement;
         if (!container) return;
 
         let lastActiveRow = container.querySelector('.border-orange-500');
@@ -2086,7 +2109,7 @@ PMVX.scheduler = fn => {
     // Sets the fetchAll flag, scrolls to the absolute bottom (relative scrollBy is unreliable) and polls until
     // untilPredicate holds or the row count stops growing for 3 checks. Updates no UI.
     async function runFetchAllCycle({ untilPredicate = null, maxWaitMs = 20000, pollMs = 400 } = {}) {
-        const scrollEl = document.querySelector('[role="button"]')?.closest('.overflow-y-auto');
+        const scrollEl = queueRows()[0]?.closest('.overflow-y-auto');
         if (!scrollEl) return { ok: false, reason: 'no-scroll-container', rowCount: 0, waitedMs: 0 };
 
         PMVX.forceFetchAllNext = true;
@@ -2097,14 +2120,14 @@ PMVX.scheduler = fn => {
         kickScroll();
 
         let waited = 0;
-        let rowCount = document.querySelectorAll('[role="button"]').length;
+        let rowCount = queueRows().length;
         let stableTicks = 0;
         let ticksSinceKick = 0;
         let hitPredicate = false;
         while (waited < maxWaitMs) {
             await new Promise(r => setTimeout(r, pollMs));
             waited += pollMs;
-            const newCount = document.querySelectorAll('[role="button"]').length;
+            const newCount = queueRows().length;
             const grew = newCount !== rowCount;
             rowCount = newCount;
             if (untilPredicate) {
@@ -2135,7 +2158,7 @@ PMVX.scheduler = fn => {
 
     // Number of DOM rows that have a videoMeta entry (tags/stars) in the shared cache.
     function getMetaCoverage() {
-        const rows = document.querySelectorAll('[role="button"]');
+        const rows = queueRows();
         const videoMeta = PMVX.state?.videoMeta;
         let withMeta = 0, unknownId = 0;
         rows.forEach(row => {
@@ -2169,7 +2192,7 @@ PMVX.scheduler = fn => {
         if (catchUpRunning) return;
         catchUpRunning = true;
 
-        const startRowCount = document.querySelectorAll('[role="button"]').length;
+        const startRowCount = queueRows().length;
 
         // Force fetchAll=true on Vue's next page fetch (honored by the core): one large fetch instead of many scroll rounds.
         const { ok, rowCount, waitedMs } = await runFetchAllCycle({
@@ -2185,7 +2208,7 @@ PMVX.scheduler = fn => {
 
         if (rowCount > urlIndex) {
             hideAndUnloadOutsideWindow(urlIndex);
-            const rowsNow = document.querySelectorAll('[role="button"]');
+            const rowsNow = queueRows();
             const activeRow = rowsNow[urlIndex] || document.querySelector('.border-orange-500');
             activeRow?.scrollIntoView({ block: 'center', behavior: 'instant' });
         }
@@ -2195,7 +2218,7 @@ PMVX.scheduler = fn => {
 
     // Hide and unload (img.src='') rows more than CATCHUP_UNLOAD_BUFFER ahead of the target; row nodes stay for Vue's v-for.
     function hideAndUnloadOutsideWindow(targetIdx) {
-        const rows = Array.from(document.querySelectorAll('[role="button"]'));
+        const rows = queueRows();
         const cutoff = Math.max(0, targetIdx - CATCHUP_UNLOAD_BUFFER);
         for (let i = 0; i < cutoff; i++) {
             const row = rows[i];
@@ -2217,7 +2240,7 @@ PMVX.scheduler = fn => {
         // and does no client fetch the core could enlarge.
         try {
             const urlIndex = parseInt(new URLSearchParams(location.search).get('index') || '', 10);
-            const rowCount = document.querySelectorAll('[role="button"]').length;
+            const rowCount = queueRows().length;
             if (Number.isFinite(urlIndex) && urlIndex >= rowCount) {
                 catchUpToDeeplinkIndex(urlIndex);
             }
@@ -2274,7 +2297,7 @@ PMVX.scheduler = fn => {
     function checkForStuckHugePlaylist() {
         if (!location.pathname.startsWith('/playlists/')) return;
         setTimeout(() => {
-            if (document.querySelector('[role="button"]')) return; // loaded fine
+            if (queueRows()[0]) return; // loaded fine
             if (!document.body.innerText.includes('Loading playlist')) return;
             if (document.getElementById('pmvnf-stuck-notice')) return;
             const box = document.createElement('div');
@@ -2284,7 +2307,7 @@ PMVX.scheduler = fn => {
                 background: rgba(20,20,20,0.97); border: 1px solid rgba(250,204,21,0.4);
                 border-radius: 8px; padding: 10px 14px; max-width: 300px;
                 color: rgba(255,255,255,0.85); font-size: 12px;
-                font-family: ui-monospace, monospace; line-height: 1.6;
+                font-family:inherit;font-variant-numeric:tabular-nums; line-height: 1.6;
                 box-shadow: 0 4px 16px rgba(0,0,0,0.6);
             `;
             box.innerHTML = `
@@ -2366,6 +2389,7 @@ PMVX.scheduler = fn => {
             enabled: true,      // off: nothing hidden or sunk
             autoScan: false,    // fetch playlist tags automatically; off = only on "Scan page"
             scanIds: new Set(), // playlists the user asked to scan (manual mode)
+            fullIds: new Set(), // playlists to fetch whole next time (✓ refetch), not sampled
             desc: true,         // also match the description
             tokens: { neg: [], pos: [] },
             listInfo: new Map(),  // id → { count, name }
@@ -2404,8 +2428,8 @@ PMVX.scheduler = fn => {
                 const s = JSON.parse(localStorage.getItem(KEY_SETTINGS) || 'null');
                 if (s && s.terms && Array.isArray(s.terms.neg) && Array.isArray(s.terms.pos)) {
                     PB.terms = {
-                        neg: s.terms.neg.filter(t => t && typeof t.term === 'string').map(t => ({ term: t.term.toLowerCase(), max: parseBound(t.max) ?? 0 })),
-                        pos: s.terms.pos.filter(t => t && typeof t.term === 'string').map(t => ({ term: t.term.toLowerCase(), min: parseBound(t.min) })),
+                        neg: s.terms.neg.filter(t => t && typeof t.term === 'string' && t.term.trim()).map(t => ({ term: t.term.trim().toLowerCase(), max: parseBound(t.max) ?? 0 })),
+                        pos: s.terms.pos.filter(t => t && typeof t.term === 'string' && t.term.trim()).map(t => ({ term: t.term.trim().toLowerCase(), min: parseBound(t.min) })),
                     };
                 } else if (PB.raw) {
                     // Migrate the legacy typed syntax once.
@@ -2545,11 +2569,15 @@ PMVX.scheduler = fn => {
             const n = parseInt(t, 10);
             return Number.isFinite(n) ? n : null;
         }
-        // A cached playlist is reused until its video count changes or refresh is pressed.
+        // A cached playlist is reused until its video count has changed by more than RESCAN_SHARE
+        // (up or down) since the scan, or refresh is pressed. Small additions barely move tag shares;
+        // small playlists still rescan on almost any change (1 of 10 videos is 10%).
+        const RESCAN_SHARE = 0.10;
         function isFresh(entry, count) {
             if (!entry) return false;
-            if (count != null && entry.count != null && entry.count !== count) return false;
-            return true;
+            if (count == null || entry.count == null || entry.count === count) return true;
+            const base = Math.max(1, entry.count);
+            return Math.abs(count - entry.count) / base <= RESCAN_SHARE;
         }
         // Clicking a card's cached marker (an ::after pseudo-element, so nothing is injected into Vue's card)
         // refetches that playlist; detected by position. Capture phase keeps the router from navigating.
@@ -2557,6 +2585,7 @@ PMVX.scheduler = fn => {
         function refreshOne(id) {
             if (!id) return;
             PB.scanIds.add(id);
+            PB.fullIds.add(id); // a manual refetch reads the whole playlist, not a sample
             PB.tags.delete(id);
             PB.failed.delete(id);
             fracMemo.clear();
@@ -2591,15 +2620,16 @@ PMVX.scheduler = fn => {
             let resolve;
             const p = new Promise(r => { resolve = r; });
             PB.pending.set(id, p);
-            PB.queue.push({ id, count, resolve });
+            PB.queue.push({ id, count, resolve, full: PB.fullIds.has(id) });
             pump();
         }
         function pump() {
             while (PB.running < Math.min(CONCURRENCY, PMVX.perf().lookups) && PB.queue.length) {
                 const job = PB.queue.shift();
                 PB.running++;
-                fetchTags(job.id).then(({ tags, vids, desc }) => {
-                    PB.tags.set(job.id, { count: job.count, at: Date.now(), tags, vids, desc });
+                fetchTags(job.id, job.count, job.full).then(({ tags, vids, desc, sampled }) => {
+                    PB.fullIds.delete(job.id);
+                    PB.tags.set(job.id, { count: job.count, at: Date.now(), tags, vids, desc, sampled });
                     saveCacheSoon();
                 }).catch(err => {
                     PB.failed.add(job.id);
@@ -2613,17 +2643,69 @@ PMVX.scheduler = fn => {
             }
         }
         // Quiet: these requests are skipped by the core's indexes (PMVX.quietUrls); the body is parsed once (pmvResJson).
-        async function fetchTags(id) {
-            const url = `/api/playlists/${id}?fetchAll=true`;
+        async function getPlaylistJson(url) {
             quietUrls.add(url);
             let res;
             try { res = await fetch(url, { credentials: 'include' }); }
             finally { quietUrls.delete(url); }
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const j = await pmvResJson(res);
-            const root = j?.data || j;
-            const details = root?.videoDetails || [];
-            const desc = String(root?.description || '');
+            return j?.data || j;
+        }
+        // Large playlists are sampled instead of fetched whole: the first page, the last page and a few
+        // evenly spaced pages in between (SAMPLE_PAGE videos each). Tag shares are proportions, so a
+        // spread-out sample estimates them well, and the work stays bounded (at most 6 small requests,
+        // ~300 videos) however long the playlist is. Pages:
+        //   count <= FULL_UNDER        → everything (one fetchAll request)
+        //   otherwise P = ceil(count / SAMPLE_PAGE), middle pages m = clamp(round(log2(count / 100)), 1, 4)
+        //   → pages 1, P and round(1 + i·(P−1)/(m+1)) for i = 1..m
+        // e.g. 400 → 4 pages (200 videos), 1000 → 5 (250), 5000+ → 6 (300).
+        // Clicking ✓ on a card fetches that playlist in full.
+        const FULL_UNDER = 300;
+        const SAMPLE_PAGE = 50;
+        function samplePages(count) {
+            const P = Math.ceil(count / SAMPLE_PAGE);
+            const m = Math.max(1, Math.min(4, Math.round(Math.log2(count / 100))));
+            const pages = new Set([1, P]);
+            for (let i = 1; i <= m; i++) pages.add(Math.round(1 + i * (P - 1) / (m + 1)));
+            return [...pages].sort((a, b) => a - b);
+        }
+        async function fetchTags(id, count, full) {
+            let details = [];
+            let desc = '';
+            let sampled = null;
+            if (full || !Number.isFinite(count) || count <= FULL_UNDER) {
+                const root = await getPlaylistJson(`/api/playlists/${id}?fetchAll=true`);
+                details = root?.videoDetails || [];
+                desc = String(root?.description || '');
+            } else {
+                // One after another: these run next to other playlists' jobs already.
+                const seen = new Set();
+                let ok = 0, lastErr = null;
+                for (const page of samplePages(count)) {
+                    const url = `/api/playlists/${id}?page=${page}&limit=${SAMPLE_PAGE}`;
+                    let root = null;
+                    for (let attempt = 0; attempt < 2 && !root; attempt++) {
+                        try { root = await getPlaylistJson(url); }
+                        catch (e) {
+                            lastErr = e;
+                            if (attempt === 0 && /429/.test(e.message)) await new Promise(r => setTimeout(r, 1500));
+                            else break;
+                        }
+                    }
+                    if (!root) continue; // one missing page leaves a smaller sample, not a failed scan
+                    ok++;
+                    if (!desc) desc = String(root?.description || '');
+                    (root?.videoDetails || []).forEach(v => {
+                        const key = v?._id || v?.id;
+                        if (key && seen.has(key)) return;
+                        if (key) seen.add(key);
+                        details.push(v);
+                    });
+                }
+                if (!ok) throw lastErr || new Error('no pages');
+                sampled = { n: details.length, of: count };
+            }
             // tags: playlist-local vocabulary; vids: per-video indices into it.
             const vocab = new Map();
             const vids = [];
@@ -2641,7 +2723,7 @@ PMVX.scheduler = fn => {
                 });
                 vids.push(idx);
             });
-            return { tags: [...vocab.keys()], vids, desc };
+            return { tags: [...vocab.keys()], vids, desc, sampled };
         }
 
         // ---------------------------------------------------------------------
@@ -2696,11 +2778,54 @@ PMVX.scheduler = fn => {
             return r;
         }
         const pct = f => Math.round(f * 100) + '%';
+        // Every filter a playlist fails on its own (unlike evaluate(), which stops at the first):
+        // keys 'neg:<term>', 'pos:<term>', 'mine'. Unknown data counts for nothing.
+        function failKeys(id) {
+            const entry = PB.tags.get(id);
+            const desc = descOf(id);
+            const out = [];
+            const mineRange = activeMineRange();
+            if (mineRange) {
+                const o = overlapOf(id);
+                if (o && ((mineRange.min != null && o.frac < mineRange.min) || (mineRange.max != null && o.frac > mineRange.max))) out.push('mine');
+            }
+            for (const { term, max } of PB.tokens.neg) {
+                if (desc && desc.includes(term)) { out.push('neg:' + term); continue; }
+                if (!entry) continue;
+                const f = fraction(id, entry, term);
+                if (f.n > 0 && f.frac > max) out.push('neg:' + term);
+            }
+            if (entry) {
+                for (const { term, min } of PB.tokens.pos) {
+                    if (desc && desc.includes(term)) continue;
+                    const f = fraction(id, entry, term);
+                    if (!(min == null ? f.n > 0 : (f.n > 0 && f.frac >= min))) out.push('pos:' + term);
+                }
+            }
+            return out;
+        }
+        // Per filter: how many playlists on the page it removes, and how many only it removes.
+        PB.removedBy = new Map();
+        PB.removedOnly = new Map();
+        PB.removedOf = 0;
+        function paintRemovedCounts() {
+            document.querySelectorAll('#' + BAR_ID + ' [data-pmvpb-key]').forEach(c => {
+                const key = c.dataset.pmvpbKey;
+                const n = PB.removedBy.get(key) || 0;
+                const only = PB.removedOnly.get(key) || 0;
+                let cnt = c.querySelector('.cnt');
+                if (!cnt) { cnt = document.createElement('span'); cnt.className = 'cnt'; c.insertBefore(cnt, c.querySelector('.x')); }
+                cnt.textContent = '\u2212' + n;
+                cnt.dataset.zero = n ? '' : '1';
+                cnt.title = `Removes ${n} of ${PB.removedOf} playlists on this page` + (n ? ` (${only} only because of this filter)` : '');
+            });
+        }
         function evaluate(id, count) {
             const entry = PB.tags.get(id);
             // Stale data is used while the refetch runs.
             const desc = descOf(id);
-            const pending = hasTagFilter() && !entry && !PB.failed.has(id);
+            // No tag data (not loaded yet, or the fetch failed): unknown, so never a reason to hide.
+            const pending = hasTagFilter() && !entry;
             const hits = [];
             // !mine range: independent of tag data, so decided first.
             const mineRange = activeMineRange();
@@ -2739,18 +2864,94 @@ PMVX.scheduler = fn => {
             clearTimeout(applyTimer);
             applyTimer = setTimeout(applyFilter, 60);
         }
+        // ---------------------------------------------------------------------
+        // Follow button on playlist cards
+        // ---------------------------------------------------------------------
+        //   GET    /api/playlists/followed?limit=…  -> { success, playlists: [...] }
+        //   POST   /api/playlists/<id>/follow       -> { success, isFollowing }
+        //   DELETE /api/playlists/<id>/follow
+        // "+ Follow" shows on hover; "✓ Following" stays visible. Not on your own playlists; nothing
+        // while logged out (the followed list fails to load).
+        PB.followed = null; // Set of ids once loaded
+        let followLoad = null;
+        function loadFollowed() {
+            if (followLoad) return followLoad;
+            followLoad = fetch('/api/playlists/followed?limit=500', { credentials: 'include', headers: { accept: 'application/json' } })
+                .then(r => r.ok ? r.json() : null)
+                .then(j => {
+                    if (!j?.success || !Array.isArray(j.playlists)) return;
+                    PB.followed = new Set(j.playlists.map(p => p?._id || p?.id).filter(Boolean));
+                    scheduleApply();
+                })
+                .catch(() => {});
+            return followLoad;
+        }
+        function paintFollowBtn(b, on) {
+            b.dataset.on = on ? '1' : '';
+            b.textContent = on ? '\u2713 Following' : '+ Follow';
+            b.title = on ? 'Unfollow this playlist' : 'Follow this playlist';
+        }
+        function ensureFollowButtons(cards) {
+            loadFollowed();
+            if (!PB.followed) return;
+            const mine = getLivePlaylists().playlists;
+            cards.forEach(card => {
+                const id = cardId(card);
+                let b = card.querySelector(':scope > .pmvpb-follow');
+                if (!id || mine.has(id)) { b?.remove(); return; }
+                if (!b) {
+                    b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'pmvpb-follow';
+                    // The card is a link that may act on mousedown: keep every phase on the button.
+                    ['mousedown', 'mouseup'].forEach(t => b.addEventListener(t, e => { e.preventDefault(); e.stopPropagation(); }));
+                    b.addEventListener('click', async e => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (b.dataset.busy) return;
+                        const pid = cardId(card);
+                        const was = PB.followed.has(pid);
+                        b.dataset.busy = '1';
+                        paintFollowBtn(b, !was);
+                        try {
+                            const r = await fetch(`/api/playlists/${pid}/follow`, { method: was ? 'DELETE' : 'POST', credentials: 'include', headers: { accept: 'application/json' } });
+                            const j = r.ok ? await r.json().catch(() => ({})) : null;
+                            if (!r.ok || j?.success === false) throw new Error('HTTP ' + r.status);
+                            const now = typeof j?.isFollowing === 'boolean' ? j.isFollowing : !was;
+                            if (now) PB.followed.add(pid); else PB.followed.delete(pid);
+                            paintFollowBtn(b, now);
+                        } catch {
+                            paintFollowBtn(b, was);
+                        } finally {
+                            delete b.dataset.busy;
+                        }
+                    });
+                    card.appendChild(b);
+                }
+                const on = PB.followed.has(id);
+                if (b.dataset.on !== (on ? '1' : '') || !b.textContent) paintFollowBtn(b, on);
+            });
+        }
+
         function applyFilter() {
             if (!PB.active) return;
             try { renderMineChips(); } catch {}
+            try { ensureFollowButtons([...document.querySelectorAll('.playlists-grid > a[href*="/playlists/"]')]); } catch {}
             const cards = [...document.querySelectorAll('.playlists-grid > a[href*="/playlists/"]')];
             let hidden = 0, pending = 0, fromCache = 0, notScanned = 0;
+            const removedBy = new Map(), removedOnly = new Map();
+            let evaluated = 0;
             cards.forEach(card => {
                 const id = cardId(card);
                 if (!id) return;
                 const count = cardCount(card);
                 // Marker: tags are cached.
-                if (isFresh(PB.tags.get(id), count)) card.setAttribute('data-pmvpb-cached', '1');
+                const entry = PB.tags.get(id);
+                if (isFresh(entry, count)) card.setAttribute('data-pmvpb-cached', '1');
                 else card.removeAttribute('data-pmvpb-cached');
+                // ≈ instead of ✓: tags come from a sample; clicking it fetches the whole playlist.
+                if (entry?.sampled && card.hasAttribute('data-pmvpb-cached')) card.setAttribute('data-pmvpb-sampled', '1');
+                else card.removeAttribute('data-pmvpb-sampled');
                 // Overlap badge (top-left) when own playlists are ticked.
                 const ov = overlapOf(id);
                 let ovTitle = '';
@@ -2782,6 +2983,10 @@ PMVX.scheduler = fn => {
                     setTitle('');
                     return;
                 }
+                const keys = failKeys(id);
+                evaluated++;
+                keys.forEach(k => removedBy.set(k, (removedBy.get(k) || 0) + 1));
+                if (keys.length === 1) removedOnly.set(keys[0], (removedOnly.get(keys[0]) || 0) + 1);
                 const r = evaluate(id, count);
                 if (r.state === 'pending') {
                     if (PB.pending.has(id)) pending++;
@@ -2802,6 +3007,8 @@ PMVX.scheduler = fn => {
                     setTitle('');
                 }
             });
+            PB.removedBy = removedBy; PB.removedOnly = removedOnly; PB.removedOf = evaluated || cards.length;
+            paintRemovedCounts();
             updateCounter(cards.length, hidden, pending, fromCache, notScanned);
             // Hiding shortens the page: nudge infinite scroll for the next page, but only while fewer than 24 cards are visible.
             if (hasFilter() && hidden && (cards.length - hidden) < 24) {
@@ -2869,19 +3076,30 @@ PMVX.scheduler = fn => {
                 .playlists-grid > a[data-pmvpb-sink="1"] { order: 9999; opacity: 0.35; filter: grayscale(0.6); }
                 .playlists-grid > a[data-pmvpb-pending="1"] { outline: 1px dashed rgba(255,255,255,0.10); outline-offset: -1px; }
                 .playlists-grid > a[data-pmvpb-cached="1"], .playlists-grid > a[data-pmvpb-overlap] { position: relative; }
+                .playlists-grid > a { position: relative; }
+                .playlists-grid > a > .pmvpb-follow { position: absolute; top: 6px; right: 32px; z-index: 21; padding: 2px 9px; border-radius: 9999px;
+                    font: inherit; font-size: 11px; font-weight: 600; line-height: 16px; cursor: pointer; white-space: nowrap;
+                    background: rgba(0,0,0,0.8); color: #fff; border: 1px solid rgba(168,85,247,0.6); box-shadow: 0 1px 4px rgba(0,0,0,0.6);
+                    opacity: 0; transition: opacity .15s, background .15s; }
+                .playlists-grid > a:hover > .pmvpb-follow, .playlists-grid > a > .pmvpb-follow[data-on="1"] { opacity: 1; }
+                .playlists-grid > a > .pmvpb-follow:hover { background: rgba(168,85,247,0.35); }
+                .playlists-grid > a > .pmvpb-follow[data-on="1"] { background: linear-gradient(135deg, rgb(168,85,247), rgb(139,92,246)); border-color: transparent; }
+                .playlists-grid > a > .pmvpb-follow[data-busy="1"] { opacity: 0.6; }
                 .playlists-grid > a[data-pmvpb-cached="1"]::after {
                     content: '\\2713'; position: absolute; top: 6px; right: 6px; z-index: 20;
                     width: 18px; height: 18px; line-height: 18px; text-align: center; border-radius: 50%;
-                    background: rgba(0,0,0,0.65); color: rgb(192,132,252); font-size: 11px; font-weight: 700;
-                    font-family: ui-monospace, monospace; cursor: pointer;
+                    background: rgba(0,0,0,0.85); color: rgb(233,213,255); font-size: 11px; font-weight: 700;
+                    font-family:inherit;font-variant-numeric:tabular-nums; cursor: pointer;
                     box-shadow: 0 0 0 1px rgba(168,85,247,0.5); }
+                .playlists-grid > a[data-pmvpb-cached="1"][data-pmvpb-sampled="1"]::after { content: '\\2248'; }
                 .playlists-grid > a[data-pmvpb-overlap]::before {
                     content: attr(data-pmvpb-overlap); position: absolute; top: 6px; left: 6px; z-index: 20;
-                    padding: 1px 7px; border-radius: 9999px; line-height: 16px;
-                    background: rgba(0,0,0,0.7); color: rgb(168,85,247); font-size: 11px; font-weight: 600;
-                    font-family: ui-monospace, monospace; pointer-events: none;
-                    box-shadow: 0 0 0 1px rgba(168,85,247,0.5); }
-                .playlists-grid > a[data-pmvpb-overlap-zero="1"]::before { color: rgba(255,255,255,0.45); box-shadow: 0 0 0 1px rgba(255,255,255,0.18); font-weight: 400; }
+                    padding: 2px 8px; border-radius: 9999px; line-height: 16px;
+                    background: linear-gradient(135deg, rgb(168,85,247), rgb(139,92,246)); color: #fff;
+                    font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; pointer-events: none;
+                    text-shadow: 0 1px 1px rgba(0,0,0,0.35); box-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+                .playlists-grid > a[data-pmvpb-overlap-zero="1"]::before { background: rgba(0,0,0,0.85); color: rgb(209,213,219);
+                    box-shadow: 0 0 0 1px rgba(255,255,255,0.2), 0 1px 4px rgba(0,0,0,0.6); font-weight: 500; }
 
                 #${BAR_ID} { margin: 0 0 16px; color: #fff; font-family: inherit; box-sizing: border-box; }
                 #${BAR_ID} * { box-sizing: border-box; }
@@ -2925,10 +3143,10 @@ PMVX.scheduler = fn => {
                 #${BAR_ID} .pmvpb-label { display: block; color: rgb(156,163,175); font-size: 12px; font-weight: 500; margin-bottom: 6px; }
                 #${BAR_ID} .pmvpb-inrow { display: flex; gap: 8px; align-items: stretch; }
                 #${BAR_ID} input[type=text] { flex: 1; min-width: 0; width: 100%; padding: 9px 12px; background: #0A0A0A; border: 2px solid #2A2A2A; border-radius: 8px;
-                    color: #fff; font-size: 13px; font-family: ui-monospace, monospace; outline: none; caret-color: rgb(168,85,247); }
+                    color: #fff; font-size: 13px; font-family:inherit;font-variant-numeric:tabular-nums; outline: none; caret-color: rgb(168,85,247); }
                 #${BAR_ID} input[type=text]:focus, #${BAR_ID} input[type=text]:focus-visible { border-color: rgba(168,85,247,0.6); outline: none !important; box-shadow: none !important; }
                 #${BAR_ID} input[type=text]::placeholder { color: rgb(107,114,128); }
-                #${BAR_ID} .pmvpb-hint { color: rgba(255,255,255,0.35); font-size: 11px; margin-top: 6px; line-height: 1.5; font-family: ui-monospace, monospace; }
+                #${BAR_ID} .pmvpb-hint { color: rgba(255,255,255,0.35); font-size: 11px; margin-top: 6px; line-height: 1.5; font-family:inherit;font-variant-numeric:tabular-nums; }
                 #${BAR_ID} .pmvpb-hint b { color: rgba(255,255,255,0.6); font-weight: 600; }
                 #${BAR_ID} .pmvpb-tagrow { margin-bottom: 10px; }
                 #${BAR_ID} .pmvpb-tagrow input[type=text] { padding: 7px 12px; font-family: inherit; font-size: 13px; }
@@ -2937,9 +3155,13 @@ PMVX.scheduler = fn => {
                     font-size: 12px; line-height: 16px; font-family: inherit; transition: background .15s; }
                 #${BAR_ID} .pmvpb-tag svg { width: 10px; height: 10px; }
                 #${BAR_ID} .pmvpb-tag .ico svg { width: 11px; height: 11px; }
+                #${BAR_ID} .pmvpb-tag .cnt { font-size: 10px; font-weight: 600; opacity: 0.85; font-variant-numeric: tabular-nums; }
+                #${BAR_ID} .pmvpb-tag .cnt[data-zero="1"] { opacity: 0.4; }
+                #${BAR_ID} .pmvpb-rangecnt .cnt { font-size: 12px; color: rgba(255,255,255,0.55); font-variant-numeric: tabular-nums; margin-left: 8px; }
+                #${BAR_ID} .pmvpb-rangecnt .cnt[data-zero="1"] { opacity: 0.5; }
                 #${BAR_ID} .pmvpb-tag .x { display: inline-flex; opacity: 0.6; margin-left: 2px; padding: 2px; border-radius: 3px; }
                 #${BAR_ID} .pmvpb-tag .x:hover { opacity: 1; background: rgba(255,255,255,0.12); }
-                #${BAR_ID} .pmvpb-tag .thr { font-size: 10px; font-weight: 700; padding: 0 4px; border-radius: 3px; background: rgba(0,0,0,0.35); font-family: ui-monospace, monospace; }
+                #${BAR_ID} .pmvpb-tag .thr { font-size: 10px; font-weight: 700; padding: 0 4px; border-radius: 3px; background: rgba(0,0,0,0.35); font-family:inherit;font-variant-numeric:tabular-nums; }
                 #${BAR_ID} .pmvpb-tag.pos { background: rgba(249,115,22,0.2); color: rgb(253,186,116); }
                 #${BAR_ID} .pmvpb-tag.pos:hover { background: rgba(249,115,22,0.3); }
                 #${BAR_ID} .pmvpb-tag.neg { background: rgba(239,68,68,0.2); color: rgb(252,165,165); }
@@ -2951,7 +3173,7 @@ PMVX.scheduler = fn => {
                 #${BAR_ID} .pmvpb-edit.pos { border-color: rgba(249,115,22,0.3); }
                 #${BAR_ID} .pmvpb-edit-head { font-size: 12px; color: rgba(255,255,255,0.75); margin-bottom: 6px; }
                 #${BAR_ID} .pmvpb-edit-head b { color: #fff; }
-                #${BAR_ID} .pmvpb-edit-head .val { color: rgb(168,85,247); font-weight: 700; font-family: ui-monospace, monospace; }
+                #${BAR_ID} .pmvpb-edit-head .val { color: rgb(168,85,247); font-weight: 700; font-family:inherit;font-variant-numeric:tabular-nums; }
                 #${BAR_ID} .pmvpb-edit input[type=range] { width: 100%; accent-color: rgb(168,85,247); margin: 4px 0; }
                 #${BAR_ID} .pmvpb-edit .pmvpb-chips { margin-top: 4px; }
                 #${BAR_ID} .pmvpb-edit .pmvpb-hint { margin-top: 6px; }
@@ -2960,11 +3182,11 @@ PMVX.scheduler = fn => {
                     background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.7); border: 1px solid rgba(255,255,255,0.1); transition: background .15s, color .15s; white-space: nowrap; }
                 #${BAR_ID} .pmvpb-chip:hover { background: rgba(255,255,255,0.09); color: #fff; }
                 #${BAR_ID} .pmvpb-chip.active { background: rgba(168,85,247,0.2); color: rgb(168,85,247); border-color: rgba(168,85,247,0.5); font-weight: 600; }
-                #${BAR_ID} .pmvpb-chip .n { opacity: 0.5; margin-left: 6px; font-weight: 400; font-family: ui-monospace, monospace; }
+                #${BAR_ID} .pmvpb-chip .n { opacity: 0.5; margin-left: 6px; font-weight: 400; font-family:inherit;font-variant-numeric:tabular-nums; }
                 #${BAR_ID} .pmvpb-primary { padding: 0 16px; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
                     background: linear-gradient(135deg, rgb(168,85,247), rgb(139,92,246)); color: #fff; border: none; }
                 #${BAR_ID} .pmvpb-primary:hover { filter: brightness(1.12); }
-                #${BAR_ID} .pmvpb-counter { color: rgba(255,255,255,0.4); font-size: 12px; margin-top: 10px; min-height: 16px; font-family: ui-monospace, monospace; }
+                #${BAR_ID} .pmvpb-counter { color: rgba(255,255,255,0.4); font-size: 12px; margin-top: 10px; min-height: 16px; font-family:inherit;font-variant-numeric:tabular-nums; }
                 #${BAR_ID} .pmvpb-empty { color: rgba(255,255,255,0.4); font-size: 12px; line-height: 1.5; }
 
                 #${BAR_ID} .pmvpb-pill { display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px; border-radius: 9999px; background: rgba(168,85,247,0.1);
@@ -3084,6 +3306,7 @@ PMVX.scheduler = fn => {
                     PB.terms[kind].forEach(t => {
                         const c = el('button', 'pmvpb-tag ' + kind);
                         c.type = 'button';
+                        c.dataset.pmvpbKey = kind + ':' + t.term;
                         c.title = kind === 'neg'
                             ? `Hides playlists where ${t.max > 0 ? 'more than ' + pct(t.max) : 'at least one'} of the videos have "${t.term}" — click to set the allowed share`
                             : `Requires ${t.min != null ? 'at least ' + pct(t.min) : 'at least one'} of the videos to have "${t.term}" — click to set the required share`;
@@ -3113,6 +3336,7 @@ PMVX.scheduler = fn => {
                         host.appendChild(c);
                     });
                 });
+                paintRemovedCounts();
             };
             // Inline share editor for the selected chip: one slider.
             const renderEditor = () => {
@@ -3154,7 +3378,7 @@ PMVX.scheduler = fn => {
             const hideChip = chip('Hide', 'Filtered playlists are hidden', () => { PB.mode = 'hide'; renderModeChips(); saveSettings(); applyFilter(); });
             const sinkChip = chip('Move down', 'Filtered playlists are dimmed and moved to the bottom', () => { PB.mode = 'sink'; renderModeChips(); saveSettings(); applyFilter(); });
             const descChip = chip('Description', '', () => { PB.desc = !PB.desc; renderModeChips(); saveSettings(); applyFilter(); });
-            const scanChip = chip('⟳ Scan page', 'Fetch the tags of the playlists on this page (one request per playlist). Cached data is reused until a playlist\u2019s video count changes; click ✓ on a card to refetch that playlist.', scanVisible);
+            const scanChip = chip('⟳ Scan page', 'Fetch the tags of the playlists on this page. Playlists over 300 videos are sampled (first, last and a few pages in between, about 300 videos) to keep it quick. Cached data is reused until a playlist\u2019s video count changes by more than 10%; click ✓ on a card to fetch that playlist in full.', scanVisible);
             const autoChip = chip('Auto-scan', '', () => { PB.autoScan = !PB.autoScan; renderModeChips(); saveSettings(); applyFilter(); });
             const renderModeChips = () => {
                 hideChip.classList.toggle('active', PB.mode === 'hide');
@@ -3218,6 +3442,10 @@ PMVX.scheduler = fn => {
             const pill = el('div', 'pmvpb-pill');
             const pMin = el('span', null, '0%'); const pSep = el('span', 'sep', '-'); const pMax = el('span', null, 'Any');
             pill.append(pMin, pSep, pMax); pillRow.appendChild(pill);
+            // Same "−N removed" count as the tag chips.
+            const rangeCnt = el('span', 'pmvpb-rangecnt');
+            rangeCnt.dataset.pmvpbKey = 'mine';
+            pillRow.appendChild(rangeCnt);
             const slider = el('div', 'pmvpb-slider');
             const track = el('div', 'pmvpb-track'); const fill = el('div', 'pmvpb-range');
             const rMin = el('input'); rMin.type = 'range'; rMin.min = '0'; rMin.max = '100'; rMin.step = '1';
@@ -3597,6 +3825,7 @@ whenBody(() => {
     };
 
     try { PMVX.state = State; } catch {}
+    PMVX.filterChecks.push(() => State.recFilterMode !== 'all');
 
     // ---------------------------------------------------------------------
     // Utilities
@@ -3984,6 +4213,10 @@ whenBody(() => {
             const method0 = (args[1]?.method || (args[0] instanceof Request ? args[0].method : 'GET')).toUpperCase();
             const mut = method0 !== 'GET' && u0.match(/\/api\/videos\/([a-f0-9]{24})\//);
             if (mut) forgetVideo(mut[1]);
+            // The site's own favourite toggles keep the card hearts in step.
+            if (mut && /\/favorite$/.test(u0) && typeof args[1]?.body === 'string') {
+                try { const a = JSON.parse(args[1].body).action; if (a) noteFavourite(mut[1], a === 'favorite'); } catch {}
+            }
             // Own lookups (marked quiet) register themselves.
             if (m0 && method0 === 'GET' && !quietUrls.has(u0) && !pendingVideoApiFetches.has(m0[1])) {
                 let resolve;
@@ -4288,7 +4521,7 @@ ${R} .ts-btn.accent{background:rgba(249,115,22,.2);border-color:rgba(249,115,22,
 ${R} .ts-btn.accent:hover{background:rgba(249,115,22,.3);border-color:rgba(249,115,22,.6);}
 ${R} .ts-row{display:flex;gap:8px;flex-wrap:wrap;} ${R} .ts-row > .ts-btn{flex:1;}
 ${R} textarea{display:block;width:100%;height:110px;padding:8px 12px;resize:vertical;background:#1E1E1E;border:1px solid #2A2A2A;border-radius:8px;
-  color:#fff;font-size:12px;line-height:16px;font-family:ui-monospace,monospace;outline:none;}
+  color:#fff;font-size:12px;line-height:16px;font-family:inherit;font-variant-numeric:tabular-nums;outline:none;}
 ${R} textarea:focus{outline:none;box-shadow:0 0 0 2px rgb(249,115,22);}
 ${R} textarea::placeholder{color:rgb(107,114,128);}
 `;
@@ -4335,11 +4568,97 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         return { el: wrap, close, paint };
     }
 
+    // A settings card (ts-* styles) with a label, a description and a control under it.
+    function toolsCard(icon, iconColor, label, desc, control) {
+        const c = document.createElement('div');
+        c.className = 'ts-card';
+        c.innerHTML = `<div><label class="ts-lab"><span style="display:inline-flex;${iconColor ? `color:${iconColor};` : ''}">${icon}</span>${label}</label><p class="ts-desc">${desc}</p></div>`;
+        if (control) c.appendChild(control);
+        return c;
+    }
+
+    function moreSettingsCard() {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'ts-btn';
+        b.style.width = '100%';
+        b.innerHTML = `${TS_SVG.gear}Open full settings`;
+        b.onclick = () => {
+            // Close the site's modal (Escape), then go to the section on /settings.
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            document.getElementById('pmv-ts-modal')?.remove();
+            siteNavigate('/settings#pmvx');
+        };
+        return toolsCard(TS_SVG.gear, '', 'More settings', 'Hotkeys, playlist names &amp; colours and backup are on the full settings page', b);
+    }
+
+    function hotkeysCard() {
+        const hk = document.createElement('button');
+        hk.type = 'button';
+        hk.className = 'ts-btn accent';
+        hk.style.width = '100%';
+        hk.innerHTML = `${TS_SVG.keyboard}Assign hotkeys`;
+        hk.onclick = () => buildKeybindingEditor();
+        return toolsCard(TS_SVG.keyboard, '', 'Hotkeys', 'Remap every hotkey, including the playlist buttons', hk);
+    }
+
+    function backupCard() {
+        const keys = Object.keys(collectPmvSettings());
+
+        const bk = document.createElement('div');
+        bk.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+        bk.innerHTML = `
+            <div class="ts-meta">${keys.length} stored key${keys.length === 1 ? '' : 's'}: ${escHtml(keys.map(k => k.replace(/^pmv[a-z]*_?/, '')).join(', ') || '(none)')}</div>
+            <textarea spellcheck="false" placeholder="Export fills this box. To import, paste JSON here or load a file."></textarea>
+            <div class="ts-row">
+                <button type="button" class="ts-btn" data-k="export" title="Fill the box and copy to the clipboard">${TS_SVG.copy}Export</button>
+                <button type="button" class="ts-btn" data-k="download">${TS_SVG.download}Download</button>
+                <button type="button" class="ts-btn" data-k="file" title="Load a .json file into the box">${TS_SVG.upload}Load file</button>
+            </div>
+            <button type="button" class="ts-btn accent" data-k="import">Import (reloads the page)</button>
+            <input type="file" accept="application/json,.json" hidden>`;
+        const ta = bk.querySelector('textarea');
+        const fileInput = bk.querySelector('input[type=file]');
+        const exportJson = () => JSON.stringify(collectPmvSettings(), null, 2);
+        bk.querySelector('[data-k="export"]').onclick = async () => {
+            ta.value = exportJson();
+            ta.select();
+            try { await navigator.clipboard.writeText(ta.value); toast('Settings copied to clipboard', 'green'); } catch {}
+        };
+        bk.querySelector('[data-k="download"]').onclick = () => {
+            const blob = new Blob([exportJson()], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `pmvhaven-settings-${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        };
+        bk.querySelector('[data-k="file"]').onclick = () => fileInput.click();
+        fileInput.onchange = async () => {
+            const f = fileInput.files?.[0];
+            if (!f) return;
+            try { ta.value = await f.text(); } catch { toast('Could not read file'); }
+            fileInput.value = '';
+        };
+        bk.querySelector('[data-k="import"]').onclick = () => {
+            let parsed;
+            try { parsed = JSON.parse(ta.value); }
+            catch { toast('Invalid JSON'); return; }
+            if (!parsed || typeof parsed !== 'object') { toast('Invalid JSON'); return; }
+            const count = applyPmvSettings(parsed);
+            toast(`${count} setting(s) imported - reloading`);
+            setTimeout(() => location.reload(), 1200);
+        };
+        return toolsCard(TS_SVG.database, '', 'Backup', 'Filters, Up next, watch history, hotkeys and playlist names', bk);
+    }
+
     function buildToolsSettingsSection() {
         ensureToolsSettingsStyle();
         const sec = document.createElement('div');
         sec.setAttribute('data-pmv-tools-settings', '1');
-        const keys = Object.keys(collectPmvSettings());
         const card = (icon, iconColor, label, desc) => `
             <div class="ts-card">
                 <div>
@@ -4366,8 +4685,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
                 <button type="button" class="ts-sw" role="switch" data-vol><span class="k"></span></button>
             </div></div>
             ${card(TS_SVG.ban, 'rgb(248,113,113)', 'Reject list', 'Adding a video there removes it from every other playlist and shows it red instead of green. The Reject hotkey also skips to the next video.')}
-            ${card(TS_SVG.keyboard, '', 'Hotkeys', 'Remap every hotkey, including the playlist buttons')}
-            ${card(TS_SVG.database, '', 'Backup', 'Filters, Up next, watch history and hotkeys')}
+            <div class="ts-card" data-more></div>
         `;
         const slots = sec.querySelectorAll('[data-slot]');
 
@@ -4424,64 +4742,8 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         });
         slots[1].replaceWith(rejectSel.el);
 
-        // Hotkeys (the editor opens on top of the modal)
-        const hk = document.createElement('button');
-        hk.type = 'button';
-        hk.className = 'ts-btn accent';
-        hk.style.width = '100%';
-        hk.innerHTML = `${TS_SVG.keyboard}Assign hotkeys`;
-        hk.onclick = () => buildKeybindingEditor();
-        slots[2].replaceWith(hk);
-
-        // Backup
-        const bk = document.createElement('div');
-        bk.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
-        bk.innerHTML = `
-            <div class="ts-meta">${keys.length} stored key${keys.length === 1 ? '' : 's'}: ${escHtml(keys.map(k => k.replace(/^pmv[a-z]*_?/, '')).join(', ') || '(none)')}</div>
-            <textarea spellcheck="false" placeholder="Export fills this box. To import, paste JSON here or load a file."></textarea>
-            <div class="ts-row">
-                <button type="button" class="ts-btn" data-k="export" title="Fill the box and copy to the clipboard">${TS_SVG.copy}Export</button>
-                <button type="button" class="ts-btn" data-k="download">${TS_SVG.download}Download</button>
-                <button type="button" class="ts-btn" data-k="file" title="Load a .json file into the box">${TS_SVG.upload}Load file</button>
-            </div>
-            <button type="button" class="ts-btn accent" data-k="import">Import (reloads the page)</button>
-            <input type="file" accept="application/json,.json" hidden>`;
-        slots[3].replaceWith(bk);
-        const ta = bk.querySelector('textarea');
-        const fileInput = bk.querySelector('input[type=file]');
-        const exportJson = () => JSON.stringify(collectPmvSettings(), null, 2);
-        bk.querySelector('[data-k="export"]').onclick = async () => {
-            ta.value = exportJson();
-            ta.select();
-            try { await navigator.clipboard.writeText(ta.value); toast('Settings copied to clipboard', 'green'); } catch {}
-        };
-        bk.querySelector('[data-k="download"]').onclick = () => {
-            const blob = new Blob([exportJson()], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `pmvhaven-settings-${new Date().toISOString().slice(0, 10)}.json`;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
-        };
-        bk.querySelector('[data-k="file"]').onclick = () => fileInput.click();
-        fileInput.onchange = async () => {
-            const f = fileInput.files?.[0];
-            if (!f) return;
-            try { ta.value = await f.text(); } catch { toast('Could not read file'); }
-            fileInput.value = '';
-        };
-        bk.querySelector('[data-k="import"]').onclick = () => {
-            let parsed;
-            try { parsed = JSON.parse(ta.value); }
-            catch { toast('Invalid JSON'); return; }
-            if (!parsed || typeof parsed !== 'object') { toast('Invalid JSON'); return; }
-            const count = applyPmvSettings(parsed);
-            toast(`${count} setting(s) imported - reloading`);
-            setTimeout(() => location.reload(), 1200);
-        };
+        // Advanced settings live on the site's full settings page.
+        sec.querySelector('[data-more]').replaceWith(moreSettingsCard());
 
         // A click elsewhere in the modal folds an open list.
         sec.addEventListener('click', e => {
@@ -4514,6 +4776,355 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         toolsSettingsQueued = true;
         requestAnimationFrame(() => { toolsSettingsQueued = false; try { injectToolsSettings(); } catch {} });
     }).observe(document.body, { childList: true, subtree: true });
+
+    // ---------------------------------------------------------------------
+    // /settings page: playlist names & colours
+    // ---------------------------------------------------------------------
+    // A section in the site's full settings page (same card style as its own sections) for the
+    // per-playlist short names and colours in pmv_playlist_config_v1. Saved on change.
+
+    function savePlaylistConfig() {
+        try {
+            const raw = JSON.parse(localStorage.getItem(PLAYLIST_CONFIG_KEY) || '{}') || {};
+            raw.styles = playlistConfig.styles;
+            if (!raw.order) raw.order = playlistConfig.order;
+            if (!Object.keys(raw.styles).length && !(raw.order || []).length) localStorage.removeItem(PLAYLIST_CONFIG_KEY);
+            else localStorage.setItem(PLAYLIST_CONFIG_KEY, JSON.stringify(raw));
+        } catch {}
+        // Badges and chips pick the new names up on the next pass.
+        document.querySelectorAll('[data-playlist-name], [data-pmv-rec-badge]').forEach(el => el.remove());
+        document.querySelectorAll('[data-pmv-checked], [data-pmv-rec-checked], [data-pmv-mf-checked]').forEach(el => {
+            delete el.dataset.pmvChecked; delete el.dataset.pmvRecChecked; delete el.dataset.pmvMfChecked;
+        });
+        try { scheduleBadges(); } catch {}
+    }
+
+    // Every entry for a playlist: by id, and legacy ones by (lowercased) name.
+    function playlistStyleKeys(p) {
+        const name = p.name || '';
+        return [p.id, name.trim().toLowerCase(), name].filter((k, i, a) => k && a.indexOf(k) === i);
+    }
+    function setPlaylistStyle(p, patch) {
+        const cur = getPlaylistStyle(p.name, p.id) || {};
+        const explicit = playlistStyleKeys(p).map(k => playlistConfig.styles[k]).find(Boolean) || {};
+        playlistStyleKeys(p).forEach(k => delete playlistConfig.styles[k]);
+        const next = { label: explicit.label || null, color: explicit.color || null, ...patch };
+        if (!next.label) delete next.label;
+        if (!next.color) delete next.color;
+        if (Object.keys(next).length) playlistConfig.styles[p.id] = next;
+        return cur;
+    }
+
+    function settingsPageList() {
+        if (location.pathname.replace(/\/+$/, '') !== '/settings') return null;
+        for (const h1 of document.querySelectorAll('h1')) {
+            if (h1.textContent.trim() !== 'Settings') continue;
+            const wrap = h1.closest('.max-w-4xl');
+            const list = wrap && [...wrap.children].find(c => c.classList.contains('space-y-6'));
+            if (list) return list;
+        }
+        return null;
+    }
+
+    function injectSettingsPageSection() {
+        const list = settingsPageList();
+        if (!list || list.querySelector(':scope > #pmvx-settings-names')) return;
+        if (!document.getElementById('pmvx-settings-names-style')) {
+            const st = document.createElement('style');
+            st.id = 'pmvx-settings-names-style';
+            st.textContent = `
+#pmvx-settings-names .pn-row{display:flex;align-items:center;gap:12px;padding:8px 12px;background:#161616;border:1px solid #1F1F1F;border-radius:8px;}
+#pmvx-settings-names .pn-name{flex:1;min-width:0;color:#fff;font-size:14px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+#pmvx-settings-names .pn-name small{color:rgb(107,114,128);font-weight:400;margin-left:6px;font-variant-numeric:tabular-nums;}
+#pmvx-settings-names input[type=text]{width:180px;max-width:40%;background:#1A1A1A;border:1px solid #2A2A2A;border-radius:8px;padding:6px 10px;color:#fff;font-size:13px;outline:none;font-family:inherit;}
+#pmvx-settings-names input[type=text]:focus{border-color:rgba(249,115,22,.6);}
+#pmvx-settings-names input[type=color]{width:28px;height:28px;padding:0;border:1px solid #2A2A2A;border-radius:9999px;background:none;cursor:pointer;flex-shrink:0;overflow:hidden;}
+#pmvx-settings-names input[type=color]::-webkit-color-swatch-wrapper{padding:0;}
+#pmvx-settings-names input[type=color]::-webkit-color-swatch{border:none;border-radius:9999px;}
+#pmvx-settings-names .pn-reset{color:rgb(107,114,128);background:none;border:none;cursor:pointer;padding:6px;border-radius:8px;font-size:13px;line-height:1;}
+#pmvx-settings-names .pn-reset:hover{color:rgb(248,113,113);background:rgba(239,68,68,.1);}
+#pmvx-settings-names .pn-reset[disabled]{visibility:hidden;}
+#pmvx-settings-names .pn-btn{padding:6px 12px;border-radius:8px;border:1px solid #2A2A2A;background:none;color:rgb(156,163,175);font-size:12px;font-weight:500;cursor:pointer;}
+#pmvx-settings-names .pn-btn:hover{border-color:rgba(239,68,68,.5);background:rgba(239,68,68,.1);color:rgb(248,113,113);}`;
+            document.head.appendChild(st);
+        }
+        ensureToolsSettingsStyle();
+        const sec = document.createElement('div');
+        sec.id = 'pmvx-settings-names';
+        sec.className = 'bg-gradient-to-br from-[#1A1A1A] to-[#0F0F0F] border border-[#2A2A2A] rounded-xl p-6 shadow-2xl';
+        sec.innerHTML = `
+            <h2 class="text-xl font-semibold text-white mb-6 flex items-center gap-2 border-b border-[#2A2A2A] pb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-orange-400"><path d="M16 5H3"/><path d="M11 12H3"/><path d="M11 19H3"/><path d="M21 16V5"/><circle cx="18" cy="16" r="3"/></svg>
+                PMVH Extended
+                <span class="text-sm text-gray-500 font-normal" style="margin-left:auto;">Quick settings: gear at the top right</span>
+            </h2>
+            <div data-pmv-tools-settings="1" data-body></div>`;
+        const body = sec.querySelector('[data-body]');
+        const names = document.createElement('div');
+        names.className = 'ts-card';
+        names.innerHTML = `
+            <div>
+                <label class="ts-lab"><span style="display:inline-flex;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 5H3"/><path d="M11 12H3"/><path d="M11 19H3"/><path d="M21 16V5"/><circle cx="18" cy="16" r="3"/></svg></span>Playlist names &amp; colours</label>
+                <p class="ts-desc">Short name shown on playlist buttons, badges and the sidebar (empty = the playlist's own name) and its colour. Saved as you type.</p>
+            </div>
+            <div class="space-y-2" data-rows></div>
+            <div style="display:flex;align-items:center;gap:12px;">
+                <span class="ts-meta" data-status></span>
+                <div style="flex:1"></div>
+                <button type="button" class="pn-btn" data-reset-all>Reset all names &amp; colours</button>
+            </div>`;
+        body.append(hotkeysCard(), names, backupCard());
+        const rowsEl = names.querySelector('[data-rows]');
+        const status = names.querySelector('[data-status]');
+        const flash = t => { status.textContent = t; clearTimeout(flash.t); flash.t = setTimeout(() => { status.textContent = ''; }, 1800); };
+
+        const render = () => {
+            rowsEl.textContent = '';
+            const list = [...State.playlists.values()].sort((a, b) =>
+                playlistSortIndex(a.name) - playlistSortIndex(b.name) || (a.name || '').localeCompare(b.name || ''));
+            if (!list.length) {
+                const e = document.createElement('div');
+                e.className = 'text-sm text-gray-500';
+                e.textContent = 'No playlists loaded yet — open any page while logged in, then come back.';
+                rowsEl.appendChild(e);
+                return;
+            }
+            list.forEach(p => {
+                const explicit = playlistStyleKeys(p).map(k => playlistConfig.styles[k]).find(Boolean) || null;
+                const st = getPlaylistStyle(p.name, p.id) || {};
+                const row = document.createElement('div');
+                row.className = 'pn-row';
+                const color = document.createElement('input');
+                color.type = 'color';
+                color.value = '#' + (isRejectList(p.id) ? REJECT_HEX : (st.color || FALLBACK_COLOR));
+                color.disabled = isRejectList(p.id);
+                color.title = isRejectList(p.id) ? 'The reject list is always red' : 'Colour';
+                const name = document.createElement('div');
+                name.className = 'pn-name';
+                name.title = p.name || p.id;
+                name.textContent = p.name || p.id;
+                const n = document.createElement('small');
+                n.textContent = `${p.ids.size}`;
+                name.appendChild(n);
+                const label = document.createElement('input');
+                label.type = 'text';
+                label.placeholder = 'Short name';
+                label.value = explicit?.label || '';
+                const reset = document.createElement('button');
+                reset.type = 'button';
+                reset.className = 'pn-reset';
+                reset.textContent = '✕';
+                reset.title = 'Reset name and colour';
+                reset.disabled = !explicit;
+                let t = null;
+                label.addEventListener('input', () => {
+                    clearTimeout(t);
+                    t = setTimeout(() => {
+                        setPlaylistStyle(p, { label: label.value.trim() || null });
+                        savePlaylistConfig();
+                        reset.disabled = false;
+                        flash('Saved');
+                    }, 400);
+                });
+                color.addEventListener('change', () => {
+                    setPlaylistStyle(p, { color: color.value.replace('#', '').toLowerCase() });
+                    savePlaylistConfig();
+                    reset.disabled = false;
+                    flash('Saved');
+                });
+                reset.addEventListener('click', () => {
+                    playlistStyleKeys(p).forEach(k => delete playlistConfig.styles[k]);
+                    savePlaylistConfig();
+                    flash('Reset');
+                    render();
+                });
+                row.append(color, name, label, reset);
+                rowsEl.appendChild(row);
+            });
+        };
+        names.querySelector('[data-reset-all]').addEventListener('click', () => {
+            if (!confirm('Reset the short names and colours of all playlists?')) return;
+            Object.keys(playlistConfig.styles).forEach(k => delete playlistConfig.styles[k]);
+            savePlaylistConfig();
+            flash('All reset');
+            render();
+        });
+        render();
+        window.addEventListener('pmv:cache-ready', () => { if (sec.isConnected) render(); });
+        list.appendChild(sec);
+        if (location.hash === '#pmvx') setTimeout(() => sec.scrollIntoView({ block: 'start', behavior: 'smooth' }), 100);
+    }
+
+    // Vue may re-render the page and drop the section; put it back.
+    let settingsPageQueued = false;
+    new MutationObserver(() => {
+        if (settingsPageQueued || location.pathname.replace(/\/+$/, '') !== '/settings') return;
+        settingsPageQueued = true;
+        requestAnimationFrame(() => { settingsPageQueued = false; try { injectSettingsPageSection(); } catch {} });
+    }).observe(document.body, { childList: true, subtree: true });
+
+    // ---------------------------------------------------------------------
+    // Sidebar: "Saved content" group
+    // ---------------------------------------------------------------------
+    // A group under Explore in the site's sidebar: Favorites (the Favorites tab of your profile) and
+    // each of your playlists. Built from clones of the sidebar's own header row and links, so it
+    // matches their style; re-added when Vue re-renders the sidebar. Collapsed state is remembered.
+
+    const SAVED_NAV_KEY = 'pmv_saved_nav_open_v1';
+    const SAVED_NAV_ICON = {
+        bookmark: '<path d="M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z"/>',
+        heart: '<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>',
+        list: '<path d="M16 5H3"/><path d="M11 12H3"/><path d="M11 19H3"/><path d="M21 16V5"/><circle cx="18" cy="16" r="3"/>',
+        ban: '<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+        chevronDown: '<path d="m6 9 6 6 6-6"/>',
+        chevronRight: '<path d="m9 18 6-6-6-6"/>',
+    };
+    let savedNavOpen = (() => { try { return localStorage.getItem(SAVED_NAV_KEY) !== '0'; } catch { return true; } })();
+    let savedNavSig = '';
+
+    // Swaps the drawing of a cloned site icon, keeping its size and classes.
+    function setNavIcon(svgEl, paths) {
+        if (!svgEl) return;
+        svgEl.setAttribute('viewBox', '0 0 24 24');
+        svgEl.innerHTML = `<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</g>`;
+    }
+
+    function siteNavigate(href) {
+        const router = document.querySelector('#__nuxt')?.__vue_app__?.config?.globalProperties?.$router;
+        if (router) router.push(href).catch(() => { location.href = href; });
+        else location.href = href;
+    }
+
+    function savedNavLink(template, href, label, icon, extraTitle) {
+        const a = template.cloneNode(true);
+        [...a.attributes].forEach(at => { if (at.name !== 'class' && !at.name.startsWith('data-v-')) a.removeAttribute(at.name); });
+        a.href = href;
+        a.title = extraTitle || label;
+        a.dataset.pmvSavedNav = '1';
+        a.classList.remove('router-link-active', 'router-link-exact-active');
+        const svgEl = a.querySelector('svg');
+        const span = a.querySelector('span.flex-1') || document.createElement('span');
+        // Keep only the icon and the label: drop badges and Vue comment nodes.
+        a.textContent = '';
+        if (svgEl) { setNavIcon(svgEl, icon); a.appendChild(svgEl); }
+        span.className = 'flex-1';
+        // min-width:0 lets a long name shrink (ellipsis) instead of widening the sidebar.
+        span.style.cssText = 'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;';
+        a.style.minWidth = '0';
+        a.style.maxWidth = '100%';
+        a.style.overflow = 'hidden';
+        span.textContent = label;
+        a.appendChild(span);
+        a.addEventListener('click', e => {
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+            e.preventDefault();
+            siteNavigate(href);
+        });
+        return a;
+    }
+
+    function injectSavedNav() {
+        const exploreToggle = document.querySelector('aside button[aria-label="Toggle Explore submenu"]');
+        const exploreGroup = exploreToggle?.closest('div.mt-1');
+        if (!exploreGroup) return;
+        const existing = document.getElementById('pmvx-saved-nav');
+        const playlists = [...State.playlists.values()].sort((a, b) =>
+            playlistSortIndex(a.name) - playlistSortIndex(b.name) || (a.name || '').localeCompare(b.name || ''));
+        // Logged out (no playlists known): no group.
+        if (!playlists.length) { existing?.remove(); return; }
+        const sig = savedNavOpen + '|' + playlists.map(p => p.id + ':' + getPlaylistDisplayName(p.name, p.id)).join('|');
+        if (existing && existing.previousElementSibling === exploreGroup && savedNavSig === sig) return;
+
+        const headRowTpl = exploreToggle.closest('div.flex.items-center.justify-between');
+        const linkTpl = exploreGroup.querySelector('#watch-videos-group a') || exploreGroup.querySelector('a');
+        if (!headRowTpl || !linkTpl) return;
+
+        const group = document.createElement('div');
+        group.id = 'pmvx-saved-nav';
+        group.className = exploreGroup.className;
+        group.style.minWidth = '0';
+        group.style.maxWidth = '100%';
+
+        // Header: a clone of Explore's row, as a toggle.
+        const head = headRowTpl.cloneNode(true);
+        head.querySelectorAll('[aria-controls],[aria-expanded]').forEach(el => { el.removeAttribute('aria-controls'); el.removeAttribute('aria-expanded'); });
+        const headLink = head.querySelector('a');
+        const toggle = head.querySelector('button');
+        if (headLink) {
+            headLink.removeAttribute('href');
+            headLink.removeAttribute('aria-label');
+            // No role="button": the playlist-page filter finds queue rows by [role="button"].
+            headLink.setAttribute('aria-expanded', savedNavOpen ? 'true' : 'false');
+            headLink.classList.remove('router-link-active', 'router-link-exact-active');
+            headLink.style.cursor = 'pointer';
+            const icon = headLink.querySelector('svg');
+            const iconClone = icon ? icon.cloneNode(false) : null;
+            headLink.textContent = '';
+            if (iconClone) { setNavIcon(iconClone, SAVED_NAV_ICON.bookmark); headLink.appendChild(iconClone); }
+            headLink.appendChild(document.createTextNode(' Saved content '));
+        }
+        if (toggle) {
+            toggle.setAttribute('aria-label', 'Toggle Saved content submenu');
+            setNavIcon(toggle.querySelector('svg'), savedNavOpen ? SAVED_NAV_ICON.chevronDown : SAVED_NAV_ICON.chevronRight);
+        }
+        const flip = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            savedNavOpen = !savedNavOpen;
+            try { localStorage.setItem(SAVED_NAV_KEY, savedNavOpen ? '1' : '0'); } catch {}
+            injectSavedNav();
+        };
+        headLink?.addEventListener('click', flip);
+        toggle?.addEventListener('click', flip);
+        group.appendChild(head);
+
+        if (savedNavOpen) {
+            const items = document.createElement('div');
+            items.className = exploreGroup.querySelector('#watch-videos-group')?.className || 'mt-1 space-y-1 pl-3';
+            items.appendChild(savedNavLink(linkTpl, '/profile#favorites', 'Favorites', SAVED_NAV_ICON.heart));
+            playlists.forEach(p => {
+                const name = getPlaylistDisplayName(p.name, p.id) || p.name || p.id;
+                const rej = isRejectList(p.id);
+                const a = savedNavLink(linkTpl, `/playlists/${p.id}`, name, rej ? SAVED_NAV_ICON.ban : SAVED_NAV_ICON.list,
+                    `${p.name || p.id} — ${p.ids.size} videos`);
+                const n = document.createElement('span');
+                n.textContent = String(p.ids.size);
+                n.style.cssText = 'flex-shrink:0;font-size:11px;color:rgb(107,114,128);font-variant-numeric:tabular-nums;';
+                a.appendChild(n);
+                items.appendChild(a);
+            });
+            group.appendChild(items);
+        }
+
+        savedNavSig = sig;
+        if (existing) existing.replaceWith(group);
+        exploreGroup.after(group);
+    }
+
+    // /profile#favorites: open the Favorites tab once the profile has rendered.
+    let favTabTries = 0;
+    function openFavoritesTabIfAsked() {
+        if (location.pathname.replace(/\/+$/, '') !== '/profile' || location.hash !== '#favorites') { favTabTries = 0; return; }
+        if (favTabTries > 40) return;
+        favTabTries++;
+        const tab = [...document.querySelectorAll('button')].find(b =>
+            b.classList.contains('pb-3') && /^Favorites\b/.test(b.textContent.trim()));
+        if (!tab) return;
+        favTabTries = 99;
+        if (!tab.className.includes('text-orange-400')) tab.click();
+    }
+
+    let savedNavQueued = false;
+    new MutationObserver(() => {
+        if (savedNavQueued) return;
+        savedNavQueued = true;
+        requestAnimationFrame(() => {
+            savedNavQueued = false;
+            try { injectSavedNav(); } catch {}
+            try { openFavoritesTabIfAsked(); } catch {}
+        });
+    }).observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('pmv:cache-ready', () => { try { injectSavedNav(); } catch {} });
 
     // The site's gear: the header button whose lucide:settings icon has the r=3 center circle.
     function siteSettingsButton() {
@@ -4952,7 +5563,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             position: fixed; top: 18%; left: 50%; transform: translateX(-50%);
             background: rgba(20,20,20,0.98); border: 1px solid rgba(255,255,255,0.15);
             border-radius: 10px; z-index: 9999999; width: 480px; max-width: 90vw;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.7); font-family: ui-monospace, monospace;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.7); font-family:inherit;font-variant-numeric:tabular-nums;
             backdrop-filter: blur(10px);
         `;
         box.innerHTML = `
@@ -5995,6 +6606,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     function getCurrentVideoId() {
+        // Playlist pages: the active queue row (border-orange-500) is the playing video. It wins over
+        // currentVideoData, which lags a step when the queue advances, and over the player's poster,
+        // whose hex is a thumbnail asset id; either would leave the playlist pills on the wrong video.
+        if (location.pathname.startsWith('/playlists/')) {
+            const active = getActiveQueueVideoId();
+            if (active) return active;
+        }
         if (State.currentVideoData?.id) return State.currentVideoData.id;
 
         // On /video/ pages the URL hex is the one reliable id before any API response: a mapped slug id
@@ -6289,10 +6907,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             saveCacheSoon();
             refreshQueuePlaylistChips(videoId);
         }
-        // Grace-window marker: lets the playlist-page filter keep this video visible briefly
-        // instead of hiding it the moment it is added.
-        if (!PMVX.justAddedIds) PMVX.justAddedIds = new Map();
-        PMVX.justAddedIds.set(videoId, Date.now());
+        // Filters keep this video visible until they are applied again (see PMVX.markActed).
+        PMVX.markActed(videoId);
 
         // The reject list is exclusive: a video on it is on no other playlist, and saving it to any
         // other playlist removes it from the reject list. Handled here so every surface (HUD row,
@@ -6318,9 +6934,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         State.reverse.get(videoId)?.delete(playlistId);
         saveCacheSoon();
         refreshQueuePlaylistChips(videoId);
-        // Same grace window for removal while filtering on "in list".
-        if (!PMVX.justAddedIds) PMVX.justAddedIds = new Map();
-        PMVX.justAddedIds.set(videoId, Date.now());
+        // Same for removal while filtering on "in list".
+        PMVX.markActed(videoId);
         return true;
     }
 
@@ -7133,7 +7748,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         played.style.cssText = 'height:100%;width:0%;background:rgba(255,255,255,.35);';
 
         const time = document.createElement('div');
-        time.style.cssText = 'position:absolute;right:14px;bottom:5px;font-size:10px;color:rgba(255,255,255,.28);font-family:ui-monospace,monospace;letter-spacing:.05em;';
+        time.style.cssText = 'position:absolute;right:14px;bottom:5px;font-size:10px;color:rgba(255,255,255,.28);font-family:inherit;font-variant-numeric:tabular-nums;letter-spacing:.05em;';
 
         track.appendChild(played);
         bar.appendChild(track);
@@ -8573,13 +9188,40 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     // ✕ on a card: reject the video (see toggleRejectVideo) without opening it. Only present while a
     // reject list is chosen; red if rejected, grey otherwise. `resolveId` gives the API _id
-    // (directly, or via lookup on slug cards).
+    // (directly, or via lookup on slug cards). Kept apart from "+" (pushed to the end of its row) so
+    // the two are not mixed up. While a card filter is active, rejecting takes two clicks: the first
+    // turns the button red ("Reject?"), a second within REJECT_ARM_MS rejects.
+    const REJECT_ARM_MS = 3000;
     function styleRejectCardBtn(btn, on) {
+        const armed = !on && btn.dataset.armed === '1';
         btn.style.cursor = 'pointer';
-        btn.style.background = on ? `rgba(${REJECT_RGB},0.18)` : 'rgba(255,255,255,0.05)';
-        btn.style.borderColor = on ? `rgba(${REJECT_RGB},0.55)` : 'rgba(255,255,255,0.1)';
-        btn.style.color = on ? `rgb(${REJECT_RGB})` : 'rgb(156,163,175)';
-        btn.title = on ? 'Remove from reject list' : 'Reject (move to the reject list, remove from every other playlist)';
+        btn.style.background = armed ? `rgba(${REJECT_RGB},0.85)` : on ? `rgba(${REJECT_RGB},0.18)` : 'rgba(255,255,255,0.05)';
+        btn.style.borderColor = armed ? `rgb(${REJECT_RGB})` : on ? `rgba(${REJECT_RGB},0.55)` : 'rgba(255,255,255,0.1)';
+        btn.style.color = armed ? '#fff' : on ? `rgb(${REJECT_RGB})` : 'rgb(156,163,175)';
+        btn.textContent = armed ? '\u2715 Reject?' : '\u2715';
+        btn.title = armed ? 'Click again to reject'
+            : on ? 'Remove from reject list'
+            : 'Reject (move to the reject list, remove from every other playlist)';
+    }
+
+    function disarmRejectBtn(btn) {
+        clearTimeout(btn._pmvArmTimer);
+        if (btn.dataset.armed !== '1') return;
+        delete btn.dataset.armed;
+        styleRejectCardBtn(btn, btn.dataset.on === '1');
+    }
+
+    // Keeps the ✕ away from "+": last and right-aligned in a flex row, floated right otherwise.
+    function placeRejectBtnApart(btn, parent) {
+        const d = getComputedStyle(parent).display;
+        if (d.includes('flex')) {
+            btn.style.order = '99';
+            btn.style.marginLeft = 'auto';
+        } else {
+            btn.style.cssFloat = 'right';
+            btn.style.marginLeft = '8px';
+        }
+        parent.appendChild(btn);
     }
 
     function rejectCardButtonEl(card, resolveId, initialOn) {
@@ -8587,9 +9229,103 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         btn.type = 'button';
         btn.dataset.pmvRejectBtn = '1';
         btn.dataset.pmvBadge = '1';
-        btn.textContent = '\u2715';
         btn.className = Q_CHIP;
+        btn.dataset.on = initialOn ? '1' : '';
         styleRejectCardBtn(btn, initialOn);
+        btn.addEventListener('mousedown', e => e.stopPropagation());
+        btn.addEventListener('click', async e => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (btn.dataset.busy) return;
+            const on = btn.dataset.on === '1';
+            if (!on && btn.dataset.armed !== '1' && PMVX.anyCardFilterActive()) {
+                btn.dataset.armed = '1';
+                styleRejectCardBtn(btn, false);
+                clearTimeout(btn._pmvArmTimer);
+                btn._pmvArmTimer = setTimeout(() => disarmRejectBtn(btn), REJECT_ARM_MS);
+                return;
+            }
+            disarmRejectBtn(btn);
+            btn.dataset.busy = '1';
+            btn.style.opacity = '0.5';
+            try {
+                const id = await resolveId();
+                if (!id) { toast('Video not found'); return; }
+                const now = await toggleRejectVideo(id);
+                if (now === null) return;
+                btn.dataset.on = now ? '1' : '';
+                styleRejectCardBtn(btn, now);
+                // Re-render this card's badges and tint on the next pass.
+                card.querySelectorAll('[data-playlist-name]').forEach(el => el.remove());
+                delete card.dataset.pmvChecked;
+                delete card.dataset.pmvRecChecked;
+                delete card.dataset.pmvMfChecked;
+                scheduleBadges();
+            } catch {
+                toast('Reject failed');
+            } finally {
+                delete btn.dataset.busy;
+                btn.style.opacity = '';
+            }
+        });
+        return btn;
+    }
+
+    // Badge passes call this for existing buttons; it leaves an armed button alone.
+    function refreshRejectCardBtn(btn, on) {
+        btn.dataset.on = on ? '1' : '';
+        if (on) disarmRejectBtn(btn);
+        styleRejectCardBtn(btn, on);
+    }
+
+    // Heart on a card: favourite / unfavourite without opening the video.
+    //   GET /api/users/favorite-ids -> { favorites: [id, ...] }   (state, loaded once per page load)
+    //   PUT /api/videos/<id>/favorite  { action: "favorite" | "unfavorite" }
+    const FAV_RGB = '244,114,182'; // pink-400, the site's favourites colour
+    const HEART_SVG = on => `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="${on ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`;
+    let favIds = null;          // Set once loaded; null = unknown (logged out or not loaded yet)
+    let favLoad = null;
+    function loadFavIds() {
+        if (favLoad) return favLoad;
+        favLoad = fetch('/api/users/favorite-ids', { credentials: 'include', headers: { accept: 'application/json' } })
+            .then(r => r.ok ? r.json() : null)
+            .then(j => {
+                const list = j?.favorites || j?.data?.favorites;
+                if (Array.isArray(list)) { favIds = new Set(list); refreshFavButtons(); }
+            })
+            .catch(() => {});
+        return favLoad;
+    }
+    function isFavourite(id) { return !!(id && favIds?.has(id)); }
+    function noteFavourite(id, on) {
+        if (!favIds) favIds = new Set();
+        if (on) favIds.add(id); else favIds.delete(id);
+        refreshFavButtons();
+    }
+    function styleFavCardBtn(btn, on) {
+        btn.style.cursor = 'pointer';
+        btn.style.background = on ? `rgba(${FAV_RGB},0.18)` : 'rgba(255,255,255,0.05)';
+        btn.style.borderColor = on ? `rgba(${FAV_RGB},0.55)` : 'rgba(255,255,255,0.1)';
+        btn.style.color = on ? `rgb(${FAV_RGB})` : 'rgb(156,163,175)';
+        btn.title = on ? 'Remove from favourites' : 'Add to favourites';
+        btn.innerHTML = HEART_SVG(on);
+    }
+    function refreshFavButtons() {
+        document.querySelectorAll('[data-pmv-fav-btn]').forEach(btn => {
+            const id = btn._pmvFavId?.();
+            styleFavCardBtn(btn, isFavourite(id));
+        });
+    }
+    // `knownId` gives the API _id if it is known without a request; `resolveId` may fetch it.
+    function favCardButtonEl(knownId, resolveId) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.pmvFavBtn = '1';
+        btn.dataset.pmvBadge = '1';
+        btn.className = Q_CHIP;
+        btn._pmvFavId = knownId;
+        styleFavCardBtn(btn, isFavourite(knownId()));
+        loadFavIds();
         btn.addEventListener('mousedown', e => e.stopPropagation());
         btn.addEventListener('click', async e => {
             e.preventDefault();
@@ -8600,17 +9336,21 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             try {
                 const id = await resolveId();
                 if (!id) { toast('Video not found'); return; }
-                const now = await toggleRejectVideo(id);
-                if (now === null) return;
-                styleRejectCardBtn(btn, now);
-                // Re-render this card's badges and tint on the next pass.
-                card.querySelectorAll('[data-playlist-name]').forEach(el => el.remove());
-                delete card.dataset.pmvChecked;
-                delete card.dataset.pmvRecChecked;
-                delete card.dataset.pmvMfChecked;
-                scheduleBadges();
+                await loadFavIds();
+                const wasOn = isFavourite(id);
+                const res = await fetch(`/api/videos/${id}/favorite`, {
+                    method: 'PUT',
+                    headers: { 'content-type': 'application/json', accept: 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ action: wasOn ? 'unfavorite' : 'favorite' }),
+                });
+                if (!res.ok) { toast(res.status === 401 ? 'Log in to favourite videos' : `Favourite failed (${res.status})`, 'red'); return; }
+                // noteFavourite already ran from the fetch hook; keep the page's own state in step too.
+                if (State.currentVideoData?.id === id) State.currentVideoData.isFavorited = !wasOn;
+                PMVX.markActed(id);
+                toast(wasOn ? '✕ Removed from favourites' : '♥ Added to favourites', wasOn ? null : 'green');
             } catch {
-                toast('Reject failed');
+                toast('Favourite failed', 'red');
             } finally {
                 delete btn.dataset.busy;
                 btn.style.opacity = '';
@@ -8689,10 +9429,16 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 targetRow.appendChild(aqBtn);
             }
 
+            if (!targetRow.querySelector('[data-pmv-fav-btn]')) {
+                const fb = favCardButtonEl(() => card.dataset.videoId || videoId, async () => card.dataset.videoId || videoId);
+                const aq = targetRow.querySelector('[data-pmv-addqueue]');
+                if (aq) aq.after(fb); else targetRow.appendChild(fb);
+            }
+
             const rjBtn = targetRow.querySelector('[data-pmv-reject-btn]');
             if (!rejectPlaylistId) rjBtn?.remove();
-            else if (rjBtn) styleRejectCardBtn(rjBtn, isRejected(videoId));
-            else targetRow.appendChild(rejectCardButtonEl(card, async () => videoId, isRejected(videoId)));
+            else if (rjBtn) refreshRejectCardBtn(rjBtn, isRejected(videoId));
+            else placeRejectBtnApart(rejectCardButtonEl(card, async () => videoId, isRejected(videoId)), targetRow);
 
             if (!State.ready) {
                 if (!targetRow.querySelector('[data-playlist-loading]')) {
@@ -9008,10 +9754,21 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 })
                 .catch(() => noteLookupFailure(slugId));
         });
-        // Before the ✕, so the two read "+ ✕" like on the other cards.
+        // Heart right after "+"; the resolved id is cached, so later clicks need no request.
+        const favBtn = favCardButtonEl(() => knownApiIdForCard(card, slugId), async () => {
+            const id = knownApiIdForCard(card, slugId);
+            if (id) return id;
+            const v = await fetchVideoDeduped(slugId).catch(() => { noteLookupFailure(slugId); return null; });
+            if (!v?._id) return null;
+            State.slugToApiId.set(slugId, v._id);
+            return v._id;
+        });
+        favBtn.style.marginTop = '2px';
+        favBtn.style.marginLeft = '4px';
+        // Before the ✕ in DOM order, so a floated ✕ sits on the same line at the far right.
         const rj = infoDiv.querySelector('[data-pmv-reject-btn]');
-        if (rj) infoDiv.insertBefore(aqBtn, rj);
-        else infoDiv.appendChild(aqBtn);
+        if (rj) { infoDiv.insertBefore(aqBtn, rj); infoDiv.insertBefore(favBtn, rj); }
+        else infoDiv.append(aqBtn, favBtn);
     }
 
     // ✕ on a Recommended / More from card. Placed from the card alone, id resolved
@@ -9020,7 +9777,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const existing = infoDiv.querySelector('[data-pmv-reject-btn]');
         if (!rejectPlaylistId) { existing?.remove(); return; }
         const known = knownApiIdForCard(card, slugId);
-        if (existing) { styleRejectCardBtn(existing, isRejected(known)); return; }
+        if (existing) { refreshRejectCardBtn(existing, isRejected(known)); return; }
         const btn = rejectCardButtonEl(card, async () => {
             const id = knownApiIdForCard(card, slugId);
             if (id) return id;
@@ -9030,17 +9787,17 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             return v._id;
         }, isRejected(known));
         btn.style.marginTop = '2px';
-        btn.style.marginLeft = '4px';
-        infoDiv.appendChild(btn);
+        placeRejectBtnApart(btn, infoDiv);
     }
 
     function placeRecBadge(card, videoId) {
         const inPl = isVideoInPlaylist(videoId);
 
-        if (State.recFilterMode === 'in' && !inPl) {
+        const pinned = PMVX.isActed(videoId);
+        if (State.recFilterMode === 'in' && !inPl && !pinned) {
             card.style.setProperty('display', 'none', 'important'); return;
         }
-        if (State.recFilterMode === 'out' && inPl) {
+        if (State.recFilterMode === 'out' && inPl && !pinned) {
             card.style.setProperty('display', 'none', 'important'); return;
         }
         card.style.removeProperty('display');
@@ -9605,6 +10362,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
             btn.addEventListener('click', () => {
                 State.recFilterMode = mode;
+                PMVX.clearActed();
                 document.querySelectorAll('#pmv-rec-filter button[data-pmv-rec-mode]').forEach(b => {
                     applyRecChipClass(b, b.dataset.pmvRecMode === mode);
                 });
@@ -10132,7 +10890,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             tip.appendChild(canvas);
             const label = document.createElement('div');
             label.style.cssText = 'position:absolute;left:50%;bottom:4px;transform:translateX(-50%);display:none;' +
-                'padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.75);color:#fff;font-size:11px;font-family:ui-monospace,monospace;';
+                'padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.75);color:#fff;font-size:11px;font-family:inherit;font-variant-numeric:tabular-nums;';
             tip.appendChild(label);
             Scrub.tip = tip;
             Scrub.img = img;
@@ -11095,7 +11853,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             background: rgba(20,20,20,0.97); border: 1px solid rgba(255,255,255,0.15);
             border-radius: 12px; padding: 18px 22px; z-index: 999999;
             color: rgba(255,255,255,0.85); font-size: 13px;
-            font-family: ui-monospace, monospace; line-height: 1.9;
+            font-family:inherit;font-variant-numeric:tabular-nums; line-height: 1.9;
             min-width: 340px; backdrop-filter: blur(10px);
         `;
         box.innerHTML = `
@@ -11111,7 +11869,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 <tr><td style="color:rgb(100,255,0);">Ctrl/Cmd+K</td><td>Search (videos, playlists) + open Up next</td></tr>
             </table>
             <div style="margin-top:14px;font-size:11px;color:rgba(255,255,255,0.3);">
-                Bind hotkeys to your own key/playlist: Settings (gear in the header) → PMVH Extended → Assign hotkeys.<br>
+                Bind hotkeys to your own key/playlist: the site's full Settings page (/settings) → PMVH Extended → Assign hotkeys.<br>
                 Press ? again, or click outside this window, to close.
             </div>
         `;
@@ -11285,6 +12043,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             if (Array.isArray(s.selectedPlaylistIds)) selectedPlaylistIds = s.selectedPlaylistIds.slice();
         } catch {}
     })();
+    let pendingIds = selectedPlaylistIds.slice();
     function savePickerSettings() {
         try { localStorage.setItem(SETTINGS_KEY, JSON.stringify({ selectedPlaylistIds })); } catch {}
     }
@@ -11321,11 +12080,17 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     const _origFetch = window.fetch;
     window.fetch = async function (...args) {
-        const res = await _origFetch.apply(this, args);
+        const rawUrl0 = typeof args[0] === 'string' ? args[0]
+                      : args[0] instanceof Request  ? args[0].url
+                      : String(args[0]);
+        const isSavedSearches = /\/api\/saved-searches(\?|$)/.test(rawUrl0);
+        const method = String(args[1]?.method || (args[0] instanceof Request ? args[0].method : 'GET')).toUpperCase();
+        const res = isSavedSearches && method === 'POST'
+            ? await saveWithPlaylists(_origFetch, this, args)
+            : await _origFetch.apply(this, args);
+        if (isSavedSearches) pmvResJson(res).then(rememberSavedList).catch(() => {});
         try {
-            const rawUrl = typeof args[0] === 'string' ? args[0]
-                         : args[0] instanceof Request  ? args[0].url
-                         : String(args[0]);
+            const rawUrl = rawUrl0;
             if (/\/api\/videos(\?|$)/.test(rawUrl)) {
                 lastApiUrl = rawUrl;
                 const u = new URL(rawUrl, location.origin);
@@ -11408,16 +12173,44 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     // ---------------------------------------------------------------------
 
     let playlistFilterMode = 'any';
+    // Staged values, shown by the chips. Committed by the site's Apply button where the page has one
+    // (homepage filter menu), otherwise straight away.
+    let pendingMode = 'any';
 
     // ---------------------------------------------------------------------
     // Mode
     // ---------------------------------------------------------------------
     // Filters only cards already loaded; the observer below re-filters new batches.
 
+    PMVX.filterChecks.push(() => playlistFilterMode !== 'any' && isFilterPage());
+
     function setMode(mode) {
         playlistFilterMode = mode;
+        pendingMode = mode;
+        PMVX.clearActed();
         updateBtnStyles();
         applyFilter();
+    }
+
+    // Commits the staged mode and playlist selection.
+    function commitPending() {
+        if (pendingIds.join(',') !== selectedPlaylistIds.join(',')) {
+            selectedPlaylistIds = pendingIds.slice();
+            savePickerSettings();
+        }
+        setMode(pendingMode);
+    }
+
+    function nativeApplyBtn() {
+        for (const b of document.querySelectorAll('button')) {
+            if (b.textContent?.trim() === 'Apply' && b.getClientRects().length) return b;
+        }
+        return null;
+    }
+    // Stage on pages with the site's Apply button, apply immediately elsewhere.
+    function stagedChange() {
+        if (nativeApplyBtn()) updateBtnStyles();
+        else commitPending();
     }
 
     // ---------------------------------------------------------------------
@@ -11443,7 +12236,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             const id = getVideoId(card);
             if (!id) { card.removeAttribute(HIDE_ATTR); return; }
             const inAny = isInPlaylist(id);
-            const show  = playlistFilterMode === 'in' ? inAny : !inAny;
+            // Cards just acted on stay until the filter is applied again.
+            const show  = (playlistFilterMode === 'in' ? inAny : !inAny) || PMVX.isActed(id);
             if (show) { card.removeAttribute(HIDE_ATTR); visible++; }
             else      { card.setAttribute(HIDE_ATTR, '1'); hidden++; }
         });
@@ -11492,6 +12286,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     // ---------------------------------------------------------------------
     // UI injection
     // ---------------------------------------------------------------------
+    // Chips in the site's filter row (the "Content:" chips), same shape and colours. One chip cycles
+    // Any → Not in playlist → In playlist → Any; a second one opens an inline list of the playlists
+    // that count. On the homepage the choice is staged until the site's Apply button and is stored
+    // with a saved filter (see the saved-search hooks below).
 
     let injected = false;
 
@@ -11506,169 +12304,242 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return null;
     }
 
+    const CHIP_CLASS = 'inline-flex items-center gap-1 px-2.5 py-1 rounded-full border cursor-pointer transition-all text-xs';
+    const svg = paths => `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+    const ICON = {
+        list: svg('<path d="M3 12h.01"/><path d="M3 18h.01"/><path d="M3 6h.01"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M8 6h13"/>'),
+        check: svg('<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>'),
+        ban: svg('<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>'),
+        chevron: svg('<path d="m6 9 6 6 6-6"/>'),
+    };
+    const NEXT_MODE = { any: 'out', out: 'in', in: 'any' };
+
+    function mkChip(id) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.id = id;
+        b.className = CHIP_CLASS + ' pmvbpf-chip';
+        return b;
+    }
+
     function injectButtons() {
         if (injected || !isFilterPage()) return;
+        // Already there (e.g. an SPA navigation reset the flag but the row survived): keep one set.
+        const ids = ['pmvbpf-sep', 'pmvbpf-btn-in', 'pmvbpf-btn-pick', 'pmvbpf-counter', 'pmvbpf-panel'];
+        ids.forEach(id => [...document.querySelectorAll('#' + id)].slice(1).forEach(el => el.remove()));
+        if (document.getElementById('pmvbpf-btn-in')?.isConnected) { injected = true; updateBtnStyles(); return; }
         const row = findContentRow();
         if (!row) return;
         if (!cacheLoaded && !loadCache()) { scheduleRetry(); return; }
 
         injected = true;
+        injectPanelStyle();
 
         row.appendChild(Object.assign(document.createElement('div'), {
             id: 'pmvbpf-sep', className: 'w-px h-5 bg-[#2A2A2A] mx-1'
         }));
 
-        const btnIn  = makeBtn('✓ In playlist',     '#22c55e', () => setMode(playlistFilterMode === 'in'  ? 'any' : 'in'));
-        const btnOut = makeBtn('✕ Not in playlist', '#f97316', () => setMode(playlistFilterMode === 'out' ? 'any' : 'out'));
-        btnIn.id  = 'pmvbpf-btn-in';
-        btnOut.id = 'pmvbpf-btn-out';
+        const modeChip = mkChip('pmvbpf-btn-in');
+        modeChip.addEventListener('click', () => { pendingMode = NEXT_MODE[pendingMode] || 'any'; stagedChange(); });
 
-        // Playlist picker: a pill toggles an inline chip panel under the row (no floating dropdown).
-        injectPanelStyle();
-        const pickBtn = makeBtn('Playlists ▾', '#f97316', () => {
+        const pickChip = mkChip('pmvbpf-btn-pick');
+        pickChip.title = 'Which playlists count for In / Not in playlist (none = any playlist)';
+        pickChip.addEventListener('click', () => {
             const pnl = document.getElementById('pmvbpf-panel');
             if (!pnl) return;
             pnl.hidden = !pnl.hidden;
-            renderPickLabel();
+            updateBtnStyles();
         });
-        pickBtn.id = 'pmvbpf-btn-pick';
-        pickBtn.title = 'Choose which playlists count (none = any playlist)';
-        const renderPickLabel = () => {
-            const pnl = document.getElementById('pmvbpf-panel');
-            const n = selectedPlaylistIds.length;
-            pickBtn.textContent = (n ? `Playlists (${n}) ` : 'Playlists ') + (pnl && !pnl.hidden ? '▴' : '▾');
-            styleBtn(pickBtn, n > 0, '#f97316');
-        };
-        const pickWrap = document.createElement('div');
-        pickWrap.style.cssText = 'display:inline-flex;';
-        pickWrap.appendChild(pickBtn);
 
         const panel = document.createElement('div');
         panel.id = 'pmvbpf-panel';
         panel.hidden = true;
         const lab = document.createElement('div');
-        lab.className = 'pmvbpf-lab';
-        lab.textContent = 'Playlists that count for In / Not in playlist — none selected = any playlist';
+        lab.className = 'text-gray-400 text-xs font-medium';
+        lab.style.marginBottom = '8px';
+        lab.textContent = 'Playlists that count — none selected = any playlist';
         const chips = document.createElement('div');
-        chips.className = 'pmvbpf-chips';
+        chips.className = 'flex flex-wrap items-center gap-2';
         panel.append(lab, chips);
         let chipSig = null;
         const renderChips = () => {
             const live = PMVX.state?.playlists?.size ? PMVX.state.playlists : playlistsMap;
             const list = [...live.values()].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-            const sig = list.map(p => p.id + ':' + p.ids.size).join('|') + '#' + selectedPlaylistIds.join(',');
+            const sig = list.map(p => p.id + ':' + p.ids.size).join('|') + '#' + pendingIds.join(',');
             if (sig === chipSig) return;
             chipSig = sig;
             chips.textContent = '';
             if (!list.length) {
-                const e = document.createElement('div');
-                e.className = 'pmvbpf-empty';
+                const e = document.createElement('span');
+                e.className = 'text-xs text-gray-500';
                 e.textContent = 'No playlists yet — log in to load yours.';
                 chips.appendChild(e);
                 return;
             }
-            const all = document.createElement('button');
-            all.type = 'button';
-            all.className = 'pmvbpf-chip' + (selectedPlaylistIds.length ? '' : ' active');
+            const all = mkChip('');
+            all.removeAttribute('id');
+            all.dataset.state = pendingIds.length ? 'off' : 'pick';
             all.textContent = 'Any playlist';
-            all.onclick = () => { selectedPlaylistIds = []; savePickerSettings(); renderChips(); renderPickLabel(); if (playlistFilterMode !== 'any') applyFilter(); };
+            all.onclick = () => { pendingIds = []; renderChips(); stagedChange(); };
             chips.appendChild(all);
             list.forEach(p => {
-                const c = document.createElement('button');
-                c.type = 'button';
-                const sel = selectedPlaylistIds.includes(p.id);
-                c.className = 'pmvbpf-chip' + (sel ? ' active' : '');
+                const c = mkChip('');
+                c.removeAttribute('id');
+                const sel = pendingIds.includes(p.id);
+                c.dataset.state = sel ? 'pick' : 'off';
                 c.title = `${p.ids.size} videos`;
                 c.textContent = p.name || p.id;
                 const n = document.createElement('span');
-                n.className = 'n';
+                n.className = 'pmvbpf-n';
                 n.textContent = String(p.ids.size);
                 c.appendChild(n);
                 c.onclick = () => {
-                    selectedPlaylistIds = sel ? selectedPlaylistIds.filter(x => x !== p.id) : [...selectedPlaylistIds, p.id];
-                    savePickerSettings();
-                    renderChips(); renderPickLabel();
-                    if (playlistFilterMode !== 'any') applyFilter();
+                    pendingIds = sel ? pendingIds.filter(x => x !== p.id) : [...pendingIds, p.id];
+                    renderChips();
+                    stagedChange();
                 };
                 chips.appendChild(c);
             });
         };
+        NF_renderChips = renderChips;
         renderChips();
-        renderPickLabel();
         window.addEventListener('pmv:cache-ready', renderChips);
-        // Full-width panel directly under the native row.
+        // Full width directly under the native row, inside the site's filter menu.
         if (row.parentElement) row.parentElement.insertBefore(panel, row.nextSibling);
 
         const counter = Object.assign(document.createElement('span'), { id: 'pmvbpf-counter' });
-        counter.style.cssText = 'font-size:11px;color:rgba(255,255,255,.35);display:none;margin-left:4px;';
+        counter.className = 'text-xs text-gray-500';
+        counter.style.cssText = 'display:none;margin-left:4px;';
 
-        row.appendChild(btnIn);
-        row.appendChild(btnOut);
-        row.appendChild(pickWrap);
+        row.appendChild(modeChip);
+        row.appendChild(pickChip);
         row.appendChild(counter);
         updateBtnStyles();
     }
+    let NF_renderChips = null;
 
+    // Colours per state via data-state: inline styles are lost when Vue re-renders, data-* is not.
     function injectPanelStyle() {
         if (document.getElementById('pmvbpf-panel-style')) return;
         const st = document.createElement('style');
         st.id = 'pmvbpf-panel-style';
         st.textContent = `
-#pmvbpf-panel{margin:10px 0 4px;padding:12px 16px;background:#111;border:1px solid #1F1F1F;border-radius:12px;width:100%;box-sizing:border-box;}
+.pmvbpf-chip{font-family:inherit;line-height:1.2;white-space:nowrap;}
+.pmvbpf-chip[data-state="off"]{background:#1A1A1A;border-color:#2A2A2A;color:rgb(156,163,175);}
+.pmvbpf-chip[data-state="off"]:hover{border-color:#3A3A3A;}
+.pmvbpf-chip[data-state="in"]{background:rgba(34,197,94,.2);border-color:rgba(34,197,94,.5);color:rgb(134,239,172);}
+.pmvbpf-chip[data-state="out"]{background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.4);color:rgb(248,113,113);}
+.pmvbpf-chip[data-state="pick"]{background:rgba(249,115,22,.2);border-color:rgba(249,115,22,.5);color:rgb(253,186,116);}
+.pmvbpf-chip[data-pending="1"]{border-style:dashed;}
+.pmvbpf-chip svg{flex-shrink:0;}
+.pmvbpf-chip .pmvbpf-n{opacity:.55;font-variant-numeric:tabular-nums;}
+#pmvbpf-panel{margin-top:12px;padding-top:12px;border-top:1px solid #1F1F1F;width:100%;box-sizing:border-box;}
 #pmvbpf-panel[hidden]{display:none;}
-#pmvbpf-panel .pmvbpf-lab{color:rgb(156,163,175);font-size:12px;font-weight:500;margin-bottom:8px;}
-#pmvbpf-panel .pmvbpf-chips{display:flex;flex-wrap:wrap;gap:8px;}
-#pmvbpf-panel .pmvbpf-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;line-height:1.2;white-space:nowrap;
-  background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.7);border:1px solid rgba(255,255,255,0.1);transition:background .15s,color .15s;font-family:inherit;}
-#pmvbpf-panel .pmvbpf-chip:hover{background:rgba(255,255,255,0.09);color:#fff;}
-#pmvbpf-panel .pmvbpf-chip.active{background:rgba(249,115,22,0.2);color:rgb(249,115,22);border-color:rgba(249,115,22,0.5);font-weight:600;}
-#pmvbpf-panel .pmvbpf-chip .n{opacity:.5;font-weight:400;font-family:ui-monospace,monospace;font-size:11px;}
-#pmvbpf-panel .pmvbpf-empty{color:rgba(255,255,255,0.4);font-size:12px;}
 `;
         (document.head || document.documentElement).appendChild(st);
     }
 
-    function makeBtn(label, activeColor, onClick) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.dataset.pmvColor = activeColor;
-        btn.style.cssText = `display:inline-flex;align-items:center;gap:4px;padding:4px 10px;
-            border-radius:9999px;border:1px solid #2A2A2A;background:#1A1A1A;
-            color:#9ca3af;font-size:12px;cursor:pointer;transition:all 0.15s;white-space:nowrap;`;
-        btn.textContent = label;
-        btn.addEventListener('click', onClick);
-        btn.addEventListener('mouseenter', () => { if (!btn.dataset.active) btn.style.borderColor = '#3A3A3A'; });
-        btn.addEventListener('mouseleave', () => { if (!btn.dataset.active) { btn.style.borderColor = '#2A2A2A'; btn.style.background = '#1A1A1A'; btn.style.color = '#9ca3af'; }});
-        return btn;
-    }
-
     function updateBtnStyles() {
-        styleBtn(document.getElementById('pmvbpf-btn-in'),  playlistFilterMode === 'in',  '#22c55e');
-        styleBtn(document.getElementById('pmvbpf-btn-out'), playlistFilterMode === 'out', '#f97316');
-    }
-
-    function styleBtn(btn, active, color) {
-        if (!btn) return;
-        const [r, g, b] = [1,3,5].map(i => parseInt(color.slice(i, i+2), 16));
-        if (active) {
-            btn.dataset.active = '1';
-            btn.style.background  = `rgba(${r},${g},${b},.15)`;
-            btn.style.borderColor = `rgba(${r},${g},${b},.5)`;
-            btn.style.color       = color;
-        } else {
-            delete btn.dataset.active;
-            btn.style.background  = '#1A1A1A';
-            btn.style.borderColor = '#2A2A2A';
-            btn.style.color       = '#9ca3af';
+        const mc = document.getElementById('pmvbpf-btn-in');
+        if (mc) {
+            const st = pendingMode === 'in' ? 'in' : pendingMode === 'out' ? 'out' : 'off';
+            mc.dataset.state = st;
+            mc.innerHTML = (st === 'out' ? ICON.ban : st === 'in' ? ICON.check : ICON.list) + '<span></span>';
+            mc.lastChild.textContent = st === 'out' ? 'Not in playlist' : st === 'in' ? 'In playlist' : 'Playlists';
+            const staged = pendingMode !== playlistFilterMode;
+            mc.dataset.pending = staged ? '1' : '';
+            mc.title = (st === 'off' ? 'Filter on your playlists: click for Not in playlist, again for In playlist'
+                : st === 'out' ? 'Only videos that are not in your playlists (click: In playlist)'
+                : 'Only videos that are in your playlists (click: off)')
+                + (staged ? ' — press Apply' : '');
         }
+        const pc = document.getElementById('pmvbpf-btn-pick');
+        if (pc) {
+            const pnl = document.getElementById('pmvbpf-panel');
+            const n = pendingIds.length;
+            pc.dataset.state = n ? 'pick' : 'off';
+            pc.dataset.pending = pendingIds.join(',') !== selectedPlaylistIds.join(',') ? '1' : '';
+            pc.innerHTML = '<span></span>' + ICON.chevron;
+            pc.firstChild.textContent = n ? `${n} playlist${n === 1 ? '' : 's'}` : 'Any playlist';
+            const chev = pc.lastChild;
+            if (chev && pnl && !pnl.hidden) chev.style.transform = 'rotate(180deg)';
+        }
+        NF_renderChips?.();
     }
 
-    // Reset the mode when the site's Clear button is used.
+    // The site's Clear resets this filter too; its Apply commits the staged choice.
     document.addEventListener('click', e => {
         const btn = e.target.closest('button');
-        if (!btn) return;
+        if (!btn || !isFilterPage()) return;
         const txt = btn.textContent?.trim();
-        if ((txt === 'Clear' || txt === 'Clear all') && playlistFilterMode !== 'any') setMode('any');
+        if (txt === 'Clear' || txt === 'Clear all') {
+            pendingIds = selectedPlaylistIds.slice();
+            if (playlistFilterMode !== 'any' || pendingMode !== 'any') setMode('any');
+        } else if (txt === 'Apply' && document.getElementById('pmvbpf-btn-in')) {
+            commitPending();
+        }
+    }, true);
+
+    // ---------------------------------------------------------------------
+    // Saved filters
+    // ---------------------------------------------------------------------
+    // Saving a filter in the site's menu stores this choice with it, as filters.pmvxPlaylists
+    // ({ mode, ids }), and locally under the filter's name in case the server drops the extra key.
+    // Loading that saved filter restores it; a saved filter without one turns this filter off.
+
+    const SAVED_KEY = 'pmvbpf_saved_v1';
+    const SAVED_FIELD = 'pmvxPlaylists';
+    let savedList = [];
+    const readSavedLocal = () => { try { return JSON.parse(localStorage.getItem(SAVED_KEY) || '{}') || {}; } catch { return {}; } };
+    function writeSavedLocal(name, val) {
+        const m = readSavedLocal();
+        if (val) m[name] = val; else delete m[name];
+        try { localStorage.setItem(SAVED_KEY, JSON.stringify(m)); } catch {}
+    }
+    function currentSavedValue() {
+        return pendingMode === 'any' ? null : { mode: pendingMode, ids: pendingIds.slice() };
+    }
+
+    // Called from the fetch wrapper for POST /api/saved-searches. Returns the response.
+    async function saveWithPlaylists(orig, ctx, args) {
+        const init = args[1] || {};
+        let body;
+        try { body = typeof init.body === 'string' ? JSON.parse(init.body) : null; } catch { body = null; }
+        if (!body || typeof body.name !== 'string' || !isFilterPage() || !document.getElementById('pmvbpf-btn-in')) {
+            return orig.apply(ctx, args);
+        }
+        const val = currentSavedValue();
+        writeSavedLocal(body.name.trim(), val);
+        if (!val) return orig.apply(ctx, args);
+        const withField = { ...body, filters: { ...(body.filters || {}), [SAVED_FIELD]: val } };
+        const res = await orig.apply(ctx, [args[0], { ...init, body: JSON.stringify(withField) }]);
+        // A server that rejects the extra key gets the original request; the local copy still works.
+        if (!res.ok) return orig.apply(ctx, args);
+        return res;
+    }
+
+    function rememberSavedList(json) {
+        const list = json?.data;
+        if (Array.isArray(list)) savedList = list;
+        else if (json?.data?._id) savedList = [json.data, ...savedList.filter(s => s._id !== json.data._id)];
+    }
+
+    // A click on an entry in the site's saved-filter list (name + summary + delete button).
+    document.addEventListener('click', e => {
+        if (!isFilterPage()) return;
+        if (e.target.closest('button')) return; // delete / cancel
+        const item = e.target.closest('div.cursor-pointer');
+        if (!item || !item.querySelector('button[title="Delete saved search"]')) return;
+        const name = item.querySelector('p')?.textContent?.trim();
+        if (!name) return;
+        const entry = savedList.find(s => (s.name || '').trim() === name);
+        const val = entry?.filters?.[SAVED_FIELD] || readSavedLocal()[name] || null;
+        // After the site's own load handler, which clears and re-applies its filters.
+        setTimeout(() => {
+            pendingIds = Array.isArray(val?.ids) ? val.ids.slice() : selectedPlaylistIds.slice();
+            pendingMode = val && (val.mode === 'in' || val.mode === 'out') ? val.mode : 'any';
+            commitPending();
+        }, 0);
     }, true);
 
     // Re-inject the buttons if Vue replaces the filter row.
@@ -11685,6 +12556,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         lastUrl = location.href;
         injected = false;
         playlistFilterMode = 'any';
+        pendingMode = 'any';
+        pendingIds = selectedPlaylistIds.slice();
         lastApiPage  = 1;
         setTimeout(injectButtons, 800);
     }

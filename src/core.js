@@ -61,6 +61,22 @@ function applyEffectsMode() {
 }
 applyEffectsMode();
 
+// Videos the user just acted on (saved, removed, rejected). Filters keep showing them until the
+// filter is applied again or the page changes, so an action never makes a card vanish under the
+// cursor. Each filter module calls clearActed() when the user re-applies it.
+let actedPath = location.pathname;
+PMVX.acted = new Set();
+function actedFresh() {
+    if (location.pathname !== actedPath) { actedPath = location.pathname; PMVX.acted.clear(); }
+}
+PMVX.markActed = id => { if (!id) return; actedFresh(); PMVX.acted.add(id); };
+PMVX.isActed = id => { actedFresh(); return !!id && PMVX.acted.has(id); };
+PMVX.clearActed = () => PMVX.acted.clear();
+
+// Card filters register a check here; true while any of them can hide cards on this page.
+PMVX.filterChecks = [];
+PMVX.anyCardFilterActive = () => PMVX.filterChecks.some(fn => { try { return !!fn(); } catch { return false; } });
+
 // Coalesces calls into one run per frame, spaced at least `scanMs` apart.
 PMVX.scheduler = fn => {
     let pending = false, last = 0;
