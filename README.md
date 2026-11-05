@@ -4,6 +4,8 @@ A userscript for [PMVHaven](https://pmvhaven.com) that adds playlist tools, filt
 
 Everything runs in your browser and uses PMVHaven's own API with your existing session. No accounts, servers or trackers are involved.
 
+> **Unofficial.** PMVHaven Extended is an independent project and is not affiliated with, endorsed by or supported by PMVHaven. "PMVHaven" is a trademark of its owners. Use at your own risk, and respect the site's [terms](https://pmvhaven.com/terms).
+
 ## Install
 
 1. Install a userscript manager: [Tampermonkey](https://www.tampermonkey.net/) or [Violentmonkey](https://violentmonkey.github.io/).
@@ -63,6 +65,7 @@ Available from the funnel button in the header; applies to the home, browse, sea
 - Filter playlists **by the tags and performers of the videos inside them**, with optional share thresholds (for example: hide a playlist when more than 10 % of its videos have a tag).
 - **Overlap badge** on every card: how many of its videos are already in your selected playlists, plus a range filter on that share — e.g. *0 % overlap* to find playlists with nothing you have saved yet.
 - Hide filtered playlists or move them to the bottom. Tag data is cached per playlist and refreshed when its video count changes.
+- Tag data costs one request per playlist, so it is fetched **only when you press *Scan page*** — or automatically if you turn on *Auto-scan*.
 
 ### Notifications
 - Playlist badges per notification, a tag preview, and a button to select all notifications whose video you already saved.
@@ -94,9 +97,11 @@ Default hotkeys:
   | Light | ≈2–3/s | off — also the site's blur and animations | 1 at a time | off |
 - **Export / import** all settings as JSON (copy, download, or load a file).
 
-## Privacy
+## Privacy and fair use
 
 All settings, caches and the watch history are stored in your browser's `localStorage`. The script only talks to `pmvhaven.com`, using the session you are already logged in with.
+
+The script is built to be light on PMVHaven's servers: requests are made on your own actions where possible, results are cached, duplicate requests are shared, and rate limits (HTTP 429) are respected. Heavier background work is opt-in — the live seekbar preview and automatic tag scanning on `/playlists` are off by default.
 
 ## Development
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVHaven Extended
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.1.0
+// @version      1.2.0
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -2364,6 +2364,8 @@ PMVX.scheduler = fn => {
             toggle: null,
             mode: 'hide',       // 'hide' | 'sink'
             enabled: true,      // off: nothing hidden or sunk
+            autoScan: false,    // fetch playlist tags automatically; off = only on "Scan page"
+            scanIds: new Set(), // playlists the user asked to scan (manual mode)
             desc: true,         // also match the description
             tokens: { neg: [], pos: [] },
             listInfo: new Map(),  // id → { count, name }
@@ -2395,6 +2397,7 @@ PMVX.scheduler = fn => {
             if (s && s.mineRange && typeof s.mineRange === 'object') PB.mineRange = { min: parseBound(s.mineRange.min), max: parseBound(s.mineRange.max) };
             if (s && typeof s.open === 'boolean') PB.open = s.open;
             if (s && typeof s.enabled === 'boolean') PB.enabled = s.enabled;
+            if (s && typeof s.autoScan === 'boolean') PB.autoScan = s.autoScan;
             } catch {}
             PB.desc = matchDescEnabled();
             try {
@@ -2416,7 +2419,7 @@ PMVX.scheduler = fn => {
         }
         function saveSettings() {
             setMatchDesc(PB.desc);
-            try { localStorage.setItem(KEY_SETTINGS, JSON.stringify({ terms: PB.terms, mode: PB.mode, overlap: PB.overlap, mineRange: PB.mineRange, open: PB.open, enabled: PB.enabled })); } catch {}
+            try { localStorage.setItem(KEY_SETTINGS, JSON.stringify({ terms: PB.terms, mode: PB.mode, overlap: PB.overlap, mineRange: PB.mineRange, open: PB.open, enabled: PB.enabled, autoScan: PB.autoScan })); } catch {}
         }
         function loadCache() {
             try {
@@ -2553,6 +2556,7 @@ PMVX.scheduler = fn => {
         const MARKER_HIT = 30; // px square, top-right
         function refreshOne(id) {
             if (!id) return;
+            PB.scanIds.add(id);
             PB.tags.delete(id);
             PB.failed.delete(id);
             fracMemo.clear();
@@ -2569,18 +2573,15 @@ PMVX.scheduler = fn => {
             e.stopPropagation();
             if (e.type === 'click') refreshOne(cardId(card));
         }
-        // Refresh: drop the cache for cards on the page and refetch.
-        function refreshVisible() {
-            const cards = [...document.querySelectorAll('.playlists-grid > a[href*="/playlists/"]')];
-            let n = 0;
-            cards.forEach(card => {
+        // Scan page: fetch tag data for the playlists currently on the page
+        // (cached entries are reused until a playlist's video count changes).
+        function scanVisible() {
+            document.querySelectorAll('.playlists-grid > a[href*="/playlists/"]').forEach(card => {
                 const id = cardId(card);
                 if (!id) return;
-                if (PB.tags.delete(id)) n++;
+                PB.scanIds.add(id);
                 PB.failed.delete(id);
             });
-            fracMemo.clear();
-            saveCacheSoon();
             applyFilter();
         }
         function ensureLoaded(id, count) {
@@ -2742,7 +2743,7 @@ PMVX.scheduler = fn => {
             if (!PB.active) return;
             try { renderMineChips(); } catch {}
             const cards = [...document.querySelectorAll('.playlists-grid > a[href*="/playlists/"]')];
-            let hidden = 0, pending = 0, fromCache = 0;
+            let hidden = 0, pending = 0, fromCache = 0, notScanned = 0;
             cards.forEach(card => {
                 const id = cardId(card);
                 if (!id) return;
@@ -2770,7 +2771,9 @@ PMVX.scheduler = fn => {
                 if (hasTagFilter()) {
                     const cached = PB.tags.get(id);
                     if (cached && cached.at < PB.sessionStart && isFresh(cached, count)) fromCache++;
-                    ensureLoaded(id, count);
+                    // Tag data is fetched per playlist; automatically only when Auto-scan is on.
+                    if (PB.autoScan || PB.scanIds.has(id)) ensureLoaded(id, count);
+                    else if (!isFresh(cached, count)) notScanned++;
                 }
                 if (!hasFilter()) {
                     delete card.dataset.pmvpbHide;
@@ -2781,7 +2784,7 @@ PMVX.scheduler = fn => {
                 }
                 const r = evaluate(id, count);
                 if (r.state === 'pending') {
-                    pending++;
+                    if (PB.pending.has(id)) pending++;
                     card.setAttribute('data-pmvpb-pending', '1');
                     delete card.dataset.pmvpbHide;
                     delete card.dataset.pmvpbSink;
@@ -2799,7 +2802,7 @@ PMVX.scheduler = fn => {
                     setTitle('');
                 }
             });
-            updateCounter(cards.length, hidden, pending, fromCache);
+            updateCounter(cards.length, hidden, pending, fromCache, notScanned);
             // Hiding shortens the page: nudge infinite scroll for the next page, but only while fewer than 24 cards are visible.
             if (hasFilter() && hidden && (cards.length - hidden) < 24) {
                 try { window.dispatchEvent(new Event('scroll')); } catch {}
@@ -2840,13 +2843,14 @@ PMVX.scheduler = fn => {
             const btn = host.closest('#' + BTN_ID);
             if (btn) btn.title = lines.length ? lines.join('\n') : 'Filter playlists by the tags of their videos';
         }
-        function updateCounter(total, hidden, pending, fromCache) {
+        function updateCounter(total, hidden, pending, fromCache, notScanned = 0) {
             updateSummary(total, hidden);
             if (!PB.counter) return;
             if (!hasFilter()) { PB.counter.textContent = ''; return; }
             const parts = [];
             parts.push(`${hidden} of ${total} ${PB.mode === 'hide' ? 'hidden' : 'moved down'}`);
             if (pending) parts.push(`${pending} loading…`);
+            if (notScanned) parts.push(`${notScanned} not scanned — press Scan page`);
             if (fromCache) parts.push(`${fromCache} cached`);
             if (PB.failed.size) parts.push(`${PB.failed.size} failed`);
             PB.counter.textContent = parts.join(' · ');
@@ -3150,17 +3154,22 @@ PMVX.scheduler = fn => {
             const hideChip = chip('Hide', 'Filtered playlists are hidden', () => { PB.mode = 'hide'; renderModeChips(); saveSettings(); applyFilter(); });
             const sinkChip = chip('Move down', 'Filtered playlists are dimmed and moved to the bottom', () => { PB.mode = 'sink'; renderModeChips(); saveSettings(); applyFilter(); });
             const descChip = chip('Description', '', () => { PB.desc = !PB.desc; renderModeChips(); saveSettings(); applyFilter(); });
-            const refreshChip = chip('⟳ Refresh', 'Fetch the tags of all playlists on this page again. Click ✓ on a card to refresh only that playlist. Otherwise the cache is kept until a playlist\u2019s video count changes.', refreshVisible);
+            const scanChip = chip('⟳ Scan page', 'Fetch the tags of the playlists on this page (one request per playlist). Cached data is reused until a playlist\u2019s video count changes; click ✓ on a card to refetch that playlist.', scanVisible);
+            const autoChip = chip('Auto-scan', '', () => { PB.autoScan = !PB.autoScan; renderModeChips(); saveSettings(); applyFilter(); });
             const renderModeChips = () => {
                 hideChip.classList.toggle('active', PB.mode === 'hide');
                 sinkChip.classList.toggle('active', PB.mode === 'sink');
                 descChip.classList.toggle('active', !!PB.desc);
+                autoChip.classList.toggle('active', !!PB.autoScan);
+                autoChip.title = PB.autoScan
+                    ? 'Tags are fetched automatically for every playlist shown (one request each) — click to scan only on request'
+                    : 'Tags are fetched only when you press Scan page — click to fetch them automatically';
                 descChip.title = PB.desc
                     ? 'Terms also match the playlist description — click to match video tags only'
                     : 'Video tags and performers only — click to also match the playlist description';
             };
             renderModeChips();
-            chips1.append(hideChip, sinkChip, descChip, refreshChip);
+            chips1.append(hideChip, sinkChip, descChip, scanChip, autoChip);
             s1.appendChild(chips1);
             const counter = el('div', 'pmvpb-counter');
             s1.appendChild(counter);
