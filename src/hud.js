@@ -165,7 +165,6 @@
         nativePlaylistButtonLastVideoId: null,
 
         observerPaused: false,
-        observerRafPending: false,   // rAF debounce for MutationObserver
 
         videosSinceSoftClean: 0,
         lastSoftCleanVideoId: null,
@@ -806,6 +805,7 @@
     // CustomSelect that scrolls with the modal. The observer re-adds the section if the list is rebuilt.
     // Without the gear (logged out) the section opens in a copy of the modal via Ctrl+K.
     const TS_SVG = {
+        gauge: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"></path><path d="M3.34 19a10 10 0 1 1 17.32 0"></path></svg>',
         volume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z"></path><path d="M16 9a5 5 0 0 1 0 6"></path><path d="M19.4 18.4a9 9 0 0 0 0-12.8"></path></svg>',
         film: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18"></rect><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"></path></svg>',
         ban: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="m4.9 4.9 14.2 14.2"></path></svg>',
@@ -915,7 +915,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             dd.scrollIntoView({ block: 'nearest' });
         };
         paint();
-        return { el: wrap, close };
+        return { el: wrap, close, paint };
     }
 
     function buildToolsSettingsSection() {
@@ -933,6 +933,13 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             </div>`;
         sec.innerHTML = `
             <h3>PMVHaven Extended<span class="sub">userscript</span></h3>
+            <div class="ts-card">
+                <div>
+                    <label class="ts-lab"><span style="display:inline-flex;">${TS_SVG.gauge}</span>Performance</label>
+                    <p class="ts-desc">Lower this on slower computers if scrolling or video playback stutters</p>
+                </div>
+                <div data-perf></div>
+            </div>
             ${card(TS_SVG.film, '', 'Seekbar preview', 'Frame shown above the seekbar while you scrub. Live builds a frame cache in the background and uses more CPU.')}
             <div class="ts-card"><div class="ts-row2">
                 <div>
@@ -955,6 +962,20 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         ];
         const scrubSel = mkToolsSelect(scrubItems, () => scrubMode(), v => setScrubMode(v));
         slots[0].replaceWith(scrubSel.el);
+
+        // Performance mode
+        const perfItems = () => [
+            { value: 'smooth', label: 'Smooth', desc: 'Pages update instantly, all effects — for fast computers' },
+            { value: 'balanced', label: 'Balanced', desc: 'Page updates batched slightly, all effects (default)' },
+            { value: 'light', label: 'Light', desc: 'For slower computers: fewer page updates, no blur or animations (also the site\u2019s), one background request at a time, no live seekbar preview' },
+        ];
+        const perfSel = mkToolsSelect(perfItems, () => PMVX.perfMode(), v => {
+            PMVX.setPerfMode(v);
+            if (v === 'light') scrubDrop();
+            else if (scrubModeCached === 'hybrid') scrubWarm();
+            scrubSel.paint?.();
+        });
+        sec.querySelector('[data-perf]').replaceWith(perfSel.el);
 
         // Volume lock
         const vol = sec.querySelector('[data-vol]');
@@ -5946,10 +5967,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         });
 
         if (toFetch.length) {
-            // At most 3 at a time. Metadata is checked first and
+            // Limited by the performance mode. Metadata is checked first and
             // fetchVideoDeduped shares requests, since one video can appear
             // in several notification rows.
-            settledWithLimit(toFetch, 3, ({ card, apiId }) =>
+            settledWithLimit(toFetch, PMVX.perf().lookups, ({ card, apiId }) =>
                 (State.videoMeta.has(apiId) ? Promise.resolve() : fetchVideoDeduped(apiId))
                     .catch(() => noteLookupFailure(apiId))
                     .finally(() => {
@@ -6112,8 +6133,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
         if (!toFetch.length) return;
 
-        // At most 3 lookups at a time; slugs mapped meanwhile need no request.
-        settledWithLimit(toFetch, 3, ({ card, slugId }) =>
+        // Concurrency follows the performance mode; slugs mapped meanwhile need no request.
+        settledWithLimit(toFetch, PMVX.perf().lookups, ({ card, slugId }) =>
             (State.slugToApiId.has(slugId) ? Promise.resolve({ _id: State.slugToApiId.get(slugId) }) : fetchVideoDeduped(slugId))
                 .then(v => {
                     const apiId = v?._id;
@@ -6192,15 +6213,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (!t) return true;
         return !!(t.closest('[id^="pmv"]') || t.closest('.controls-bar-wrapper'));
     }
+    // One run per frame at most, spaced further apart in the lighter performance modes.
+    const scheduleObserverRun = PMVX.scheduler(() => observerRun());
     const observer = new MutationObserver(muts => {
         if (State.observerPaused) return;
-        if (State.observerRafPending) return;
         if (muts.every(isNoiseMutation)) return;
-        State.observerRafPending = true;
-        requestAnimationFrame(() => {
-            State.observerRafPending = false;
-            observerRun();
-        });
+        scheduleObserverRun();
     });
     function observerRun() {
         {
@@ -6638,7 +6656,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     const SCRUB_ZONE_PX = 26;       // height of the HUD's own hover/seek strip at the bottom of fullscreen
 
     let scrubModeCached = (() => { try { return localStorage.getItem(SCRUB_KEY) || 'frames'; } catch { return 'frames'; } })();
-    function scrubMode() { return scrubModeCached; }
+    // The live frame cache is skipped in Light mode (it runs hidden players).
+    function scrubMode() { return scrubModeCached === 'hybrid' && PMVX.perfMode() === 'light' ? 'frames' : scrubModeCached; }
     function setScrubMode(mode) {
         scrubModeCached = mode;
         try { localStorage.setItem(SCRUB_KEY, mode); } catch {}

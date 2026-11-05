@@ -1805,18 +1805,12 @@
         if (listObserver) listObserver.disconnect();
         watchedListContainer = list;
 
-        let listObserverRafPending = false;
-        listObserver = new MutationObserver(() => {
-            // rAF debounce: coalesces mutation bursts and avoids feedback loops.
-            if (listObserverRafPending) return;
-            listObserverRafPending = true;
-            requestAnimationFrame(() => {
-                listObserverRafPending = false;
-                if (!hasAnyActiveFilter()) return;
-                // force: new rows have no display state yet and the cache guard would skip them.
-                applyFilter(NF.lastOwnValue, true);
-            });
+        // Coalesced per frame (and spaced by the performance mode); avoids feedback loops.
+        // force: new rows have no display state yet and the cache guard would skip them.
+        const scheduleListFilter = PMVX.scheduler(() => {
+            if (hasAnyActiveFilter()) applyFilter(NF.lastOwnValue, true);
         });
+        listObserver = new MutationObserver(scheduleListFilter);
 
         // subtree: placeholder rows are hydrated in place, which is a nested mutation.
         listObserver.observe(list, { childList: true, subtree: true });
@@ -2504,7 +2498,7 @@
             pump();
         }
         function pump() {
-            while (PB.running < CONCURRENCY && PB.queue.length) {
+            while (PB.running < Math.min(CONCURRENCY, PMVX.perf().lookups) && PB.queue.length) {
                 const job = PB.queue.shift();
                 PB.running++;
                 fetchTags(job.id).then(({ tags, vids, desc }) => {

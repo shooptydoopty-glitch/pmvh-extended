@@ -84,7 +84,14 @@ Default hotkeys:
 | <kbd>?</kbd> | Show all hotkeys |
 
 ### Settings and backup
-- A **PMVHaven Extended** section inside the site's own *Settings* dialog (gear icon in the header): seekbar preview, reject list, volume lock, hotkey editor.
+- A **PMVHaven Extended** section inside the site's own *Settings* dialog (gear icon in the header): performance mode, seekbar preview, volume lock, reject list, hotkey editor.
+- **Performance mode** for slower computers:
+
+  | Mode | Page updates | Visual effects | Background requests | Live seekbar preview |
+  |------|--------------|----------------|---------------------|----------------------|
+  | Smooth | every frame | on | 3 at a time | available |
+  | Balanced (default) | batched (≈8/s) | on | 3 at a time | available |
+  | Light | ≈2–3/s | off — also the site's blur and animations | 1 at a time | off |
 - **Export / import** all settings as JSON (copy, download, or load a file).
 
 ## Privacy
