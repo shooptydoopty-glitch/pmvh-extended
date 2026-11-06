@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.2.14
+// @version      1.2.46
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -93,7 +93,53 @@ PMVX.markActed = id => { if (!id) return; actedFresh(); PMVX.acted.add(id); };
 PMVX.isActed = id => { actedFresh(); return !!id && PMVX.acted.has(id); };
 PMVX.clearActed = () => PMVX.acted.clear();
 
+// Filter terms: "=term" matches only as a whole word ("=ch" hits "ch" and "big ch", not
+// "challenge"); any other term matches anywhere in the text. Texts and terms are lower case.
+const termWordRes = new Map();
+PMVX.termMatch = (hay, term) => {
+    if (!hay || !term) return false;
+    if (term.length > 1 && term[0] === '=') {
+        const w = term.slice(1);
+        let re = termWordRes.get(w);
+        if (!re) {
+            re = new RegExp('(?:^|[^\\p{L}\\p{N}])' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:$|[^\\p{L}\\p{N}])', 'u');
+            if (termWordRes.size > 500) termWordRes.clear();
+            termWordRes.set(w, re);
+        }
+        return re.test(hay);
+    }
+    return hay.includes(term);
+};
+// Smart quotes from macOS / iOS keyboards count as plain quotes.
+PMVX.plainQuotes = s => String(s ?? '').replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"').replace(/[\u2018\u2019\u201A\u201B]/g, "'");
+PMVX.termLabel = term => (term && term.length > 1 && term[0] === '=') ? term.slice(1) : term;
+PMVX.isWordTerm = term => !!term && term.length > 1 && term[0] === '=';
+
 // Card filters register a check here; true while any of them can hide cards on this page.
+// Where an in/not-in-playlist filter would hide (nearly) everything: a playlist's own page and
+// the favourites views (profile Favorites tab, the homepage Favorites pill or content chip).
+// Checked per card, so the DOM lookup is cached for 250 ms.
+let pfxAt = 0, pfxVal = false;
+PMVX.playlistFilterExempt = () => {
+    const now = performance.now();
+    if (now - pfxAt < 250) return pfxVal;
+    pfxAt = now;
+    const p = location.pathname.replace(/\/+$/, '') || '/';
+    let v = /^\/playlists\/[^/]+/.test(p);
+    if (!v && p === '/profile') {
+        v = /favorites/i.test(location.hash) || [...document.querySelectorAll('button')]
+            .some(b => /^Favorites\b/.test(b.textContent.trim()) && /\btext-orange-4/.test(b.className));
+    }
+    if (!v && p === '/') {
+        v = [...document.querySelectorAll('button')]
+            .some(b => b.textContent.trim() === 'Favorites' && /\bbg-orange-|border-orange-|text-orange-/.test(b.className.replace(/hover:\S+/g, '')));
+    }
+    pfxVal = v;
+    return v;
+};
+// The playlist whose page this is (its own videos are always "in" it), or null.
+PMVX.currentPlaylistPageId = () => location.pathname.match(/^\/playlists\/([a-f0-9]{24})/i)?.[1] || null;
+
 PMVX.filterChecks = [];
 PMVX.anyCardFilterActive = () => PMVX.filterChecks.some(fn => { try { return !!fn(); } catch { return false; } });
 
@@ -264,9 +310,14 @@ PMVX.scheduler = fn => {
     }
 
     // In/out check: membership of the selected playlists, or of any playlist when none is selected.
+    // The playlist whose page this is does not count: every row is in it.
     function inSelectedPlaylists(memberOf) {
-        const ids = BTN.selectedPlaylistIds;
-        return ids.length ? ids.some(id => memberOf.has(id)) : memberOf.size > 0;
+        const here = PMVX.currentPlaylistPageId();
+        const ids = BTN.selectedPlaylistIds.filter(id => id !== here);
+        if (ids.length) return ids.some(id => memberOf.has(id));
+        if (BTN.selectedPlaylistIds.length) return null; // only this playlist was selected: no effect
+        for (const id of memberOf) if (id !== here) return true;
+        return false;
     }
 
     // Saved state is only restored into the controls on load. Filtering starts once Enter or
@@ -276,7 +327,9 @@ PMVX.scheduler = fn => {
     // On/off switch: off shows every row but keeps all filter settings; sorting is unaffected.
     // Persisted across reloads.
     const ENABLED_KEY = 'pmvnf_enabled_v1';
-    NF.enabled = (() => { try { return localStorage.getItem(ENABLED_KEY) !== '0'; } catch { return true; } })();
+    // There is no on/off switch any more (applying turns it on); an old "off" is not kept.
+    NF.enabled = true;
+    try { localStorage.removeItem(ENABLED_KEY); } catch {}
     function filterLive() { return sessionFilterArmed && NF.enabled; }
     function setFilterEnabled(on, { refilter = true } = {}) {
         NF.enabled = !!on;
@@ -506,8 +559,15 @@ PMVX.scheduler = fn => {
     // Tokenizer: quoted substrings (optionally prefixed with -) form one token;
     // everything else splits on whitespace.
     function tokenizeRaw(raw) {
-        const re = /-?"[^"]*"|-?'[^']*'|\S+/g;
-        return raw.trim().match(re) || [];
+        const re = /-?=?"[^"]*"|-?=?'[^']*'|\S+/g;
+        return PMVX.plainQuotes(raw).trim().match(re) || [];
+    }
+    // "quoted" terms (smart quotes too) and =term match only as a whole word or phrase
+    // (PMVX.termMatch); internally they become "=term".
+    function stripTerm(term) {
+        if (term[0] === '=') return '=' + stripQuotes(term.slice(1));
+        const inner = stripQuotes(term);
+        return inner !== term ? '=' + inner : term;
     }
 
     function stripQuotes(term) {
@@ -539,9 +599,11 @@ PMVX.scheduler = fn => {
             } else if (tok === '!unseen') {
                 result.seenFilter = 'unseen';
             } else if (tok.startsWith('-')) {
-                result.textExclude.push(stripQuotes(tok.slice(1)).toLowerCase());
+                const t = stripTerm(tok.slice(1)).toLowerCase();
+                if (t && t !== '=') result.textExclude.push(t);
             } else {
-                result.textInclude.push(stripQuotes(tok).toLowerCase());
+                const t = stripTerm(tok).toLowerCase();
+                if (t && t !== '=') result.textInclude.push(t);
             }
         });
 
@@ -572,10 +634,10 @@ PMVX.scheduler = fn => {
         const haystacks = [text, ...(meta?.tags || []), ...(meta?.starsTags || [])];
         if (matchDesc && meta?.description) haystacks.push(meta.description);
         for (const term of textInclude) {
-            if (!haystacks.some(h => h.includes(term))) return false;
+            if (!haystacks.some(h => PMVX.termMatch(h, term))) return false;
         }
         for (const term of textExclude) {
-            if (haystacks.some(h => h.includes(term))) return false;
+            if (haystacks.some(h => PMVX.termMatch(h, term))) return false;
         }
 
         if (playlistFilters.length > 0) {
@@ -652,8 +714,8 @@ PMVX.scheduler = fn => {
             const { reverse } = getLivePlaylists();
             const memberOf = videoId ? (reverse.get(videoId) || new Set()) : new Set();
             const inSelected = inSelectedPlaylists(memberOf);
-            if (BTN.playlistMode === 'in'  && !inSelected) return false;
-            if (BTN.playlistMode === 'out' &&  inSelected) return false;
+            if (inSelected !== null && BTN.playlistMode === 'in'  && !inSelected) return false;
+            if (inSelected !== null && BTN.playlistMode === 'out' &&  inSelected) return false;
         }
 
         return true;
@@ -734,8 +796,8 @@ PMVX.scheduler = fn => {
         const upMeta = upVid ? PMVX.state?.videoMeta?.get(upVid) : null;
         const upHay = [text];
         if (matchDescEnabled() && upMeta?.description) upHay.push(upMeta.description);
-        for (const term of tokens.textInclude) if (!upHay.some(h => h.includes(term))) return false;
-        for (const term of tokens.textExclude) if (upHay.some(h => h.includes(term))) return false;
+        for (const term of tokens.textInclude) if (!upHay.some(h => PMVX.termMatch(h, term))) return false;
+        for (const term of tokens.textExclude) if (upHay.some(h => PMVX.termMatch(h, term))) return false;
 
         if (tokens.playlistFilters.length > 0) {
             const vid = getUpNextVideoId(btn);
@@ -801,8 +863,8 @@ PMVX.scheduler = fn => {
             const { reverse } = getLivePlaylists();
             const memberOf2 = vid2 ? (reverse.get(vid2) || new Set()) : new Set();
             const inSelected = inSelectedPlaylists(memberOf2);
-            if (BTN.playlistMode === 'in'  && !inSelected) return false;
-            if (BTN.playlistMode === 'out' &&  inSelected) return false;
+            if (inSelected !== null && BTN.playlistMode === 'in'  && !inSelected) return false;
+            if (inSelected !== null && BTN.playlistMode === 'out' &&  inSelected) return false;
         }
 
         return true;
@@ -1228,7 +1290,9 @@ PMVX.scheduler = fn => {
         UI.dneg.splice(0, UI.dneg.length, ...p.neg);
         UI.draw.splice(0, UI.draw.length, ...p.raw, ...(p.seen ? ['!' + p.seen] : []));
     }
-    function quoteTerm(term) { return /\s/.test(term) ? `"${term}"` : term; }
+    function quoteTerm(term) {
+        return PMVX.isWordTerm(term) || /\s/.test(term) ? `"${PMVX.termLabel(term)}"` : term;
+    }
     function compose(pos, neg, seen, raw) {
         const parts = [];
         pos.forEach(t => parts.push(quoteTerm(t)));
@@ -1283,6 +1347,7 @@ PMVX.scheduler = fn => {
 .pmvnf-chips:empty{display:none;}
 .pmvnf-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 6px;border-radius:4px;border:none;cursor:default;font-size:11px;line-height:16px;font-family:inherit;}
 .pmvnf-tag svg{width:10px;height:10px;}
+.pmvnf-tag .w{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:0 4px;border-radius:3px;background:rgba(0,0,0,0.3);}
 .pmvnf-tag .x{display:inline-flex;opacity:.6;padding:2px;border-radius:3px;cursor:pointer;margin-left:1px;}
 .pmvnf-tag .x:hover{opacity:1;background:rgba(255,255,255,0.12);}
 .pmvnf-tag.pos{background:rgba(249,115,22,0.2);color:rgb(253,186,116);}
@@ -1575,21 +1640,10 @@ PMVX.scheduler = fn => {
         const lbl = toggle.querySelector('.lbl');
         const chev = mk('button', 'pmvnf-toggle pmvnf-chev'); chev.type = 'button';
         chev.innerHTML = SVG_CHEV; chev.title = 'Expand filters';
-        const power = mk('button', 'pmvnf-power'); power.type = 'button';
-        power.setAttribute('role', 'switch');
-        power.innerHTML = '<span class="knob"></span>';
-        power.onclick = () => setFilterEnabled(!NF.enabled);
-        top.append(search, power, toggle, chev);
+        top.append(search, toggle, chev);
         const topChips = mk('div', 'pmvnf-chips');
         wrap.append(top, topChips);
-        NF.renderPower = () => {
-            power.setAttribute('aria-checked', NF.enabled ? 'true' : 'false');
-            power.title = NF.enabled
-                ? 'Filter on \u2014 click to turn off (settings are kept)'
-                : 'Filter off \u2014 click to turn on';
-            wrap.dataset.off = NF.enabled ? '0' : '1';
-        };
-        NF.renderPower();
+
         if (header) header.insertBefore(wrap, nativeWrapper.nextSibling); else document.body.prepend(wrap);
 
         // Drawer.
@@ -1631,7 +1685,16 @@ PMVX.scheduler = fn => {
             list.forEach((term, i) => {
                 const c = mk('span', `pmvnf-tag ${kind.replace('d', '')} ${extraCls}`.trim());
                 if (kind.endsWith('neg')) { const ic = mk('span'); ic.innerHTML = SVG_BAN; ic.style.display = 'inline-flex'; c.appendChild(ic); }
-                c.appendChild(mk('span', 'txt', kind.endsWith('raw') ? term : '#' + term));
+                const isRaw = kind.endsWith('raw');
+                const word = !isRaw && PMVX.isWordTerm(term);
+                const txt = mk('span', 'txt', isRaw ? term : '#' + (word ? `"${PMVX.termLabel(term)}"` : term));
+                c.appendChild(txt);
+                // Click the term: whole word only ("term") on/off.
+                if (!isRaw) {
+                    txt.style.cursor = 'pointer';
+                    txt.title = word ? 'Whole word only — click to match it anywhere in the text' : 'Matches anywhere in the text — click to match it only as a whole word';
+                    txt.onclick = () => { list[i] = word ? term.slice(1) : '=' + term; afterChipChange(kind); };
+                }
                 const x = mk('span', 'x'); x.innerHTML = SVG_X; x.title = 'Remove';
                 x.onclick = () => { list.splice(i, 1); afterChipChange(kind); };
                 c.appendChild(x);
@@ -1682,7 +1745,7 @@ PMVX.scheduler = fn => {
         inpNeg.placeholder = 'Hide videos with… (title, tag or performer)'; inpNeg.dataset.pmvnfKind = 'neg';
         inpNeg.addEventListener('keydown', e => e.stopPropagation(), true);
         const negChips = mk('div', 'pmvnf-chips');
-        secNeg.append(inpNeg, negChips, mk('div', 'pmvnf-hint', 'Enter adds · Enter in an empty field applies · Backspace in an empty field removes the last one'));
+        secNeg.append(inpNeg, negChips, mk('div', 'pmvnf-hint', 'Enter adds · Enter in an empty field applies · Backspace in an empty field removes the last one · "quotes" or a click on a term: whole word only'));
         body.appendChild(secNeg);
 
         // Default terms (always active).
@@ -1783,7 +1846,23 @@ PMVX.scheduler = fn => {
         const actions = mk('div', 'pmvnf-actions');
         const counter = mk('span'); counter.id = 'pmvnf-counter';
         const closeBtn = mk('button', 'pmvnf-close', 'Close ✕'); closeBtn.type = 'button'; closeBtn.onclick = () => setOpen(false);
-        actions.append(counter, closeBtn);
+        // Copies the site-wide filter (header) into this one; staged like any edit, Filters applies it.
+        const syncBtn = mk('button', 'pmvnf-close', 'Sync from site filter'); syncBtn.type = 'button';
+        syncBtn.title = 'Copy the site-wide filter (terms, watched, playlist, rating, max length) into this one \u2014 then press Filters';
+        syncBtn.onclick = () => {
+            const g = PMVX.siteFilterSnapshot?.();
+            if (!g) { counter.textContent = 'Site filter not available'; return; }
+            UI.pos.splice(0, UI.pos.length, ...g.include);
+            UI.neg.splice(0, UI.neg.length, ...g.exclude);
+            UI.seen = g.seen === 'seen' || g.seen === 'unseen' ? g.seen : null;
+            pendingPlaylistMode = g.playlistMode || 'all';
+            pendingSelectedPlaylistIds = (g.playlistIds || []).slice();
+            pendingRatingMin = g.ratingMin ?? 0; pendingRatingMax = g.ratingMax ?? 100;
+            pendingDurationMin = 0; pendingDurationMax = g.maxMinutes > 0 ? g.maxMinutes * 60 : Infinity;
+            renderTagChips(); renderSeen(); updatePlBtn(); ratSlider.render(); durSlider.render(); refreshPendingMarks();
+            counter.textContent = 'Copied \u2014 press Filters to apply';
+        };
+        actions.append(counter, syncBtn, closeBtn);
         panel.appendChild(actions);
 
         NF.applyAll = () => applyAll();
@@ -1862,6 +1941,7 @@ PMVX.scheduler = fn => {
         PMVX.clearActed();
         // Applying implies the filter switch turns on.
         if (!NF.enabled) setFilterEnabled(true, { refilter: false });
+        try { NF.renderPower?.(); } catch {}
 
         // Commit staged playlist-mode / saved-search button values only on Enter/Filter.
         BTN.playlistMode = pendingPlaylistMode;
@@ -2764,7 +2844,7 @@ PMVX.scheduler = fn => {
             const hit = fracMemo.get(key);
             if (hit) return hit;
             const matchIdx = new Set();
-            entry.tags.forEach((t, i) => { if (t.includes(term)) matchIdx.add(i); });
+            entry.tags.forEach((t, i) => { if (PMVX.termMatch(t, term)) matchIdx.add(i); });
             let n = 0;
             if (matchIdx.size) {
                 for (const idx of entry.vids) {
@@ -2790,14 +2870,14 @@ PMVX.scheduler = fn => {
                 if (o && ((mineRange.min != null && o.frac < mineRange.min) || (mineRange.max != null && o.frac > mineRange.max))) out.push('mine');
             }
             for (const { term, max } of PB.tokens.neg) {
-                if (desc && desc.includes(term)) { out.push('neg:' + term); continue; }
+                if (desc && PMVX.termMatch(desc, term)) { out.push('neg:' + term); continue; }
                 if (!entry) continue;
                 const f = fraction(id, entry, term);
                 if (f.n > 0 && f.frac > max) out.push('neg:' + term);
             }
             if (entry) {
                 for (const { term, min } of PB.tokens.pos) {
-                    if (desc && desc.includes(term)) continue;
+                    if (desc && PMVX.termMatch(desc, term)) continue;
                     const f = fraction(id, entry, term);
                     if (!(min == null ? f.n > 0 : (f.n > 0 && f.frac >= min))) out.push('pos:' + term);
                 }
@@ -2841,7 +2921,7 @@ PMVX.scheduler = fn => {
             }
             for (const { term, max } of PB.tokens.neg) {
                 // A description hit applies to the whole playlist: no threshold.
-                if (desc && desc.includes(term)) { hits.push('description: ' + term); continue; }
+                if (desc && PMVX.termMatch(desc, term)) { hits.push('description: ' + term); continue; }
                 if (!entry) continue;
                 const f = fraction(id, entry, term);
                 if (f.n > 0 && f.frac > max) {
@@ -2851,7 +2931,7 @@ PMVX.scheduler = fn => {
             if (hits.length) return { state: 'fail', hits };
             if (pending) return { state: 'pending', hits: [] };
             for (const { term, min } of PB.tokens.pos) {
-                if (desc && desc.includes(term)) continue;
+                if (desc && PMVX.termMatch(desc, term)) continue;
                 const f = entry ? fraction(id, entry, term) : { n: 0, total: 0, frac: 0 };
                 const ok = min == null ? f.n > 0 : (f.n > 0 && f.frac >= min);
                 if (!ok) return { state: 'fail', hits: [min == null ? 'no ' + term : `${term} ${pct(f.frac)} (${f.n}/${f.total}, min ${pct(min)})`] };
@@ -3271,8 +3351,11 @@ PMVX.scheduler = fn => {
                 inp.placeholder = placeholder; inp.setAttribute('list', dl.id);
                 inp.addEventListener('focus', refreshSuggest);
                 const add = () => {
-                    const term = inp.value.trim().replace(/^#/, '').toLowerCase();
-                    if (!term) return;
+                    let term = PMVX.plainQuotes(inp.value).trim().replace(/^#/, '').toLowerCase();
+                    // "quoted": whole word only.
+                    const q = term.match(/^["'](.+)["']$/);
+                    if (q) term = '=' + q[1].trim();
+                    if (!term || term === '=') return;
                     const list = PB.terms[kind];
                     if (!list.some(t => t.term === term)) list.push(kind === 'neg' ? { term, max: 0 } : { term, min: null });
                     // A tag can't be both required and excluded.
@@ -3315,7 +3398,7 @@ PMVX.scheduler = fn => {
                             ic.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>';
                             c.appendChild(ic);
                         }
-                        c.appendChild(el('span', 'txt', '#' + t.term));
+                        c.appendChild(el('span', 'txt', '#' + (PMVX.isWordTerm(t.term) ? `"${PMVX.termLabel(t.term)}"` : t.term)));
                         const th = thrText(kind, t);
                         if (th) c.appendChild(el('span', 'thr', th));
                         const x = el('span', 'x');
@@ -3348,7 +3431,8 @@ PMVX.scheduler = fn => {
                 const cur = neg ? Math.round((t.max || 0) * 100) : Math.round((t.min ?? 0) * 100);
                 const box = el('div', 'pmvpb-edit ' + editing.kind);
                 const head = el('div', 'pmvpb-edit-head');
-                head.innerHTML = `<b>#${t.term}</b> — ${neg ? 'hide if more than' : 'require at least'} <span class="val">${cur}%</span> of the videos to have this tag`;
+                head.innerHTML = `<b></b> — ${neg ? 'hide if more than' : 'require at least'} <span class="val">${cur}%</span> of the videos to have this tag`;
+                head.querySelector('b').textContent = '#' + (PMVX.isWordTerm(t.term) ? `"${PMVX.termLabel(t.term)}"` : t.term);
                 const r = el('input'); r.type = 'range'; r.min = '0'; r.max = '100'; r.step = '1'; r.value = String(cur);
                 const val = head.querySelector('.val');
                 const presets = el('div', 'pmvpb-chips');
@@ -3367,6 +3451,18 @@ PMVX.scheduler = fn => {
                 const hint = el('div', 'pmvpb-hint', neg
                     ? 'Without a share, a single video with this tag hides the playlist.'
                     : 'Without a share, a single video with this tag is enough.');
+                // Whole word only: "=ch" matches the tag "ch" or "big ch", not "challenge".
+                const isWord = PMVX.isWordTerm(t.term);
+                const wordChip = chip('Whole word', isWord ? 'Only tags containing this as a separate word — click to match anywhere' : 'Match only as a separate word (ch, not challenge)', () => {
+                    const next = isWord ? t.term.slice(1) : '=' + t.term;
+                    if (PB.terms[editing.kind].some(o => o !== t && o.term === next)) return;
+                    t.term = next;
+                    editing = { kind: editing.kind, term: next };
+                    fracMemo.clear();
+                    applyTerms();
+                });
+                wordChip.classList.toggle('active', isWord);
+                presets.appendChild(wordChip);
                 box.append(head, r, presets, hint);
                 editorHost.appendChild(box);
             };
@@ -3863,7 +3959,7 @@ whenBody(() => {
 
             State.playlists.clear();
             cached.playlists.forEach(p => {
-                State.playlists.set(p.id, { id: p.id, name: p.name, ids: new Set(p.ids || []) });
+                State.playlists.set(p.id, { id: p.id, name: p.name, ids: new Set(p.ids || []), stats: p.stats || null });
             });
             State.cacheLoadedAt = cached.updatedAt;
             State.ready = true;
@@ -3893,7 +3989,7 @@ whenBody(() => {
             const data = {
                 updatedAt: Date.now(),
                 playlists: [...State.playlists.values()].map(p => ({
-                    id: p.id, name: p.name, ids: [...p.ids]
+                    id: p.id, name: p.name, ids: [...p.ids], stats: p.stats || null
                 }))
             };
             localStorage.setItem(CACHE_KEY, JSON.stringify(data));
@@ -3901,6 +3997,16 @@ whenBody(() => {
             // Notify the other modules that the cache is ready.
             notifyCacheReady();
         } catch {}
+    }
+
+    // Rating and views of an own playlist, from the list response (the API has no follower count).
+    function playlistStats(p) {
+        return {
+            // Without votes the site's bayesian rating is a flat 50 %: not shown.
+            rating: Number.isFinite(p?.bayesianRating) && ((p.likes || 0) + (p.dislikes || 0)) > 0 ? p.bayesianRating : null,
+            views: Number.isFinite(p?.views) ? p.views : 0,
+            isPublic: p?.isPublic !== false,
+        };
     }
 
     function cacheIsFresh() {
@@ -3971,8 +4077,24 @@ whenBody(() => {
         return ownerIdPromise;
     }
 
+    // A fresh cache from before stats were stored: one list request fills them in (once per page load).
+    let statsFillDone = false;
+    async function fillPlaylistStats() {
+        if (statsFillDone || ![...State.playlists.values()].some(p => !p.stats)) return;
+        statsFillDone = true;
+        try {
+            const ownerId = await getOwnerId();
+            if (!ownerId) return;
+            const j = await api(`/api/playlists?owner=${ownerId}&limit=100`);
+            const list = j?.data || j?.playlists || [];
+            list.forEach(p => { const e = State.playlists.get(p._id); if (e) e.stats = playlistStats(p); });
+            saveCache();
+            try { injectSavedNav(); } catch {}
+        } catch {}
+    }
+
     async function refreshUserPlaylists({ force = false } = {}) {
-        if (!force && State.ready && cacheIsFresh()) return;
+        if (!force && State.ready && cacheIsFresh()) { fillPlaylistStats(); return; }
         if (State.refreshPromise) return State.refreshPromise;
 
         State.refreshPromise = (async () => {
@@ -4003,7 +4125,7 @@ whenBody(() => {
                 });
                 indexVideoDetails(videoDetails);
 
-                return { id: p._id, name: p.name || p.title || p._id, ids };
+                return { id: p._id, name: p.name || p.title || p._id, ids, stats: playlistStats(p) };
             }
 
             const nextPlaylists = new Map();
@@ -4307,6 +4429,15 @@ whenBody(() => {
                         });
                         scheduleBadges();
                     }
+                }).catch(() => {});
+            }
+            // Video lists the site requests (discover, browse, search, ...): their full metadata (all tags,
+            // performers, duration) lets the filter judge more than the two tags a card shows.
+            if (jsonP && !quietUrls.has(url) && !/\/api\/(?:videos\/[a-f0-9]{24}|playlists\/)/.test(url)) {
+                jsonP.then(json => {
+                    const list = [json?.videos, json?.data, json?.data?.videos, json?.results]
+                        .find(a => Array.isArray(a) && a.length && a[0]?._id && typeof a[0].title === 'string' && 'duration' in a[0]);
+                    if (list && indexVideoDetails(list.filter(v => Array.isArray(v?.tags) || Array.isArray(v?.top5Tags))) > 0) scheduleBadges();
                 }).catch(() => {});
             }
         } catch { settleVideoDeferred(null); }
@@ -4685,6 +4816,13 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
                 <button type="button" class="ts-sw" role="switch" data-vol><span class="k"></span></button>
             </div></div>
             ${card(TS_SVG.ban, 'rgb(248,113,113)', 'Reject list', 'Adding a video there removes it from every other playlist and shows it red instead of green. The Reject hotkey also skips to the next video.')}
+            <div class="ts-card"><div class="ts-row2">
+                <div>
+                    <label class="ts-lab"><span style="display:inline-flex;">${TAG_SVG}</span>Tag after reject</label>
+                    <p class="ts-desc">After rejecting a video (⊘), ask for a tag and add it to the video on the site</p>
+                </div>
+                <button type="button" class="ts-sw" role="switch" data-tagrej><span class="k"></span></button>
+            </div></div>
             <div class="ts-card" data-more></div>
         `;
         const slots = sec.querySelectorAll('[data-slot]');
@@ -4717,6 +4855,12 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         const paintVol = () => vol.setAttribute('aria-checked', volumeLockEnabled() ? 'true' : 'false');
         vol.onclick = () => { setVolumeLock(!volumeLockEnabled()); paintVol(); };
         paintVol();
+
+        // Tag after reject
+        const tagRej = sec.querySelector('[data-tagrej]');
+        const paintTagRej = () => tagRej.setAttribute('aria-checked', tagAfterReject() ? 'true' : 'false');
+        tagRej.onclick = () => { setTagAfterReject(!tagAfterReject()); paintTagRej(); };
+        paintTagRej();
 
         // Reject list
         const rejectItems = () => {
@@ -4873,7 +5017,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
                 <div style="flex:1"></div>
                 <button type="button" class="pn-btn" data-reset-all>Reset all names &amp; colours</button>
             </div>`;
-        body.append(hotkeysCard(), names, backupCard());
+        body.append(hotkeysCard(), names, sidebarCard(), backupCard());
         const rowsEl = names.querySelector('[data-rows]');
         const status = names.querySelector('[data-status]');
         const flash = t => { status.textContent = t; clearTimeout(flash.t); flash.t = setTimeout(() => { status.textContent = ''; }, 1800); };
@@ -4964,6 +5108,114 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
     }).observe(document.body, { childList: true, subtree: true });
 
     // ---------------------------------------------------------------------
+    // Sidebar: hide items (set on the full settings page)
+    // ---------------------------------------------------------------------
+    // Keys: "g:<label>" for a group (Explore, Community, Saved content: header and items), "a:<href>" for
+    // a single link. Hidden via a data-* flag + stylesheet, re-applied on every sidebar pass.
+    const NAV_HIDE_KEY = 'pmv_sidebar_hidden_v1';
+    let navHidden = new Set((() => { try { return JSON.parse(localStorage.getItem(NAV_HIDE_KEY) || '[]'); } catch { return []; } })());
+    function saveNavHidden() {
+        try { if (navHidden.size) localStorage.setItem(NAV_HIDE_KEY, JSON.stringify([...navHidden])); else localStorage.removeItem(NAV_HIDE_KEY); } catch {}
+    }
+    function navLinkLabel(a) {
+        const span = a.querySelector('span.flex-1');
+        const t = (span ? span.textContent : [...a.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join(' ') || a.textContent).trim();
+        return t.replace(/\s+BETA$/i, '').replace(/\s+/g, ' ');
+    }
+    // Every hideable entry of the visible sidebar: [{ key, label, el, group, depth }]
+    function navEntries() {
+        const aside = [...document.querySelectorAll('aside')].find(a => a.getClientRects().length && a.querySelector('nav'));
+        if (!aside) return [];
+        const out = [];
+        const inGroup = new Set();
+        aside.querySelectorAll('button[aria-label^="Toggle "][aria-label$=" submenu"]').forEach(btn => {
+            const label = btn.getAttribute('aria-label').slice(7, -8).trim();
+            const wrap = btn.id === 'pmvx-saved-nav' ? btn : (btn.closest('#pmvx-saved-nav') || btn.closest('div.mt-1') || btn.parentElement?.parentElement);
+            if (!wrap || inGroup.has(wrap)) return;
+            inGroup.add(wrap);
+            out.push({ key: 'g:' + label, label, el: wrap, group: true, depth: 0 });
+            if (wrap.id === 'pmvx-saved-nav') return; // its playlists come and go
+            wrap.querySelectorAll('a[href]').forEach(a => {
+                if (a.closest('div.flex.items-center.justify-between') && a.closest('div.flex.items-center.justify-between').contains(btn)) return; // the header link
+                const label2 = navLinkLabel(a);
+                if (label2) out.push({ key: 'a:' + a.getAttribute('href'), label: label2, el: a, group: false, depth: 1, parent: label });
+            });
+        });
+        aside.querySelectorAll('a[href]').forEach(a => {
+            if ([...inGroup].some(w => w.contains(a))) return;
+            if (a.closest('.mobile-profile')) return;
+            const label = navLinkLabel(a);
+            if (!label || out.some(e => e.key === 'a:' + a.getAttribute('href'))) return;
+            out.push({ key: 'a:' + a.getAttribute('href'), label, el: a, group: false, depth: 0 });
+        });
+        return out;
+    }
+    function applyNavHidden() {
+        if (!document.getElementById('pmv-navhide-style')) {
+            const st = document.createElement('style');
+            st.id = 'pmv-navhide-style';
+            st.textContent = '[data-pmvx-nav-hidden="1"]{display:none !important;}';
+            (document.head || document.documentElement).appendChild(st);
+        }
+        if (!navHidden.size && !document.querySelector('[data-pmvx-nav-hidden]')) return;
+        navEntries().forEach(e => {
+            const hide = navHidden.has(e.key);
+            if (hide && e.el.dataset.pmvxNavHidden !== '1') e.el.dataset.pmvxNavHidden = '1';
+            else if (!hide && e.el.dataset.pmvxNavHidden) delete e.el.dataset.pmvxNavHidden;
+        });
+    }
+
+    // Settings card: one switch per sidebar entry (on = shown).
+    function sidebarCard() {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;flex-direction:column;gap:2px;';
+        const render = () => {
+            wrap.textContent = '';
+            const list = navEntries();
+            if (!list.length) {
+                const e = document.createElement('div');
+                e.className = 'ts-meta';
+                e.textContent = 'The sidebar is not open on this page — open it to choose items.';
+                wrap.appendChild(e);
+                return;
+            }
+            list.forEach(e => {
+                const row = document.createElement('div');
+                row.className = 'ts-row2';
+                row.style.cssText = `padding:6px 0 6px ${e.depth ? 18 : 0}px;border-bottom:1px solid #1F1F1F;`;
+                const lab = document.createElement('span');
+                lab.style.cssText = `font-size:14px;color:${e.group ? '#fff' : 'rgb(209,213,219)'};font-weight:${e.group ? 600 : 400};`;
+                lab.textContent = e.label + (e.group ? ' (group)' : '');
+                const sw = document.createElement('button');
+                sw.type = 'button';
+                sw.className = 'ts-sw';
+                sw.setAttribute('role', 'switch');
+                sw.innerHTML = '<span class="k"></span>';
+                const paint = () => sw.setAttribute('aria-checked', navHidden.has(e.key) ? 'false' : 'true');
+                paint();
+                sw.onclick = () => {
+                    if (navHidden.has(e.key)) navHidden.delete(e.key); else navHidden.add(e.key);
+                    saveNavHidden(); applyNavHidden(); paint();
+                };
+                row.append(lab, sw);
+                wrap.appendChild(row);
+            });
+            const reset = document.createElement('button');
+            reset.type = 'button';
+            reset.className = 'ts-btn';
+            reset.style.marginTop = '8px';
+            reset.textContent = 'Show everything';
+            reset.onclick = () => { navHidden.clear(); saveNavHidden(); applyNavHidden(); render(); };
+            wrap.appendChild(reset);
+        };
+        render();
+        // The sidebar may render after this card.
+        if (!navEntries().length) setTimeout(render, 1500);
+        return toolsCard('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>',
+            '', 'Sidebar', 'Hide items you never use. A group hides its header and everything in it.', wrap);
+    }
+
+    // ---------------------------------------------------------------------
     // Sidebar: "Saved content" group
     // ---------------------------------------------------------------------
     // A group under Explore in the site's sidebar: Favorites (the Favorites tab of your profile) and
@@ -4994,6 +5246,11 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         if (router) router.push(href).catch(() => { location.href = href; });
         else location.href = href;
     }
+
+    const NAV_EYE_SVG = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-1px;"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></svg>';
+    const NAV_LOCK_SVG = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-1px;"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+    const compactCount = n => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M'
+        : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K' : String(n);
 
     function savedNavLink(template, href, label, icon, extraTitle) {
         const a = template.cloneNode(true);
@@ -5032,7 +5289,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             playlistSortIndex(a.name) - playlistSortIndex(b.name) || (a.name || '').localeCompare(b.name || ''));
         // Logged out (no playlists known): no group.
         if (!playlists.length) { existing?.remove(); return; }
-        const sig = savedNavOpen + '|' + playlists.map(p => p.id + ':' + getPlaylistDisplayName(p.name, p.id)).join('|');
+        const sig = savedNavOpen + '|' + playlists.map(p => p.id + ':' + getPlaylistDisplayName(p.name, p.id) + ':' + p.ids.size + ':' + JSON.stringify(p.stats || null)).join('|');
         if (existing && existing.previousElementSibling === exploreGroup && savedNavSig === sig) return;
 
         const headRowTpl = exploreToggle.closest('div.flex.items-center.justify-between');
@@ -5091,6 +5348,24 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
                 n.textContent = String(p.ids.size);
                 n.style.cssText = 'flex-shrink:0;font-size:11px;color:rgb(107,114,128);font-variant-numeric:tabular-nums;';
                 a.appendChild(n);
+                // Second line: rating and views (or "private").
+                const st = p.stats;
+                const label = a.querySelector('span.flex-1');
+                if (st && label) {
+                    const nameEl = document.createElement('span');
+                    nameEl.textContent = label.textContent;
+                    nameEl.style.cssText = 'display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+                    const sub = document.createElement('span');
+                    sub.style.cssText = 'display:flex;gap:8px;margin-top:1px;font-size:10.5px;line-height:1.2;color:rgb(107,114,128);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;';
+                    const parts = [];
+                    if (st.rating !== null) parts.push(`<span style="color:rgba(250,204,21,.75);">\u2605 ${Math.round(st.rating)}%</span>`);
+                    if (st.isPublic) parts.push(`<span>${NAV_EYE_SVG} ${escHtml(compactCount(st.views))}</span>`);
+                    else parts.push(`<span>${NAV_LOCK_SVG} private</span>`);
+                    sub.innerHTML = parts.join('');
+                    label.textContent = '';
+                    label.append(nameEl, sub);
+                    a.title += ` \u2014 ${st.rating !== null ? Math.round(st.rating) + '% rating, ' : ''}${st.isPublic ? st.views.toLocaleString() + ' views' : 'private'}`;
+                }
                 items.appendChild(a);
             });
             group.appendChild(items);
@@ -5121,6 +5396,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         requestAnimationFrame(() => {
             savedNavQueued = false;
             try { injectSavedNav(); } catch {}
+            try { applyNavHidden(); } catch {}
             try { openFavoritesTabIfAsked(); } catch {}
         });
     }).observe(document.body, { childList: true, subtree: true });
@@ -5665,7 +5941,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     // Index of the playing item: earlier entries are history, later ones upcoming. -1 = none from the queue.
     let queueCursor = -1;
     // History is capped.
-    const QUEUE_HISTORY_MAX = 1;
+    // Played items kept in Up next; one is shown, "Show more" reveals older ones in steps.
+    const QUEUE_HISTORY_MAX = 50;
+    const QUEUE_HISTORY_SHOWN = 1;
+    const QUEUE_HISTORY_STEP = 10;
+    let queueHistoryShown = QUEUE_HISTORY_SHOWN;
     // Id of a playing row the user removed, so syncQueueCursor() does not re-add it until they move on.
     let dismissedCurrentId = null;
     let queueSettingsOpen = false;
@@ -5747,6 +6027,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     const RATING_RE = /^\d{1,3}%$/;
     const DURATION_RE = /^\d{1,2}:\d{2}(?::\d{2})?$/;
+    const ASPECT_LABELS = new Set(['9:16', '16:10', '10:16', '9:21', '21:10']);
 
     function scrapeCardTitle(card, leaves) {
         // Grids use an <h4>; the Recommended sidebar does not, so the image alt text is used there.
@@ -5788,7 +6069,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (!card) return {};
         const leaves = cardLeafTexts(card);
         const rating = leaves.find(t => RATING_RE.test(t));
-        const duration = leaves.find(t => DURATION_RE.test(t));
+        // Some cards show an aspect pill ("9:16") next to the duration; it looks like a time.
+        const times = leaves.filter(t => DURATION_RE.test(t));
+        const duration = times.length > 1 ? (times.find(t => !ASPECT_LABELS.has(t)) || times[times.length - 1]) : times[0];
         const viewsIdx = leaves.findIndex(t => /\bviews?\b/i.test(t));
         const img = card.querySelector('img');
         const uploaderLink = card.querySelector('a[href^="/profile/"], a[href^="/user/"]')?.textContent?.trim();
@@ -6015,8 +6298,18 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }, 150);
     });
 
+    // Video links without the site's referral marker (?from=home, ?from=recommended …).
+    function cleanVideoHref(href) {
+        if (!href) return href;
+        try {
+            const u = new URL(href, location.origin);
+            u.searchParams.delete('from');
+            return u.pathname + (u.search === '?' ? '' : u.search) + u.hash;
+        } catch { return href; }
+    }
+
     function goToVideo(href, id) {
-        const target = href || `/video/${id}`;
+        const target = cleanVideoHref(href) || `/video/${id}`;
         if (document.fullscreenElement && id) {
             playInPlace(target, id).then(handled => {
                 if (handled) return;
@@ -6032,7 +6325,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const href = card.tagName === 'A'
             ? card.getAttribute('href')
             : card.querySelector('a[href*="/video/"]')?.getAttribute('href');
-        return href && href.includes('/video/') ? href : null;
+        return href && href.includes('/video/') ? cleanVideoHref(href) : null;
     }
 
     // Recovers a slug URL from the slug to API id map for items without a card; null falls back to the bare id.
@@ -6058,7 +6351,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             const at = Math.min(queueCursor + 1, smartQueueItems.length);
             smartQueueItems.splice(at, 0, {
                 id,
-                href: location.pathname + location.search,
+                href: cleanVideoHref(location.pathname + location.search),
                 meta: resolveQueueMeta(id),
             });
             queueCursor = at;
@@ -6093,7 +6386,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const was = smartQueueItems.findIndex(it => it.id === videoId);
         if (was !== -1 && was >= queueCursor) {
             // Already playing or waiting: do not move it, which would reshuffle the list.
-            toast('Already in Up next');
+            toast('Already in Up next', null, { under: upNextToastAnchor() });
             renderQueueSidebar();
             return;
         }
@@ -6105,8 +6398,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const href = cardHref(card) || (card ? null : location.pathname + location.search);
         // Appended at the end to preserve click order.
         smartQueueItems.push({ id: videoId, href, meta: resolveQueueMeta(videoId, card) });
-        toast(`+ Added to Up next (${upcomingCount()})`, 'green');
+        toast(`+ Added to Up next (${upcomingCount()})`, 'green', { under: upNextToastAnchor() });
         renderQueueSidebar();
+    }
+    // Up next messages appear right under Up next in the header (under its panel when that is open).
+    function upNextToastAnchor() {
+        const panel = document.getElementById('pmv-queue-floating');
+        if (panel && panel.getClientRects().length) return panel;
+        return [...document.querySelectorAll('[data-pmv-queue-btn]')].find(b => b.getClientRects().length) || null;
     }
     function addCurrentVideoToQueue() { addVideoToQueue(getCurrentVideoId()); }
     // A row added before its API _id was known is keyed by slug id; move it over in place once known.
@@ -6182,6 +6481,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             isCurrent ? 'now playing' : (isPlayed ? 'played' : (pinned ? 'added' : 'suggested')),
         ].filter(Boolean);
         const plChips = queuePlaylistChipsHtml(id);
+        // With the site-wide filter on: why it would hide this video, as red chips (the row stays).
+        // Playlist reasons are left out: the row's tint and playlist chips already show that.
+        const reasons = filterConfig.active && filterIsMeaningful()
+            ? filterReasons(id, meta, filterConfig, true).filter(r => r !== 'in playlist' && r !== 'not in playlist').slice(0, 3) : [];
+        const reasonChips = reasons.map(r => `<span title="Your filter would hide this video" style="display:inline-flex;align-items:center;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:500;background:rgba(${REJECT_RGB},0.12);border:1px solid rgba(${REJECT_RGB},0.45);color:rgb(${REJECT_RGB});white-space:nowrap;">${escHtml(r)}</span>`).join('');
         // Already saved: row tinted green (red for the reject list).
         const tintRgb = isRejected(id) ? REJECT_RGB : QUEUE_IN_PLAYLIST_RGB;
         const rowStyle = [
@@ -6190,7 +6494,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         ].join('');
         const inPlaylistStyle = rowStyle ? ` style="${rowStyle}"` : '';
         return `
-            <a href="${escHtml(href || '/video/' + id)}" draggable="true" data-queue-id="${escHtml(id)}"${inPlaylistStyle} class="flex gap-2 hover:bg-[#1A1A1A] p-2 rounded-lg transition-colors group cursor-grab${isCurrent ? ' bg-[#1A1A1A]' : ''}">
+            <a href="${escHtml(cleanVideoHref(href) || '/video/' + id)}" draggable="true" data-queue-id="${escHtml(id)}"${inPlaylistStyle} class="flex gap-2 hover:bg-[#1A1A1A] p-2 rounded-lg transition-colors group cursor-grab${isCurrent ? ' bg-[#1A1A1A]' : ''}">
                 <div class="w-4 flex-shrink-0 flex items-center justify-center text-xs ${isCurrent ? 'text-orange-400' : 'text-gray-500'}">${isCurrent ? '▶' : index + 1}</div>
                 <div class="w-40 aspect-video flex-shrink-0 bg-[#0F0F0F] rounded-lg overflow-hidden relative">
                     ${meta?.thumbnailUrl ? `<img src="${escHtml(meta.thumbnailUrl)}" alt="" loading="lazy" class="w-full h-full object-contain bg-black transition-transform duration-200 opacity-100 group-hover:scale-105">` : ''}
@@ -6200,7 +6504,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     <h4 class="text-white text-sm font-medium line-clamp-2 group-hover:text-orange-400 transition-colors mb-1">${escHtml(meta?.title || id)}</h4>
                     <div class="text-xs text-gray-400 mb-1 truncate">${escHtml(meta?.uploaderDisplay || '')}</div>
                     <div class="flex items-center gap-2 text-xs text-gray-500">${bits.map(b => `<span>${escHtml(b)}</span>`).join('<span>•</span>')}</div>
-                    ${plChips ? `<div class="flex items-center gap-1 flex-wrap mt-1">${plChips}</div>` : ''}
+                    ${plChips || reasonChips ? `<div class="flex items-center gap-1 flex-wrap mt-1">${plChips}${reasonChips}</div>` : ''}
                 </div>
                 <div class="flex-shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-colors" style="flex-direction:column;justify-content:center;">
                     <span class="text-gray-500 text-xs cursor-grab" title="Drag to reorder">⠿</span>
@@ -6226,8 +6530,19 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             ? `${upcomingCount()} up next${played ? ` \u2022 ${played} played` : ''} \u2022 auto-refill ${queueSettings.autoRefill ? 'on' : 'off'}${queueSettings.useNfFilter && lastFilteredOut ? ` \u2022 ${lastFilteredOut} filtered out` : ''}`
             : 'Empty \u2014 add with "+", or generate below';
 
+        // Older played items stay folded away behind "Show more".
+        // "Clear" next to it drops the played items.
+        const firstShown = Math.max(0, played - queueHistoryShown);
+        const foldBtn = firstShown > 0
+            ? `<button id="pmv-sq-more" type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;flex:1;justify-content:center;">Show more \u2022 ${firstShown} earlier</button>`
+            : (queueHistoryShown > QUEUE_HISTORY_SHOWN && played > QUEUE_HISTORY_SHOWN
+                ? `<button id="pmv-sq-less" type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;flex:1;justify-content:center;">Show less</button>` : '');
+        const moreBtn = played > 0
+            ? `<div style="display:flex;gap:6px;justify-content:flex-end;margin-bottom:6px;">${foldBtn}` +
+              `<button id="pmv-sq-clear-played" type="button" title="Remove the ${played} played video${played === 1 ? '' : 's'} from Up next" class="${Q_CHIP_OFF}" style="cursor:pointer;justify-content:center;">Clear${foldBtn ? '' : ` ${played} played`}</button></div>`
+            : '';
         const rows = smartQueueItems.length
-            ? smartQueueItems.map((item, i) => sidebarRowHtml(item, item.id === currentId, i, manuallyAddedIds.has(item.id), queueCursor >= 0 && i < queueCursor)).join('')
+            ? moreBtn + smartQueueItems.map((item, i) => i < firstShown ? '' : sidebarRowHtml(item, item.id === currentId, i, manuallyAddedIds.has(item.id), queueCursor >= 0 && i < queueCursor)).join('')
             : '<div class="text-xs text-gray-500 p-2">Nothing queued yet.</div>';
 
         return `
@@ -6252,6 +6567,21 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     function wireQueuePanel(panel, rerender) {
         panel.querySelector('#pmv-sq-settings').onclick = () => { queueSettingsOpen = !queueSettingsOpen; rerender(); };
         panel.querySelector('#pmv-sq-collapse').onclick = () => { queueCollapsed = !queueCollapsed; rerender(); };
+        const more = panel.querySelector('#pmv-sq-more');
+        if (more) more.onclick = e => { e.preventDefault(); e.stopPropagation(); queueHistoryShown += QUEUE_HISTORY_STEP; rerender(); };
+        const less = panel.querySelector('#pmv-sq-less');
+        if (less) less.onclick = e => { e.preventDefault(); e.stopPropagation(); queueHistoryShown = QUEUE_HISTORY_SHOWN; rerender(); };
+        const clearPlayed = panel.querySelector('#pmv-sq-clear-played');
+        if (clearPlayed) clearPlayed.onclick = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            const n = Math.max(0, queueCursor);
+            if (!n) return;
+            smartQueueItems.splice(0, n).forEach(it => manuallyAddedIds.delete(it.id));
+            queueCursor -= n;
+            queueHistoryShown = QUEUE_HISTORY_SHOWN;
+            rerender();
+        };
         panel.querySelector('#pmv-sq-clear').onclick = () => {
             smartQueueItems = [];
             manuallyAddedIds = new Set();
@@ -6306,7 +6636,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     // Header button that opens the queue anywhere (the inline queue needs a video page),
     // with a count badge.
-    const QUEUE_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="15" y2="6"></line><line x1="3" y1="12" x2="15" y2="12"></line><line x1="3" y1="18" x2="11" y2="18"></line><polygon points="17 8 23 12 17 16 17 8" fill="currentColor" stroke="none" data-pmv-fill="1"></polygon></svg>';
+    // Same "play next" outline as the Up next button on cards.
+    const QUEUE_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5v11L10 12z"></path><path d="M11 6.5v11l7.5-5.5z"></path><path d="M21 6.5v11"></path></svg>';
 
     function updateQueueButton() {
         const n = upcomingCount();
@@ -7020,7 +7351,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     // ---------------------------------------------------------------------
 
     // color: 'green' | 'red' | null (neutral)
-    function toast(msg, color) {
+    // `under`: an element the toast sits directly below (right-aligned), instead of the bottom corner.
+    function toast(msg, color, { under = null } = {}) {
         document.getElementById('pmv-toast')?.remove();
         // Fixed system messages default to green.
         if (!color) {
@@ -7039,6 +7371,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             `color:${isGreen ? 'rgb(120,255,60)' : isRed ? 'rgb(255,90,90)' : 'white'};` +
             `border:1px solid ${isGreen ? 'rgba(100,255,0,0.45)' : isRed ? 'rgba(255,60,60,0.45)' : 'transparent'};` +
             `padding:10px 14px;border-radius:10px;z-index:999999;font-size:14px;pointer-events:none;`;
+        const anchor = under && !document.fullscreenElement && under.isConnected ? under.getBoundingClientRect() : null;
+        if (anchor && anchor.width) {
+            el.style.bottom = 'auto';
+            el.style.top = Math.round(anchor.bottom + 8) + 'px';
+            el.style.right = Math.max(8, Math.round(window.innerWidth - anchor.right)) + 'px';
+        }
         (document.fullscreenElement || document.body).appendChild(el);
         clearTimeout(State.toastTimeout);
         State.toastTimeout = setTimeout(() => el.remove(), 2500);
@@ -7214,6 +7552,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             && !(State.hud && State.hud.contains(btn))) || null;
     }
 
+    // Set by the HUD's cloned buttons right before forwarding a click; read once, within 500 ms.
+    let forwardedAnchor = null;
+    function takeForwardedAnchor() {
+        const a = forwardedAnchor;
+        forwardedAnchor = null;
+        return a && performance.now() - a.at < 500 ? a.rect : null;
+    }
+
     function buildNativeActionBarClone() {
         // Skipped while fullscreen is ahead of the page: those buttons belong to the previous video.
         if (staleFullscreenHref) return null;
@@ -7233,17 +7579,22 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             // Forward clicks to the original.
             clone.addEventListener('click', e => {
                 e.stopPropagation();
+                // Our own buttons (⊘, Tags) open their menus at the clone, not at the hidden original.
+                forwardedAnchor = { rect: clone.getBoundingClientRect(), at: performance.now() };
                 child.click();
                 startHudTimer(4000);
                 // The clone is a static snapshot; re-sync its classes shortly after the click,
-                // once Vue has patched the original.
-                setTimeout(() => {
+                // once Vue has patched the original (and again for slower API toggles).
+                const sync = () => {
                     if (!clone.isConnected) return;
                     clone.className = child.className;
                     if (child.title) clone.title = child.title;
+                    if (child.dataset.on !== undefined) clone.dataset.on = child.dataset.on;
                     const label = child.getAttribute('aria-label');
                     if (label) clone.setAttribute('aria-label', label);
-                }, 80);
+                };
+                setTimeout(sync, 80);
+                setTimeout(sync, 1500);
             });
             clone.style.cssText = (clone.style.cssText || '') + ';pointer-events:auto;';
             cloneBar.appendChild(clone);
@@ -7334,6 +7685,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             bar.appendChild(el);
         });
         paint();
+        // ⊘ and Tags for the video actually playing, first as under the video.
+        try {
+            const extra = [];
+            if (rejectPlaylistId && State.playlists.has(rejectPlaylistId)) extra.push(rejectPageButton(videoId));
+            extra.push(tagBarButton(videoId), tagBarButton(videoId, 'stars'));
+            extra.reverse().forEach(el => { el.style.pointerEvents = 'auto'; bar.insertBefore(el, bar.firstChild); });
+        } catch {}
         return bar;
     }
 
@@ -7435,6 +7793,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         card.onmouseleave = () => { card.style.background = 'rgba(255,255,255,.05)'; card.style.borderColor = 'rgba(255,255,255,.1)'; };
 
         const label = document.createElement('div');
+        label.dataset.pmvUnLabel = '1';
         label.textContent = 'UP NEXT';
         label.style.cssText = 'font-size:10px;font-weight:700;letter-spacing:.06em;opacity:.45;';
         card.appendChild(label);
@@ -7497,6 +7856,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const meta = getMeta();
 
         const hud = document.createElement('div');
+        hud.dataset.pmvHud = '1';
         State.hud = hud;
         hud.style.cssText = 'position:fixed;left:50%;bottom:90px;transform:translateX(-50%);' +
             'width:98vw;max-width:1600px;background:rgba(0,0,0,0.82);backdrop-filter:blur(16px);' +
@@ -7508,9 +7868,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const mainCol = document.createElement('div');
         mainCol.style.cssText = 'flex:1;min-width:0;';
 
+        // Layout: [title ........ actions] / by · rating · views · duration · date ... up next /
+        // tags / description / playlists, then the thumbnail strip.
         const actionBarClone = staleFullscreenHref ? buildApiActionBar(videoId) : buildNativeActionBarClone();
         if (actionBarClone) {
-            mainCol.appendChild(actionBarClone);
+            actionBarClone.style.cssText = 'display:flex;flex-wrap:nowrap;gap:4px;flex-shrink:0;align-items:center;';
         } else if (!opts._retried) {
             // Action bar not rendered yet (the auth-dependent bar can still be hydrating on a fresh
             // /video/ load): retry once.
@@ -7533,41 +7895,44 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             return spans[0].closest('.flex.flex-wrap.items-center') ||
                    spans[0].closest('.flex.items-center') || null;
         })();
+        const cvd = State.currentVideoData;
+
+        // Header: title left, the action toolbar right.
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex;align-items:center;gap:16px;min-width:0;margin-bottom:4px;';
+        const title = document.createElement('div');
+        title.textContent = meta.title;
+        title.style.cssText = 'flex:1;min-width:0;font-size:19px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+        header.appendChild(title);
+        if (actionBarClone) header.appendChild(actionBarClone);
+
+        // One subdued line: creator, rating, then the page's views/date/duration row (icons included);
+        // the upload date from the data only when that row is missing.
+        const sub = document.createElement('div');
+        sub.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-bottom:10px;font-size:12px;color:rgba(255,255,255,.6);';
+        const creator = document.createElement('span');
+        creator.textContent = meta.creator ? 'by ' + meta.creator : '';
+        creator.style.cssText = 'font-size:13px;color:rgba(255,255,255,.8);font-weight:500;';
+        if (meta.creator) sub.appendChild(creator);
+        if (cvd && cvd.bayesianRating !== null && cvd.bayesianRating !== undefined) {
+            const ratingEl = document.createElement('span');
+            ratingEl.textContent = '\u2605 ' + cvd.bayesianRating.toFixed(1) + '%';
+            ratingEl.style.cssText = 'color:rgb(253,224,71);opacity:.85;';
+            sub.appendChild(ratingEl);
+        }
         if (metaBar) {
             const metaClone = metaBar.cloneNode(true);
             metaClone.removeAttribute('data-v-18f75d28');
-            metaClone.style.cssText = 'display:flex;flex-wrap:wrap;gap:12px;margin-bottom:8px;font-size:12px;opacity:0.6;';
-            mainCol.appendChild(metaClone);
-        }
-
-        const title = document.createElement('div');
-        title.textContent = meta.title;
-        title.style.cssText = 'font-size:18px;font-weight:700;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-
-        const creator = document.createElement('div');
-        creator.textContent = 'By: ' + meta.creator;
-        creator.style.cssText = 'opacity:.7;font-size:13px;margin-bottom:8px;';
-
-        // Extra metadata: rating + upload date.
-        const cvd = State.currentVideoData;
-        if (cvd && (cvd.bayesianRating !== null || cvd.uploadDate)) {
-            const metaLine = document.createElement('div');
-            metaLine.style.cssText = 'display:flex;flex-wrap:wrap;gap:12px;margin-bottom:6px;font-size:12px;opacity:0.55;';
-            if (cvd.bayesianRating !== null) {
-                const ratingEl = document.createElement('span');
-                ratingEl.textContent = '★ ' + cvd.bayesianRating.toFixed(1) + '%';
-                metaLine.appendChild(ratingEl);
-            }
-            if (cvd.uploadDate) {
-                const dateEl = document.createElement('span');
-                dateEl.textContent = cvd.uploadDate.slice(0, 10);
-                metaLine.appendChild(dateEl);
-            }
-            mainCol.appendChild(metaLine);
+            metaClone.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:12px;';
+            sub.appendChild(metaClone);
+        } else if (cvd?.uploadDate) {
+            const dateEl = document.createElement('span');
+            dateEl.textContent = cvd.uploadDate.slice(0, 10);
+            sub.appendChild(dateEl);
         }
 
         // Tags: top5Tags when available, else regular tags; performers follow in the same row
-        // with a purple accent.
+        // with the site's yellow accent.
         const activeTags = (cvd?.top5Tags?.length ? cvd.top5Tags : null) || meta.tags;
         const activeStars = meta.starsTags || [];
 
@@ -7612,7 +7977,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             el.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/></svg>';
             const nameSpan = document.createElement('span');
             el.appendChild(nameSpan);
-            makeTagSwitch(el, star, 'display:inline-flex;align-items:center;gap:4px;background:rgba(180,120,255,.12);border:1px solid rgba(180,120,255,.3);color:rgb(210,180,255);',
+            makeTagSwitch(el, star, 'display:inline-flex;align-items:center;gap:4px;background:rgba(234,179,8,.14);border:1px solid rgba(234,179,8,.45);color:rgb(253,224,71);',
                 state => { nameSpan.textContent = (state === 'exclude' ? '⊘ ' : '') + star; });
             tags.appendChild(el);
         });
@@ -7627,6 +7992,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             playlistRow.appendChild(loading);
         } else {
             [...State.playlists.values()]
+                .filter(pl => !(pl.id === rejectPlaylistId && actionBarClone))
                 .sort((a, b) => playlistSortIndex(a.name) - playlistSortIndex(b.name))
                 .forEach(playlist => {
                 let active = matches.some(p => p.id === playlist.id);
@@ -7675,33 +8041,20 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             });
         }
 
-        mainCol.appendChild(title);
-        mainCol.appendChild(creator);
-        mainCol.appendChild(tags);
+        mainCol.appendChild(header);
+        mainCol.appendChild(sub);
+        if (tags.children.length) mainCol.appendChild(tags);
         const descText = cvd?.description || meta.description;
         if (descText) {
+            // One line; the full text in the tooltip.
             const desc = document.createElement('div');
-            desc.textContent = descText;
-            desc.style.cssText = 'font-size:12px;opacity:.6;margin-bottom:10px;max-height:3.6em;overflow:hidden;line-height:1.4;white-space:pre-wrap;word-break:break-word;';
+            desc.textContent = String(descText).replace(/\s+/g, ' ').trim();
+            desc.title = descText;
+            desc.style.cssText = 'font-size:12px;color:rgba(255,255,255,.5);margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
             mainCol.appendChild(desc);
         }
         mainCol.appendChild(playlistRow);
 
-        // Queue counter goes at the right end of the first row (action bar, meta row or title).
-        const queueRow = buildQueueProgressRow();
-        if (queueRow) {
-            const first = mainCol.firstElementChild;
-            if (first === title) {
-                const text = document.createElement('span');
-                text.textContent = meta.title;
-                text.style.cssText = 'min-width:0;overflow:hidden;text-overflow:ellipsis;';
-                title.textContent = '';
-                title.appendChild(text);
-                title.style.display = 'flex';
-                title.style.gap = '12px';
-            }
-            first.appendChild(queueRow);
-        }
 
         // Top row: main column plus up-next card; the thumbnail strip spans the full width below.
         const topRow = document.createElement('div');
@@ -7709,6 +8062,19 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         topRow.appendChild(mainCol);
         const upNextCard = buildUpNextCard();
         if (upNextCard) topRow.appendChild(upNextCard);
+        // Queue counter: in the up-next card's label ("UP NEXT  8 left"), else at the end of the subline.
+        const queueRow = buildQueueProgressRow();
+        const cardLabel = upNextCard?.querySelector('[data-pmv-un-label]');
+        if (queueRow && cardLabel) {
+            queueRow.style.marginLeft = '0';
+            queueRow.firstElementChild?.remove();
+            cardLabel.style.display = 'flex';
+            cardLabel.style.justifyContent = 'space-between';
+            cardLabel.style.alignItems = 'baseline';
+            cardLabel.style.opacity = '1';
+            cardLabel.innerHTML = '<span style="opacity:.45;">UP NEXT</span>';
+            cardLabel.appendChild(queueRow);
+        } else if (queueRow) sub.appendChild(queueRow);
         hud.appendChild(topRow);
 
         const thumbs = buildThumbs();
@@ -8015,14 +8381,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (!State.ready || !videoId) return;
 
         // Find the container of the native button bar; the extra row goes right after it.
-        const nativeBtn = findNativePlaylistButton();
-        const nativeBar = nativeBtn?.closest('.flex.items-center.gap-2') ||
-            (() => {
-                const anchor = [...document.querySelectorAll('button[title]')]
-                    .find(b => /^Like/i.test(b.title) || /^Add to playlist$/i.test(b.title));
-                return anchor?.closest('.flex.items-center.gap-2') || null;
-            })();
+        const nativeBar = nativeActionBar();
         if (!nativeBar) return;
+        ensureRejectBarButton(videoId, nativeBar);
 
         // Remove the previous injection if videoId changed.
         const existing = document.getElementById('pmv-page-playlists');
@@ -8045,7 +8406,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         wrap.dataset.forVideo = videoId;
         wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end;margin-top:8px;grid-column:1/-1;';
 
+        // The reject list is not a playlist button: it is the ⊘ in the site's action bar.
+        const rejectId = rejectPlaylistId && State.playlists.has(rejectPlaylistId) ? rejectPlaylistId : null;
+
         [...State.playlists.values()]
+            .filter(pl => pl.id !== rejectId)
             .sort((a, b) => playlistSortIndex(a.name) - playlistSortIndex(b.name))
             .forEach(pl => {
             const inPl = pl.ids.has(videoId);
@@ -8106,6 +8471,159 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
         // Insert as next sibling of the native bar.
         nativeBar.parentElement?.appendChild(wrap);
+    }
+
+    // The site's action bar under the video (Like, Dislike, Favourite, …).
+    function nativeActionBar() {
+        const nativeBtn = findNativePlaylistButton();
+        return nativeBtn?.closest('.flex.items-center.gap-2') ||
+            (() => {
+                const anchor = [...document.querySelectorAll('button[title]')]
+                    .find(b => /^Like/i.test(b.title) || /^Add to playlist$/i.test(b.title));
+                return anchor?.closest('.flex.items-center.gap-2') || null;
+            })();
+    }
+
+    // ⊘ as the first button of the site's action bar, in its style. The same toggle as the ⊘ on
+    // cards (no skip, unlike the hotkey). Vue owns the bar, so the heartbeat re-inserts it when
+    // the bar is rebuilt.
+    const BAN_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" style="font-size:16px;" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="m4.9 4.9 14.2 14.2"></path></svg>';
+    function ensureRejectBtnStyle() {
+        if (document.getElementById('pmv-reject-bar-style')) return;
+        const st = document.createElement('style');
+        st.id = 'pmv-reject-bar-style';
+        st.textContent = `
+[data-pmv-reject-page]:hover{color:rgb(252,165,165) !important;background:rgba(220,38,38,.22) !important;}
+[data-pmv-reject-page][data-on="1"]{color:#fff !important;background:rgba(220,38,38,.85) !important;}
+[data-pmv-reject-page][data-on="1"]:hover{background:rgba(220,38,38,.7) !important;}`;
+        (document.head || document.documentElement).appendChild(st);
+    }
+    function styleRejectPageBtn(btn, on) {
+        btn.dataset.on = on ? '1' : '';
+        btn.title = on ? 'Rejected — click to remove from the reject list' : 'Reject (move to the reject list, remove from every other playlist)';
+    }
+    function rejectPageButton(videoId) {
+        ensureRejectBtnStyle();
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.dataset.pmvRejectPage = '1';
+        b.dataset.forVideo = videoId;
+        b.className = 'inline-flex items-center justify-center px-3 py-1.5 rounded-lg transition-all text-sm w-[52px] bg-[#2A2A2A] text-gray-400 hover:bg-[#3A3A3A] hover:text-white';
+        b.innerHTML = BAN_SVG;
+        styleRejectPageBtn(b, isRejected(videoId));
+        b.addEventListener('click', async e => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (b.disabled) return;
+            b.disabled = true;
+            b.style.opacity = '0.5';
+            try {
+                const rect = takeForwardedAnchor() || b.getBoundingClientRect();
+                const now = await toggleRejectVideo(videoId);
+                if (now !== null) styleRejectPageBtn(b, now);
+                if (now && tagAfterReject()) openTagPopup(videoId, rect, State.currentVideoData?.id === videoId ? State.currentVideoData.title : '');
+            } finally {
+                b.disabled = false;
+                b.style.opacity = '';
+            }
+        });
+        return b;
+    }
+    // Tags button: the compact tag menu (openTagPopup) instead of the site's Vote on Tags modal, with
+    // that button's icon (lucide laptop-check). Also on playlist pages, which have no such button.
+    const VOTE_TAGS_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" style="font-size:16px;" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="m9 12l2 2l4-4"></path><path d="M5 7c0-1.1.9-2 2-2h10a2 2 0 0 1 2 2v12H5zm17 12H2"></path></g></svg>';
+    function tagBarButton(videoId, kind = 'general') {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.dataset.pmvTagBar = kind;
+        b.dataset.forVideo = videoId;
+        b.className = 'inline-flex items-center justify-center px-3 py-1.5 rounded-lg transition-all text-sm w-[52px] bg-[#2A2A2A] text-gray-400 hover:bg-[#3A3A3A] hover:text-white';
+        b.title = kind === 'stars' ? 'Models \u2014 vote or add' : 'Tags \u2014 vote or add';
+        b.innerHTML = kind === 'stars' ? STAR_SVG.replace('width="14" height="14"', 'width="16" height="16"') : VOTE_TAGS_SVG;
+        b.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            const open = document.getElementById('pmv-tag-pop');
+            if (open && open.dataset.forVideo === videoId && open._pmvToggle === b) { closeTagPopup(); return; }
+            const title = State.currentVideoData?.id === videoId ? State.currentVideoData.title : '';
+            const pop = openTagPopup(videoId, takeForwardedAnchor() || b.getBoundingClientRect(), title,
+                { heading: kind === 'stars' ? 'Models' : 'Tags', toggleEl: b, kind });
+            pop._pmvToggle = b;
+        });
+        return b;
+    }
+
+    // The site's own "Vote on Tags" buttons open the compact tag menu instead of its modal;
+    // Shift+click still opens the modal.
+    document.addEventListener('click', e => {
+        if (e.shiftKey || !State.ready) return;
+        const b = e.target.closest?.('button');
+        if (!b || b.dataset.pmvTagBar || b.closest('#pmv-tag-pop, [data-pmv-hud]')) return;
+        if (!/^Vote on Tags( Now)?$/.test(b.textContent.trim()) && b.title !== 'Suggest and vote on tags') return;
+        const videoId = getCurrentVideoId();
+        if (!videoId) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const title = State.currentVideoData?.id === videoId ? State.currentVideoData.title : '';
+        const pop = openTagPopup(videoId, b.getBoundingClientRect(), title, { heading: 'Tags', toggleEl: b });
+        pop._pmvToggle = b;
+    }, true);
+
+    // A button, not a link: the HUD forwards clicks on its clone, and a cloned link would open twice.
+    function openPageBarButton(videoId) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.dataset.pmvOpenPage = '1';
+        b.dataset.forVideo = videoId;
+        b.className = 'inline-flex items-center justify-center px-3 py-1.5 rounded-lg transition-all text-sm w-[52px] bg-[#2A2A2A] text-gray-400 hover:bg-[#3A3A3A] hover:text-white';
+        b.title = 'Open the video page in a new tab';
+        b.innerHTML = CARD_ICON.external.replace('<svg ', '<svg width="16" height="16" ');
+        const go = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            const title = State.currentVideoData?.id === videoId ? State.currentVideoData.title : '';
+            const slug = String(title || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+            window.open(`/video/${slug ? slug + '_' : ''}${videoId}`, '_blank', 'noopener');
+        };
+        b.addEventListener('click', go);
+        b.addEventListener('auxclick', e => { if (e.button === 1) go(e); });
+        return b;
+    }
+
+    // Our buttons at the start of the site's action bar: ⊘ (with a reject list), then Tags and Models.
+    function ensureRejectBarButton(videoId, bar = null) {
+        const onPage = location.pathname.startsWith('/video/') || location.pathname.startsWith('/playlists/');
+        if (onPage && videoId && !bar) bar = nativeActionBar();
+        const ok = onPage && videoId && bar;
+        const hasList = rejectPlaylistId && State.playlists.has(rejectPlaylistId);
+
+        const want = [];
+        const pageOwn = sel => [...document.querySelectorAll(sel)].find(el => !el.closest('[data-pmv-hud]')) || null;
+        let rej = pageOwn('[data-pmv-reject-page]');
+        if (ok && hasList) {
+            if (!rej || rej.parentElement !== bar || rej.dataset.forVideo !== videoId) { rej?.remove(); rej = rejectPageButton(videoId); }
+            else styleRejectPageBtn(rej, isRejected(videoId));
+            want.push(rej);
+        } else rej?.remove();
+
+        for (const kind of ['general', 'stars']) {
+            let tag = pageOwn(`[data-pmv-tag-bar="${kind}"]`);
+            if (ok && State.ready) {
+                if (!tag || tag.parentElement !== bar || tag.dataset.forVideo !== videoId) { tag?.remove(); tag = tagBarButton(videoId, kind); }
+                want.push(tag);
+            } else tag?.remove();
+        }
+
+        // On a playlist page: open the playing video's own page in a new tab.
+        let ext = pageOwn('[data-pmv-open-page]');
+        if (ok && location.pathname.startsWith('/playlists/')) {
+            if (!ext || ext.parentElement !== bar || ext.dataset.forVideo !== videoId) { ext?.remove(); ext = openPageBarButton(videoId); }
+            want.push(ext);
+        } else ext?.remove();
+
+        if (!ok) return;
+        // In order at the start, moved only when out of place.
+        want.forEach((el, i) => { if (bar.children[i] !== el) bar.insertBefore(el, bar.children[i] || null); });
     }
 
     function applyPageBtnStyle(btn, active) {
@@ -8198,15 +8716,21 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         };
     }
 
+    // Terms: plain words match anywhere in the text; "quoted" terms (also smart quotes) and =word match
+    // only as a whole word or phrase. Internally a whole-word term is "=term" (PMVX.termMatch).
     function filterTerms(raw) {
-        const strip = t => (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) ? t.slice(1, -1) : t;
-        return (String(raw || '').trim().match(/"[^"]*"|'[^']*'|\S+/g) || [])
-            .map(t => strip(t).toLowerCase())
-            .filter(Boolean);
+        const quoted = t => t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")));
+        return (PMVX.plainQuotes(raw).trim().match(/=?"[^"]*"|=?'[^']*'|\S+/g) || [])
+            .map(t => {
+                if (t[0] === '=') { const b = t.slice(1); return '=' + (quoted(b) ? b.slice(1, -1) : b); }
+                return quoted(t) ? '=' + t.slice(1, -1) : t;
+            })
+            .map(t => t.toLowerCase().trim())
+            .filter(t => t && t !== '=');
     }
 
     function joinFilterTerms(terms) {
-        return terms.map(t => (/\s/.test(t) ? `"${t}"` : t)).join(' ');
+        return terms.map(t => PMVX.isWordTerm(t) || /\s/.test(t) ? `"${PMVX.termLabel(t)}"` : t).join(' ');
     }
 
     // Where a tag stands in the filter: 'include', 'exclude' or null.
@@ -8214,6 +8738,18 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const t = String(tag).toLowerCase().trim();
         if (filterTerms(filterConfig.include).includes(t)) return 'include';
         if (filterTerms(filterConfig.exclude).includes(t)) return 'exclude';
+        return null;
+    }
+
+    // The exclude term (or saved-search tag) of the active site-wide filter that this tag would trip,
+    // or null: a video carrying it is hidden. Used by the tag menu to warn before adding.
+    function tagHiddenBy(tag) {
+        if (!filterConfig.active) return null;
+        const t = String(tag).toLowerCase().trim();
+        if (!t) return null;
+        const term = filterTerms(filterConfig.exclude).find(x => PMVX.termMatch(t, x));
+        if (term) return PMVX.termLabel(term);
+        if (filterConfig.savedSearch?.excludeTags?.includes(t)) return t;
         return null;
     }
 
@@ -8234,15 +8770,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         saveFilterConfig();
         applyFilterToCards();
         setNfDefaultTag(t, next);
-        const panel = document.getElementById('pmv-filter-panel');
-        if (panel) {
-            const inc = panel.querySelector('#pmv-f-include');
-            const exc = panel.querySelector('#pmv-f-exclude');
-            const act = panel.querySelector('#pmv-f-active');
-            if (inc) inc.value = filterConfig.include;
-            if (exc) exc.value = filterConfig.exclude;
-            if (act) act.checked = filterConfig.active;
-        }
+        document.getElementById('pmv-filter-panel')?.refresh?.();
         return next;
     }
 
@@ -8282,6 +8810,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     // `meta` is what could be read off the card; the cache fills in the rest. Unknown data never
     // causes a hide, so a video that was not fetched yet is not filtered out for no visible reason.
     function passesFilter(id, meta, c = filterConfig) {
+        return filterReasons(id, meta, c, false).length === 0;
+    }
+
+    // Why the filter blocks a video: short labels ("⊘ term", "needs term", "rating 41%" …). With
+    // all=false it stops at the first one (passesFilter); with all=true it collects every reason.
+    function filterReasons(id, meta, c = filterConfig, all = true) {
+        const out = [];
+        const hit = label => { out.push(label); return !all; };
         const cached = id ? State.videoMeta.get(id) : null;
         const title = (meta?.title || cached?.title || '').toLowerCase();
         const uploader = (meta?.uploaderDisplay || cached?.uploaderDisplay || '').toLowerCase();
@@ -8294,31 +8830,32 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         ].map(t => String(t).toLowerCase()))];
         const haystacks = [title, uploader, ...tags];
 
-        for (const term of filterTerms(c.exclude)) if (haystacks.some(h => h.includes(term))) return false;
-        for (const term of filterTerms(c.include)) if (!haystacks.some(h => h.includes(term))) return false;
+        for (const term of filterTerms(c.exclude)) if (haystacks.some(h => PMVX.termMatch(h, term)) && hit('\u2298 ' + PMVX.termLabel(term))) return out;
+        for (const term of filterTerms(c.include)) if (!haystacks.some(h => PMVX.termMatch(h, term)) && hit('needs ' + PMVX.termLabel(term))) return out;
 
         const rating = meta?.bayesianRating ?? cached?.bayesianRating ?? 0;
         if ((c.ratingMin > 0 || c.ratingMax < 100) && rating > 0) {
-            if (rating < c.ratingMin || rating > c.ratingMax) return false;
+            if ((rating < c.ratingMin || rating > c.ratingMax) && hit('rating ' + Math.round(rating) + '%')) return out;
         }
 
         if (c.maxMinutes > 0) {
-            const secs = durationToSeconds(meta?.duration ?? cached?.duration);
-            if (secs > 0 && secs > c.maxMinutes * 60) return false;
+            const secs = durationToSeconds(cached?.duration || meta?.duration);
+            if (secs > 0 && secs > c.maxMinutes * 60 && hit('over ' + c.maxMinutes + ' min')) return out;
         }
 
         if (c.seen !== 'any' && id && typeof PMVX.isWatched === 'function') {
             const watched = PMVX.isWatched(id);
-            if (c.seen === 'seen' && !watched) return false;
-            if (c.seen === 'unseen' && watched) return false;
+            if (c.seen === 'seen' && !watched && hit('not watched')) return out;
+            if (c.seen === 'unseen' && watched && hit('watched')) return out;
         }
 
         const ss = c.savedSearch;
         if (ss) {
             // Tags here come from the same partial picture, so an excluded tag the card does not show
             // cannot be caught.
-            if (ss.excludeTags?.length && tags.some(t => ss.excludeTags.includes(t))) return false;
-            if (ss.minRating && rating > 0 && rating < ss.minRating) return false;
+            const bad = ss.excludeTags?.length ? tags.find(t => ss.excludeTags.includes(t)) : null;
+            if (bad && hit('\u2298 ' + bad)) return out;
+            if (ss.minRating && rating > 0 && rating < ss.minRating && hit('rating ' + Math.round(rating) + '%')) return out;
             if (ss.aspectFilter && cached?.width && cached?.height) {
                 const ratio = cached.width / cached.height;
                 const ok = ss._rawAspect.some(aspect => {
@@ -8329,18 +8866,18 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     if (aspect === '9:16') return ratio >= 0.5 && ratio <= 0.6;
                     return false;
                 });
-                if (!ok) return false;
+                if (!ok && hit('aspect')) return out;
             }
         }
 
-        if (c.playlistMode !== 'all' && id) {
+        if (c.playlistMode !== 'all' && id && !PMVX.playlistFilterExempt()) {
             const memberOf = State.reverse.get(id) || new Set();
             const inSel = c.playlistIds.length ? c.playlistIds.some(pid => memberOf.has(pid)) : memberOf.size > 0;
-            if (c.playlistMode === 'in' && !inSel) return false;
-            if (c.playlistMode === 'out' && inSel) return false;
+            if (c.playlistMode === 'in' && !inSel && hit('not in playlist')) return out;
+            if (c.playlistMode === 'out' && inSel && hit('in playlist')) return out;
         }
 
-        return true;
+        return out;
     }
 
     function durationToSeconds(raw) {
@@ -8364,6 +8901,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     let filterHiddenCount = 0;
+    // What the filter hid on this page: id -> { title, href, thumb, reasons }, plus every card it judged.
+    // Kept apart from the DOM, because hidden cards can be pruned from the site's list.
+    const filterHiddenLog = new Map();
+    const filterSeen = new Set();
+    let filterLogPath = location.pathname + location.search;
+    function resetFilterLog() { filterHiddenLog.clear(); filterSeen.clear(); filterLogPath = location.pathname + location.search; }
 
     // Walks every card surface: grids (data-video-id), the Recommended sidebar (.w-40 thumbs) and
     // the "More from" grid. Cards are marked or unmarked, never removed.
@@ -8382,13 +8925,23 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return meta;
     }
 
+    let queueFilterSig = '';
     function applyFilterToCards(full = true) {
         ensureFilterStyle();
         const on = filterConfig.active && filterIsMeaningful();
+        // The Up next rows show why the filter would hide a video; re-render them when it changes.
+        const sig = on ? JSON.stringify(filterConfig) : '';
+        if (filterLogPath !== location.pathname + location.search) resetFilterLog();
+        if (sig !== queueFilterSig) {
+            queueFilterSig = sig;
+            resetFilterLog();
+            if (smartQueueItems.length) { try { renderQueueSidebar(); } catch {} }
+        }
 
         if (!on) {
             document.querySelectorAll('[data-pmv-filtered]').forEach(el => el.removeAttribute('data-pmv-filtered'));
             filterHiddenCount = 0;
+            if (filterHiddenLog.size || filterSeen.size) resetFilterLog();
             updateFilterButton();
             return;
         }
@@ -8401,8 +8954,20 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             const stamp = id || '?';
             if (!full && el.dataset.pmvFid === stamp) return;
             if (el.dataset.pmvFid !== stamp) el.dataset.pmvFid = stamp;
-            if (passesFilter(id, cachedCardMeta(el, stamp))) el.removeAttribute('data-pmv-filtered');
-            else el.setAttribute('data-pmv-filtered', '1');
+            const meta = cachedCardMeta(el, stamp);
+            const reasons = filterReasons(id, meta, filterConfig, true);
+            const key = id || el.getAttribute('href') || stamp;
+            filterSeen.add(key);
+            if (!reasons.length) { el.removeAttribute('data-pmv-filtered'); filterHiddenLog.delete(key); return; }
+            el.setAttribute('data-pmv-filtered', '1');
+            const link = el.tagName === 'A' ? el.getAttribute('href') : el.querySelector('a[href*="/video/"]')?.getAttribute('href');
+            filterHiddenLog.set(key, {
+                id,
+                title: meta?.title || el.querySelector('h3, h4')?.textContent.trim() || id || 'Video',
+                href: cleanVideoHref(link) || (id ? `/video/${id}` : null),
+                thumb: cardThumbUrl(el, id, meta),
+                reasons,
+            });
         };
 
         document.querySelectorAll('[data-video-id]').forEach(card => {
@@ -8412,6 +8977,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         document.querySelectorAll('.w-40').forEach(thumb => {
             const card = thumb.parentElement;
             if (!card || card.hasAttribute('data-video-id')) return;
+            // Up next rows stay: the filter is shown on them (blocking reason chip), never hides them.
+            if (card.matches('[data-queue-id]') || card.closest('#pmv-queue-sidebar, #pmv-queue-floating')) { card.removeAttribute('data-pmv-filtered'); return; }
             const slugId = resolveRecCardVideoId(card);
             mark(card, slugId ? (State.slugToApiId.get(slugId) || slugId) : null);
         });
@@ -8428,7 +8995,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 });
             });
 
-        filterHiddenCount = document.querySelectorAll('[data-pmv-filtered="1"]').length;
+        filterHiddenCount = Math.max(filterHiddenLog.size, document.querySelectorAll('[data-pmv-filtered="1"]').length);
         updateFilterButton();
     }
 
@@ -8452,7 +9019,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         st.id = 'pmv-headroom-style';
         // Padding, not margin: the row is a flex container, so its children shift left without changing
         // its box. Keyed on a data attribute because Vue rewrites class/style on patch.
-        st.textContent = `[data-pmv-headroom="1"]{padding-right:${HEADER_GAP_PX + 16}px !important;}`;
+        // --pmv-headroom: the bar's measured width (set in ensureHeaderBar), so extra buttons fit.
+        st.textContent = `[data-pmv-headroom="1"]{padding-right:calc(var(--pmv-headroom, ${HEADER_GAP_PX}px) + 16px) !important;}`;
         (document.head || document.documentElement).appendChild(st);
     }
 
@@ -8501,14 +9069,27 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             divider.style.cssText = 'width:1px;height:20px;background:rgba(255,255,255,0.12);flex-shrink:0;pointer-events:none;';
             bar.appendChild(divider);
             document.body.appendChild(bar);
+            // The counter's text changes the bar's width: keep the reserved room in step.
+            try {
+                new ResizeObserver(() => {
+                    const w = Math.max(HEADER_GAP_PX, Math.ceil(bar.offsetWidth || 0)) + 'px';
+                    if (document.documentElement.style.getPropertyValue('--pmv-headroom') !== w) document.documentElement.style.setProperty('--pmv-headroom', w);
+                }).observe(bar);
+            } catch {}
         }
         if (!measure && bar.style.display === 'flex') return bar;
         const r = row.getBoundingClientRect();
         const top = `${Math.round(r.top + (r.height - 36) / 2)}px`;
-        const left = `${Math.round(r.right - HEADER_GAP_PX - 8)}px`;
         if (bar.style.display !== 'flex') bar.style.display = 'flex';
+        // Room for whatever the bar holds (the hidden-videos counter comes and goes).
+        const w = Math.max(HEADER_GAP_PX, Math.ceil(bar.offsetWidth || 0));
+        const room = w + 'px';
+        if (document.documentElement.style.getPropertyValue('--pmv-headroom') !== room) document.documentElement.style.setProperty('--pmv-headroom', room);
+        // Anchored on the right edge, so a wider bar grows to the left instead of off the page.
+        const right = `${Math.max(0, Math.round(document.documentElement.clientWidth - r.right + 8))}px`;
         if (bar.style.top !== top) bar.style.top = top;
-        if (bar.style.left !== left) bar.style.left = left;
+        if (bar.style.left) bar.style.left = '';
+        if (bar.style.right !== right) bar.style.right = right;
         return bar;
     }
 
@@ -8532,10 +9113,20 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     function ensureHeaderButtons() {
         const bar = ensureHeaderBar();
         if (!bar) return;
+        // ⊘ with a red corner badge holding the hidden count (like the Up next badge).
+        const hb = ensureHeaderButton(bar, 'data-pmv-hidden-btn',
+            '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>' +
+            `<span data-pmv-hidden-count style="position:absolute;top:0;right:0;min-width:15px;height:15px;line-height:15px;padding:0 3px;border-radius:8px;background:rgb(${REJECT_RGB});color:#000;font-size:10px;font-weight:700;text-align:center;font-variant-numeric:tabular-nums;"></span>`,
+            btn => toggleHiddenPanel(btn));
+        if (!hb.dataset.styled) {
+            hb.dataset.styled = '1';
+            hb.style.color = 'rgb(156,163,175)';
+            hb.style.display = 'none';
+        }
         ensureHeaderButton(bar, 'data-pmv-filter-btn', FILTER_ICON, btn => toggleFilterPanel(btn));
         ensureHeaderButton(bar, 'data-pmv-queue-btn', QUEUE_ICON, btn => toggleQueueFloating(btn), QUEUE_BADGE_HTML);
         // Remove stale in-row nodes.
-        document.querySelectorAll('[data-pmv-filter-btn], [data-pmv-queue-btn]').forEach(btn => {
+        document.querySelectorAll('[data-pmv-hidden-btn], [data-pmv-filter-btn], [data-pmv-queue-btn]').forEach(btn => {
             if (!bar.contains(btn)) btn.remove();
         });
         updateFilterButton();
@@ -8564,229 +9155,730 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             setBtnColor(btn, on ? 'rgb(100, 255, 0)' : 'rgb(156, 163, 175)');
             if (btn.title !== title) btn.title = title;
         });
+        // "⊘ hidden/total" next to the funnel, only while the filter hides something here.
+        const n = filterHiddenLog.size, total = Math.max(filterSeen.size, n);
+        const txt = n > 999 ? '999+' : String(n);
+        document.querySelectorAll('[data-pmv-hidden-btn]').forEach(btn => {
+            const show = on && n > 0;
+            const disp = show ? 'flex' : 'none';
+            if (btn.style.display !== disp) { btn.style.display = disp; hdrDirty = true; requestAnimationFrame(() => { try { ensureHeaderBar(); } catch {} }); }
+            const label = btn.querySelector('[data-pmv-hidden-count]');
+            if (label && label.textContent !== txt) label.textContent = txt;
+            btn.title = `${n} of ${total} videos on this page hidden by your filter — click for the list`;
+        });
+        const panel = document.getElementById('pmv-hidden-panel');
+        if (panel && panel.dataset.sig !== String(n) + '/' + total) renderHiddenPanel(panel);
     }
 
-    function filterPanelHtml() {
-        const c = filterConfig;
-        const playlists = [...State.playlists.values()]
-            .sort((a, b) => playlistSortIndex(a.name) - playlistSortIndex(b.name));
-        const opt = (v, label, sel) => `<option value="${v}"${sel === v ? ' selected' : ''}>${label}</option>`;
-        return `
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px;">
-                <strong style="font-size:13px;color:white;">Filter</strong>
-                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
-                    <input id="pmv-f-active" type="checkbox" ${c.active ? 'checked' : ''}>
-                    <span>Hide matching videos</span>
-                </label>
-            </div>
-
-            <label style="display:block;font-size:11px;color:rgba(255,255,255,0.45);margin-bottom:2px;">Exclude (hide if it contains)</label>
-            <input id="pmv-f-exclude" type="text" value="${escHtml(c.exclude)}" placeholder="term &quot;two words&quot; term" style="${FILTER_INPUT}margin-bottom:8px;">
-
-            <label style="display:block;font-size:11px;color:rgba(255,255,255,0.45);margin-bottom:2px;">Require (hide unless it contains)</label>
-            <input id="pmv-f-include" type="text" value="${escHtml(c.include)}" placeholder="optional" style="${FILTER_INPUT}margin-bottom:8px;">
-
-            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-                <label style="font-size:12px;">Rating
-                    <input id="pmv-f-rmin" type="number" min="0" max="100" value="${c.ratingMin}" style="${FILTER_INPUT}width:56px;display:inline-block;">
-                    <span style="opacity:0.5;">to</span>
-                    <input id="pmv-f-rmax" type="number" min="0" max="100" value="${c.ratingMax}" style="${FILTER_INPUT}width:56px;display:inline-block;">
-                </label>
-                <label style="font-size:12px;">Max length
-                    <input id="pmv-f-maxmin" type="number" min="0" value="${c.maxMinutes || ''}" placeholder="min" style="${FILTER_INPUT}width:64px;display:inline-block;">
-                </label>
-            </div>
-
-            <label style="display:block;font-size:11px;color:rgba(255,255,255,0.45);margin-bottom:2px;">Saved search</label>
-            <div style="display:flex;gap:6px;margin-bottom:8px;">
-                <select id="pmv-f-ss" style="${FILTER_INPUT}flex:1;"><option value="">${c.savedSearchName ? escHtml(c.savedSearchName) : 'none'}</option></select>
-                <button id="pmv-f-ss-clear" type="button" title="Use no saved search" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.15);background:transparent;color:rgba(255,255,255,0.6);cursor:pointer;font-size:12px;">\u2715</button>
-            </div>
-
-            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-                <label style="font-size:12px;">Playlist
-                    <select id="pmv-f-plmode" style="${FILTER_INPUT}width:auto;display:inline-block;">
-                        ${opt('all', 'any', c.playlistMode)}${opt('in', 'only in', c.playlistMode)}${opt('out', 'only not in', c.playlistMode)}
-                    </select>
-                </label>
-                <label style="font-size:12px;">Watched
-                    <select id="pmv-f-seen" style="${FILTER_INPUT}width:auto;display:inline-block;">
-                        ${opt('any', 'any', c.seen)}${opt('unseen', 'unseen only', c.seen)}${opt('seen', 'seen only', c.seen)}
-                    </select>
-                </label>
-            </div>
-
-            <div id="pmv-f-pls" style="${c.playlistMode === 'all' ? 'display:none;' : ''}max-height:118px;overflow:auto;border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:6px;margin-bottom:8px;">
-                <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-bottom:4px;">Which playlists count (none ticked = any)</div>
-                ${playlists.map(p => `
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;padding:1px 0;cursor:pointer;">
-                        <input type="checkbox" data-pmv-f-pl="${escHtml(p.id)}" ${c.playlistIds.includes(p.id) ? 'checked' : ''}>
-                        <span>${escHtml(getPlaylistDisplayName(p.name, p.id))}</span>
-                    </label>`).join('')}
-            </div>
-
-            <div style="border-top:1px solid rgba(255,255,255,0.1);margin:2px 0 8px;padding-top:8px;">
-                <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-bottom:4px;">Pagination</div>
-                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px;" title="Sets the site's own 'videos per page' preference to 100, the most the API serves. Takes effect on the next page change or reload.">
-                    <input id="pmv-f-bigpages" type="checkbox" ${c.bigPages ? 'checked' : ''}>
-                    <span>100 per page (site setting)</span>
-                </label>
-                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px;" title="While the filter is hiding things, switch the site from autoscroll to pages. With autoscroll on the site keeps only ~100 cards and throws the oldest away as it loads more — including the ones your filter let through. Takes effect on the next page change or reload.">
-                    <input id="pmv-f-paged" type="checkbox" ${c.pagedWhenFiltered ? 'checked' : ''}>
-                    <span>Pages instead of autoscroll</span>
-                </label>
-                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px;" title="The site renders each loaded batch as its own grid, so every batch starts a new row. This merges them into one grid, which keeps the rows full.">
-                    <input id="pmv-f-merge" type="checkbox" ${c.mergeGrids ? 'checked' : ''}>
-                    <span>One grid for all batches</span>
-                </label>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <label style="font-size:12px;" title="With autoscroll on: keep asking the site for more until this many videos survive the filter. 0 is off.">Fill to
-                        <input id="pmv-f-topup" type="number" min="0" max="100" value="${c.topUpTarget || ''}" placeholder="0" style="${FILTER_INPUT}width:56px;display:inline-block;">
-                    </label>
-                    <label style="font-size:12px;" title="With autoscroll off: skip to the next page when fewer than this many survive. 1 skips only empty pages, 0 is off.">Skip under
-                        <input id="pmv-f-skip" type="number" min="0" max="50" value="${c.skipBelow || ''}" placeholder="0" style="${FILTER_INPUT}width:56px;display:inline-block;">
-                    </label>
-                </div>
-            </div>
-
-            <div style="display:flex;gap:6px;align-items:center;">
-                <button id="pmv-f-apply" type="button" style="flex:1;padding:5px 8px;border-radius:6px;border:1px solid rgba(100,255,0,0.4);background:rgba(100,255,0,0.12);color:rgb(100,255,0);cursor:pointer;font-size:12px;font-weight:600;">Apply</button>
-                <button id="pmv-f-clear" type="button" style="padding:5px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.15);background:transparent;color:rgba(255,255,255,0.6);cursor:pointer;font-size:12px;">Clear</button>
-                <button id="pmv-f-import" type="button" title="Copy the filter currently saved on the playlist pages into this one" style="padding:5px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.15);background:transparent;color:rgba(255,255,255,0.6);cursor:pointer;font-size:12px;">Import</button>
-            </div>
-            <div id="pmv-f-status" style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:6px;min-height:14px;"></div>
-        `;
+    // A hidden card's image often never loads (lazy, display:none): fall back to cached video data.
+    function cardThumbUrl(el, id, meta) {
+        const img = el.querySelector('img');
+        const fromImg = img && (img.currentSrc || img.getAttribute('src') || img.dataset?.src || (img.getAttribute('srcset') || '').split(/\s+/)[0]);
+        const ok = u => u && !u.startsWith('data:') ? u : '';
+        return ok(fromImg) || ok(meta?.thumbnailUrl) || (id ? ok(State.videoMeta.get(id)?.thumbnailUrl) || ok(resolveQueueMeta(id)?.thumbnailUrl) : '') || '';
     }
 
-    const FILTER_INPUT = 'width:100%;box-sizing:border-box;background:#111;border:1px solid rgba(255,255,255,0.14);border-radius:6px;color:white;padding:4px 6px;font-size:12px;';
+    // List of the videos the filter hid on this page, grouped by reason: one foldable row per reason
+    // ("10 in playlist ›"), largest first. Ratings and lengths share one row each.
+    const hiddenOpenGroups = new Set();
+    function hiddenGroupKey(reason) {
+        if (/^rating \d+%$/.test(reason)) return 'rating';
+        if (/^over \d+ min$/.test(reason)) return 'too long';
+        return reason;
+    }
+    function renderHiddenPanel(box) {
+        const items = [...filterHiddenLog.values()];
+        items.forEach(it => { if (!it.thumb && it.id) it.thumb = State.videoMeta.get(it.id)?.thumbnailUrl || resolveQueueMeta(it.id)?.thumbnailUrl || ''; });
+        const total = Math.max(filterSeen.size, items.length);
+        box.dataset.sig = items.length + '/' + total;
+        const chip = r => `<span style="display:inline-flex;align-items:center;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:500;background:rgba(${REJECT_RGB},0.12);border:1px solid rgba(${REJECT_RGB},0.45);color:rgb(${REJECT_RGB});white-space:nowrap;">${escHtml(r)}</span>`;
+        const groups = new Map();
+        items.forEach(it => {
+            const key = hiddenGroupKey(it.reasons[0] || 'filtered');
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(it);
+        });
+        const ordered = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+        const CHEV = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;transition:transform .15s;"><path d="m9 18 6-6-6-6"/></svg>';
+        const rowHtml = (it, g, k) => `
+                <a data-g="${g}" data-k="${k}" href="${escHtml(it.href || '#')}" style="display:flex;gap:10px;align-items:flex-start;padding:6px;border-radius:8px;text-decoration:none;color:inherit;">
+                    <div style="width:96px;aspect-ratio:16/9;flex-shrink:0;border-radius:6px;overflow:hidden;background:#0F0F0F;">${it.thumb ? `<img src="${escHtml(it.thumb)}" alt="" loading="lazy" style="width:100%;height:100%;object-fit:cover;">` : ''}</div>
+                    <div style="min-width:0;flex:1;">
+                        <div style="font-size:13px;line-height:1.3;color:#fff;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escHtml(it.title)}</div>
+                        <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;">${it.reasons.slice(0, 4).map(chip).join('')}</div>
+                    </div>
+                </a>`;
+        box.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+                <strong style="font-size:14px;">Hidden by your filter</strong>
+                <button type="button" data-act="edit" class="${Q_CHIP_OFF}" style="cursor:pointer;">Edit filter</button>
+            </div>
+            <div style="font-size:12px;color:rgb(107,114,128);margin-bottom:8px;">${items.length} of ${total} videos on this page</div>
+            ${ordered.length ? ordered.map(([key, list], g) => {
+                const open = hiddenOpenGroups.has(key);
+                return `
+                <div data-group="${g}" style="border-top:1px solid #1F1F1F;">
+                    <button type="button" data-toggle="${g}" style="display:flex;align-items:center;gap:8px;width:100%;padding:9px 4px;background:none;border:none;color:#fff;cursor:pointer;font-family:inherit;font-size:13px;text-align:left;">
+                        <span style="min-width:22px;font-weight:700;color:rgb(${REJECT_RGB});font-variant-numeric:tabular-nums;">${list.length}</span>
+                        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(key)}</span>
+                        <span data-chev style="display:inline-flex;color:rgb(156,163,175);${open ? 'transform:rotate(90deg);' : ''}">${CHEV}</span>
+                    </button>
+                    <div data-list="${g}"${open ? '' : ' hidden'} style="padding-bottom:6px;">${open ? list.map((it, k) => rowHtml(it, g, k)).join('') : ''}</div>
+                </div>`;
+            }).join('') : '<div style="font-size:12px;color:rgb(107,114,128);">Nothing hidden.</div>'}`;
+        const wireRows = scope => scope.querySelectorAll('a[data-g]').forEach(a => {
+            a.onmouseenter = () => { a.style.background = 'rgba(255,255,255,0.06)'; };
+            a.onmouseleave = () => { a.style.background = ''; };
+            a.onclick = e => {
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+                e.preventDefault();
+                const it = ordered[+a.dataset.g]?.[1][+a.dataset.k];
+                box.remove();
+                if (it?.href) siteNavigate(it.href);
+            };
+        });
+        box.querySelectorAll('[data-toggle]').forEach(btn => {
+            btn.onclick = e => {
+                e.stopPropagation();
+                const g = +btn.dataset.toggle;
+                const [key, list] = ordered[g];
+                const listEl = box.querySelector(`[data-list="${g}"]`);
+                const chev = btn.querySelector('[data-chev]');
+                const open = listEl.hidden;
+                if (open) { hiddenOpenGroups.add(key); listEl.innerHTML = list.map((it, k) => rowHtml(it, g, k)).join(''); wireRows(listEl); }
+                else hiddenOpenGroups.delete(key);
+                listEl.hidden = !open;
+                chev.style.transform = open ? 'rotate(90deg)' : '';
+            };
+        });
+        wireRows(box);
+        box.querySelector('[data-act="edit"]').onclick = e => {
+            e.stopPropagation();
+            box.remove();
+            const fb = [...document.querySelectorAll('[data-pmv-filter-btn]')].find(b => b.getClientRects().length);
+            if (fb) toggleFilterPanel(fb);
+        };
+    }
 
-    function toggleFilterPanel(anchorBtn) {
-        const existing = document.getElementById('pmv-filter-panel');
+    function toggleHiddenPanel(anchorBtn) {
+        const existing = document.getElementById('pmv-hidden-panel');
         if (existing) { existing.remove(); return; }
-
-        // Mounted on document.body, outside Vue's tree, so header re-renders cannot remove the open panel.
         const box = document.createElement('div');
-        box.id = 'pmv-filter-panel';
+        box.id = 'pmv-hidden-panel';
         const r = anchorBtn.getBoundingClientRect();
         box.style.cssText =
-            'position:fixed;z-index:999999;width:330px;max-width:calc(100vw - 16px);' +
-            'max-height:calc(100vh - 90px);overflow:auto;' +
-            `top:${Math.round(r.bottom + 8)}px;left:${Math.round(Math.min(r.left, window.innerWidth - 338))}px;` +
+            'position:fixed;z-index:999999;width:420px;max-width:calc(100vw - 16px);max-height:calc(100vh - 90px);overflow:auto;' +
+            `top:${Math.round(r.bottom + 8)}px;left:${Math.round(Math.max(8, Math.min(r.left, window.innerWidth - 428)))}px;` +
             'background:rgba(0,0,0,0.92);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.14);' +
-            'border-radius:12px;padding:12px;color:white;font-size:12px;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
-        box.innerHTML = filterPanelHtml();
+            'border-radius:12px;padding:12px;color:white;box-shadow:0 10px 40px rgba(0,0,0,0.6);font-family:inherit;';
         document.body.appendChild(box);
-
-        const $ = sel => box.querySelector(sel);
-        const status = msg => { const el = $('#pmv-f-status'); if (el) el.textContent = msg; };
-        // Redraw from the stored config, handlers included.
-        const reopen = () => { box.remove(); toggleFilterPanel(anchorBtn); };
-
-        // Filled on first interaction, not on open, so opening costs no request.
-        const ssSel = $('#pmv-f-ss');
-        let ssLoaded = false;
-        const loadSs = async () => {
-            if (ssLoaded) return;
-            ssLoaded = true;
-            const list = await fetchSavedSearches();
-            const current = filterConfig.savedSearchName || '';
-            ssSel.innerHTML = `<option value="">none</option>` +
-                list.map(ss => {
-                    const name = ss.name || ss.title || '(unnamed)';
-                    return `<option value="${escHtml(name)}"${name === current ? ' selected' : ''}>${escHtml(name)}</option>`;
-                }).join('');
-            if (!list.length) ssSel.innerHTML = '<option value="">none found</option>';
-        };
-        ssSel.addEventListener('mousedown', loadSs, { once: true });
-        ssSel.addEventListener('focus', loadSs, { once: true });
-        ssSel.onchange = async () => {
-            const list = await fetchSavedSearches();
-            const picked = list.find(ss => (ss.name || ss.title || '(unnamed)') === ssSel.value);
-            filterConfig.savedSearch = picked ? parseSavedSearch(picked) : null;
-            filterConfig.savedSearchName = picked ? ssSel.value : '';
-            saveFilterConfig();
-            applyFilterToCards();
-            status(picked ? `Using "${ssSel.value}"` : 'No saved search');
-        };
-        $('#pmv-f-ss-clear').onclick = () => {
-            filterConfig.savedSearch = null;
-            filterConfig.savedSearchName = '';
-            saveFilterConfig();
-            applyFilterToCards();
-            reopen();
-        };
-
-        $('#pmv-f-plmode').onchange = e => {
-            $('#pmv-f-pls').style.display = e.target.value === 'all' ? 'none' : '';
-        };
-
-        // Spread from the stored config so the selected saved search survives Apply.
-        const readPanel = () => ({
-            ...filterConfig,
-            active: $('#pmv-f-active').checked,
-            exclude: $('#pmv-f-exclude').value,
-            include: $('#pmv-f-include').value,
-            ratingMin: Math.max(0, Math.min(100, parseInt($('#pmv-f-rmin').value, 10) || 0)),
-            ratingMax: Math.max(0, Math.min(100, parseInt($('#pmv-f-rmax').value, 10) || 100)),
-            maxMinutes: Math.max(0, parseInt($('#pmv-f-maxmin').value, 10) || 0),
-            playlistMode: $('#pmv-f-plmode').value,
-            seen: $('#pmv-f-seen').value,
-            playlistIds: [...box.querySelectorAll('[data-pmv-f-pl]')].filter(cb => cb.checked).map(cb => cb.dataset.pmvFPl),
-            bigPages: $('#pmv-f-bigpages').checked,
-            mergeGrids: $('#pmv-f-merge').checked,
-            pagedWhenFiltered: $('#pmv-f-paged').checked,
-            topUpTarget: Math.max(0, Math.min(100, parseInt($('#pmv-f-topup').value, 10) || 0)),
-            skipBelow: Math.max(0, Math.min(50, parseInt($('#pmv-f-skip').value, 10) || 0)),
-        });
-
-        $('#pmv-f-apply').onclick = () => {
-            filterConfig = readPanel();
-            saveFilterConfig();
-            syncSitePrefs();
-            if (filterConfig.mergeGrids) mergeListChunks();
-            else unmergeListChunks();
-            applyFilterToCards();
-            status(filterConfig.active
-                ? `${filterHiddenCount} hidden on this page`
-                : 'Saved — hiding is off');
-        };
-
-        $('#pmv-f-clear').onclick = () => {
-            filterConfig = { ...FILTER_DEFAULTS };
-            saveFilterConfig();
-            applyFilterToCards();
-            reopen();
-        };
-
-        // One-off import: copy the playlist-page filter's saved setup into this one (a copy, not a link).
-        $('#pmv-f-import').onclick = () => {
-            const nf = loadNfFilter();
-            if (!nf) { status('Nothing saved on the playlist pages'); return; }
-            filterConfig = {
-                ...filterConfig,
-                exclude: nf.tokens.textExclude.map(t => (t.includes(' ') ? `"${t}"` : t)).join(' '),
-                include: nf.tokens.textInclude.map(t => (t.includes(' ') ? `"${t}"` : t)).join(' '),
-                ratingMin: nf.ratingMin,
-                ratingMax: nf.ratingMax,
-                maxMinutes: Number.isFinite(nf.durationMax) ? Math.round(nf.durationMax / 60) : 0,
-                playlistMode: nf.playlistMode,
-                playlistIds: nf.selectedPlaylistIds.slice(),
-                seen: nf.tokens.seenFilter || 'any',
-            };
-            saveFilterConfig();
-            reopen();
-        };
-
-        // Deferred close: binding synchronously would catch the click that opened the panel.
+        renderHiddenPanel(box);
         setTimeout(() => {
             const onDocClick = e => {
-                if (box.contains(e.target) || e.target.closest('[data-pmv-filter-btn]')) return;
+                if (!box.isConnected) { document.removeEventListener('click', onDocClick); return; }
+                const path = e.composedPath ? e.composedPath() : [];
+                if (path.includes(box) || box.contains(e.target) || e.target.closest('[data-pmv-hidden-btn]')) return;
                 box.remove();
                 document.removeEventListener('click', onDocClick);
             };
             document.addEventListener('click', onDocClick);
         }, 0);
     }
+
+    // ---------------------------------------------------------------------
+    // Site-wide filter panel
+    // ---------------------------------------------------------------------
+    // In the style of the playlist-page filter drawer: uppercase section labels, term chips (click a
+    // chip: whole word only), choice chips, dual sliders with a pill and presets, site-style dropdowns.
+    // Changes are staged in a draft and saved by Apply; the on/off switch acts at once.
+    const GF_SVG = {
+        ban: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>',
+        x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+        chev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+        check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+    };
+    function ensureGfStyle() {
+        if (document.getElementById('pmv-gf-style')) return;
+        const st = document.createElement('style');
+        st.id = 'pmv-gf-style';
+        st.textContent = `
+#pmv-filter-panel{position:fixed;z-index:999999;width:360px;max-width:calc(100vw - 16px);max-height:calc(100vh - 90px);display:flex;flex-direction:column;
+  background:#1A1A1A;border:1px solid #2A2A2A;border-radius:12px;color:#fff;font-family:inherit;box-shadow:0 12px 40px rgba(0,0,0,0.6);overflow:hidden;}
+#pmv-filter-panel *{box-sizing:border-box;}
+#pmv-filter-panel .gf-head{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid #2A2A2A;}
+#pmv-filter-panel .gf-head strong{font-size:14px;font-weight:600;}
+#pmv-filter-panel .gf-head .gf-sub{font-size:11px;color:rgb(107,114,128);margin-left:auto;font-variant-numeric:tabular-nums;}
+#pmv-filter-panel .gf-sw{position:relative;width:36px;height:20px;border-radius:9999px;border:none;padding:0;cursor:pointer;background:#3A3A3A;flex-shrink:0;transition:background .15s;}
+#pmv-filter-panel .gf-sw::after{content:'';position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .15s;}
+#pmv-filter-panel .gf-sw[aria-checked="true"]{background:rgb(249,115,22);}
+#pmv-filter-panel .gf-sw[aria-checked="true"]::after{transform:translateX(16px);}
+#pmv-filter-panel .gf-body{flex:1;min-height:0;overflow-y:auto;padding:12px 16px 8px;display:flex;flex-direction:column;gap:12px;}
+#pmv-filter-panel .gf-sec{display:flex;flex-direction:column;gap:5px;}
+#pmv-filter-panel .gf-lab{font-size:10px;font-weight:600;color:rgb(156,163,175);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;gap:6px;}
+#pmv-filter-panel .gf-hint{font-size:10px;color:rgba(255,255,255,0.35);line-height:1.4;}
+#pmv-filter-panel input[type=text], #pmv-filter-panel input[type=number]{width:100%;padding:6px 10px;border-radius:4px;border:none;outline:none;background:#272727;color:rgb(229,231,235);font-size:12px;font-family:inherit;}
+#pmv-filter-panel input[type=text]:focus, #pmv-filter-panel input[type=number]:focus{background:#323232;outline:none;box-shadow:none;}
+#pmv-filter-panel input::placeholder{color:rgb(107,114,128);}
+#pmv-filter-panel .gf-chips{display:flex;flex-wrap:wrap;gap:4px;}
+#pmv-filter-panel .gf-chips:empty{display:none;}
+#pmv-filter-panel .gf-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 6px;border-radius:4px;font-size:11px;line-height:16px;}
+#pmv-filter-panel .gf-tag svg{width:10px;height:10px;}
+#pmv-filter-panel .gf-tag .txt{cursor:pointer;}
+#pmv-filter-panel .gf-tag .x{display:inline-flex;opacity:.6;padding:2px;border-radius:3px;cursor:pointer;}
+#pmv-filter-panel .gf-tag .x:hover{opacity:1;background:rgba(255,255,255,0.12);}
+#pmv-filter-panel .gf-tag.pos{background:rgba(249,115,22,0.2);color:rgb(253,186,116);}
+#pmv-filter-panel .gf-tag.neg{background:rgba(239,68,68,0.2);color:rgb(252,165,165);}
+#pmv-filter-panel .gf-tag.neg .txt{text-decoration:line-through;}
+#pmv-filter-panel .gf-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:4px;border:none;cursor:pointer;background:#272727;color:rgb(209,213,219);
+  font-size:11px;font-weight:500;line-height:1.2;font-family:inherit;white-space:nowrap;}
+#pmv-filter-panel .gf-chip:hover{background:#323232;}
+#pmv-filter-panel .gf-chip.active{background:rgb(249,115,22);color:#fff;}
+#pmv-filter-panel .gf-chip.active.in{background:rgb(34,197,94);} #pmv-filter-panel .gf-chip.active.out{background:rgb(239,68,68);}
+#pmv-filter-panel .gf-pillrow{display:flex;justify-content:center;}
+#pmv-filter-panel .gf-pill{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:9999px;background:rgba(249,115,22,0.12);color:rgb(249,115,22);font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;}
+#pmv-filter-panel .gf-pill .sep{color:rgba(249,115,22,0.5);}
+#pmv-filter-panel .gf-slider{position:relative;height:26px;}
+#pmv-filter-panel .gf-slider .track{position:absolute;top:11px;left:0;right:0;height:4px;border-radius:2px;background:rgba(255,255,255,0.1);}
+#pmv-filter-panel .gf-slider .fill{position:absolute;top:11px;height:4px;border-radius:2px;background:linear-gradient(90deg,rgb(249,115,22),rgb(251,146,60));}
+#pmv-filter-panel .gf-slider input[type=range]{position:absolute;top:11px;left:0;width:100%;height:4px;margin:0;padding:0;-webkit-appearance:none;appearance:none;background:transparent;pointer-events:none;outline:none;}
+#pmv-filter-panel .gf-slider input[type=range]::-webkit-slider-runnable-track{background:transparent;height:4px;}
+#pmv-filter-panel .gf-slider input[type=range]::-moz-range-track{background:transparent;height:4px;border:none;}
+#pmv-filter-panel .gf-slider input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;pointer-events:auto;width:14px;height:14px;margin-top:-5px;border-radius:50%;background:#fff;border:3px solid rgb(249,115,22);box-shadow:0 2px 6px rgba(0,0,0,0.4);cursor:pointer;}
+#pmv-filter-panel .gf-slider input[type=range]::-moz-range-thumb{pointer-events:auto;width:8px;height:8px;border-radius:50%;background:#fff;border:3px solid rgb(249,115,22);cursor:pointer;}
+#pmv-filter-panel .gf-sliderlabels{display:flex;justify-content:space-between;color:rgba(255,255,255,0.35);font-size:10px;margin-top:-4px;}
+#pmv-filter-panel .gf-sel{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border-radius:6px;cursor:pointer;text-align:left;background:#0F0F0F;border:1px solid #2A2A2A;color:#fff;font-size:12px;font-family:inherit;}
+#pmv-filter-panel .gf-sel:hover{border-color:#3A3A3A;}
+#pmv-filter-panel .gf-sel[data-open="1"]{border-color:rgb(249,115,22);}
+#pmv-filter-panel .gf-sel .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+#pmv-filter-panel .gf-sel .t.ph{color:rgb(107,114,128);}
+#pmv-filter-panel .gf-sel svg{width:14px;height:14px;color:rgb(156,163,175);flex-shrink:0;transition:transform .15s;}
+#pmv-filter-panel .gf-sel[data-open="1"] svg{transform:rotate(180deg);}
+#pmv-filter-panel .gf-more{background:none;border:none;color:rgb(156,163,175);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;cursor:pointer;padding:0;display:flex;align-items:center;gap:4px;font-family:inherit;}
+#pmv-filter-panel .gf-more svg{width:12px;height:12px;transition:transform .15s;}
+#pmv-filter-panel .gf-more[data-open="1"] svg{transform:rotate(180deg);}
+#pmv-filter-panel .gf-row{display:flex;align-items:center;gap:8px;font-size:11px;color:rgb(209,213,219);}
+#pmv-filter-panel .gf-row input[type=number]{width:64px;}
+#pmv-filter-panel .gf-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 16px;border-top:1px solid #2A2A2A;background:#1A1A1A;}
+#pmv-filter-panel .gf-apply{padding:6px 12px;border-radius:4px;border:none;cursor:pointer;background:rgb(249,115,22);color:#fff;font-size:11px;font-weight:600;font-family:inherit;}
+#pmv-filter-panel .gf-apply:hover{background:rgb(234,88,12);}
+#pmv-filter-panel .gf-apply.pending{box-shadow:0 0 0 2px rgba(249,115,22,0.35);}
+#pmv-filter-panel .gf-ghost{padding:6px 10px;border-radius:4px;border:none;cursor:pointer;background:#272727;color:rgb(209,213,219);font-size:11px;font-weight:500;font-family:inherit;}
+#pmv-filter-panel .gf-ghost:hover{background:#323232;}
+#pmv-filter-panel .gf-status{margin-left:auto;font-size:10px;color:rgba(255,255,255,0.4);font-variant-numeric:tabular-nums;}
+.pmv-gf-dd{position:fixed;z-index:1000000;min-width:220px;max-height:min(60vh,420px);overflow-y:auto;border-radius:10px;background:#141414;border:1px solid rgba(249,115,22,0.45);box-shadow:0 12px 32px rgba(0,0,0,0.6);font-family:inherit;}
+.pmv-gf-dd .row{display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:pointer;border-bottom:1px solid #1F1F1F;}
+.pmv-gf-dd .row:last-child{border-bottom:none;}
+.pmv-gf-dd .row:hover{background:rgba(255,255,255,0.04);}
+.pmv-gf-dd .row[data-sel="1"]{background:rgba(249,115,22,0.12);}
+.pmv-gf-dd .tt{flex:1;min-width:0;}
+.pmv-gf-dd .ti{display:block;color:#fff;font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pmv-gf-dd .su{display:block;color:rgb(156,163,175);font-size:10px;margin-top:1px;}
+.pmv-gf-dd svg{width:14px;height:14px;color:rgb(249,115,22);flex-shrink:0;visibility:hidden;}
+.pmv-gf-dd .row[data-sel="1"] svg{visibility:visible;}
+.pmv-gf-dd .empty{padding:10px 12px;color:rgb(156,163,175);font-size:11px;}`;
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    function closeGfDropdown() { document.querySelectorAll('.pmv-gf-dd').forEach(d => d.remove()); document.querySelectorAll('#pmv-filter-panel .gf-sel[data-open="1"]').forEach(b => { b.dataset.open = '0'; }); }
+
+    // Site-style custom select. items(): [{ value, title, sub }]; multi keeps the list open.
+    function gfSelect({ placeholder, items, label, isSelected, onPick, multi = false }) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'gf-sel';
+        btn.innerHTML = `<span class="t"></span>${GF_SVG.chev}`;
+        const paint = () => {
+            const t = btn.querySelector('.t');
+            const txt = label();
+            t.textContent = txt || placeholder;
+            t.classList.toggle('ph', !txt);
+        };
+        const open = async () => {
+            closeGfDropdown();
+            btn.dataset.open = '1';
+            const dd = document.createElement('div');
+            dd.className = 'pmv-gf-dd';
+            const r = btn.getBoundingClientRect();
+            dd.style.left = Math.round(r.left) + 'px';
+            dd.style.width = Math.round(Math.max(r.width, 220)) + 'px';
+            dd.style.top = Math.round(r.bottom + 6) + 'px';
+            document.body.appendChild(dd);
+            const draw = async () => {
+                const list = await items();
+                dd.textContent = '';
+                if (!list.length) { const e = document.createElement('div'); e.className = 'empty'; e.textContent = 'Nothing to choose'; dd.appendChild(e); return; }
+                list.forEach(it => {
+                    const row = document.createElement('div');
+                    row.className = 'row';
+                    row.dataset.sel = isSelected(it.value) ? '1' : '0';
+                    row.innerHTML = `<div class="tt"><span class="ti"></span>${it.sub ? '<span class="su"></span>' : ''}</div>${GF_SVG.check}`;
+                    row.querySelector('.ti').textContent = it.title;
+                    if (it.sub) row.querySelector('.su').textContent = it.sub;
+                    row.onclick = e => {
+                        e.stopPropagation();
+                        onPick(it.value, it);
+                        paint();
+                        if (multi) draw(); else closeGfDropdown();
+                    };
+                    dd.appendChild(row);
+                });
+                // Keep it on screen.
+                const dr = dd.getBoundingClientRect();
+                if (dr.bottom > innerHeight - 8) dd.style.top = Math.max(8, Math.round(r.top - dr.height - 6)) + 'px';
+            };
+            draw();
+        };
+        btn.onclick = e => { e.stopPropagation(); if (btn.dataset.open === '1') closeGfDropdown(); else open(); };
+        paint();
+        btn.paint = paint;
+        return btn;
+    }
+
+    // Dual slider 0..max with a pill and preset chips. get() -> [a, b]; set(a, b).
+    function gfRange({ max, get, set, fmt, presets }) {
+        const wrap = document.createElement('div');
+        wrap.innerHTML = `<div class="gf-pillrow"><span class="gf-pill"><span class="a"></span><span class="sep">-</span><span class="b"></span></span></div>
+            <div class="gf-slider"><div class="track"></div><div class="fill"></div><input type="range" min="0" max="${max}" step="1"><input type="range" min="0" max="${max}" step="1"></div>
+            <div class="gf-sliderlabels"><span>${fmt(0, 'a')}</span><span>${fmt(max, 'b')}</span></div><div class="gf-chips" style="margin-top:4px;"></div>`;
+        const [rA, rB] = wrap.querySelectorAll('input[type=range]');
+        const fill = wrap.querySelector('.fill'), pa = wrap.querySelector('.a'), pb = wrap.querySelector('.b');
+        const chips = wrap.querySelector('.gf-chips');
+        const paint = (a, b) => {
+            pa.textContent = fmt(a, 'a'); pb.textContent = fmt(b, 'b');
+            fill.style.left = (a / max * 100) + '%'; fill.style.width = ((b - a) / max * 100) + '%';
+        };
+        const render = () => {
+            const [a, b] = get();
+            rA.value = String(a); rB.value = String(b);
+            paint(a, b);
+            chips.querySelectorAll('.gf-chip').forEach((c, k) => c.classList.toggle('active', presets[k].a === a && presets[k].b === b));
+        };
+        presets.forEach(p => {
+            const c = document.createElement('button');
+            c.type = 'button'; c.className = 'gf-chip'; c.textContent = p.t;
+            c.onclick = () => { set(p.a, p.b); render(); };
+            chips.appendChild(c);
+        });
+        const drag = which => () => {
+            let a = +rA.value, b = +rB.value;
+            if (a > b) { if (which === 'a') { b = a; rB.value = String(b); } else { a = b; rA.value = String(a); } }
+            paint(a, b);
+        };
+        rA.addEventListener('input', drag('a')); rB.addEventListener('input', drag('b'));
+        const release = () => { set(+rA.value, +rB.value); render(); };
+        rA.addEventListener('change', release); rB.addEventListener('change', release);
+        render();
+        wrap.render = render;
+        return wrap;
+    }
+
+    // The site-wide filter as plain values, for the playlist page filter's "Sync from site filter".
+    PMVX.siteFilterSnapshot = () => ({
+        include: filterTerms(filterConfig.include), exclude: filterTerms(filterConfig.exclude),
+        seen: filterConfig.seen, playlistMode: filterConfig.playlistMode, playlistIds: (filterConfig.playlistIds || []).slice(),
+        ratingMin: filterConfig.ratingMin, ratingMax: filterConfig.ratingMax, maxMinutes: filterConfig.maxMinutes,
+    });
+
+    function toggleFilterPanel(anchorBtn) {
+        const existing = document.getElementById('pmv-filter-panel');
+        if (existing) { existing.remove(); closeGfDropdown(); return; }
+        ensureGfStyle();
+
+        // Mounted on document.body, outside Vue's tree, so header re-renders cannot remove the open panel.
+        const box = document.createElement('div');
+        box.id = 'pmv-filter-panel';
+        const r = anchorBtn.getBoundingClientRect();
+        box.style.top = Math.round(r.bottom + 8) + 'px';
+        box.style.left = Math.round(Math.max(8, Math.min(r.right - 360, window.innerWidth - 368))) + 'px';
+        document.body.appendChild(box);
+
+        // Draft: everything but the on/off switch waits for Apply.
+        let d = JSON.parse(JSON.stringify(filterConfig));
+        const sigOf = c => JSON.stringify({ ...c, active: null });
+        const mk = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+        const sec = (label, hint) => { const s2 = mk('div', 'gf-sec'); s2.appendChild(mk('div', 'gf-lab', label)); if (hint) s2.dataset.hint = hint; return s2; };
+        let status = () => {};
+        const refreshPending = () => { const p = sigOf(d) !== sigOf(filterConfig); applyBtn.classList.toggle('pending', p); applyBtn.textContent = p ? 'Apply' : 'Applied'; };
+
+        // Head: title, hidden count, on/off switch (immediate)
+        const head = mk('div', 'gf-head');
+        head.appendChild(mk('strong', null, 'Filter'));
+        const sub = mk('span', 'gf-sub');
+        const paintSub = () => { sub.textContent = filterConfig.active && filterIsMeaningful() ? `${filterHiddenCount} hidden on this page` : (filterConfig.active ? 'on' : 'off'); };
+        paintSub();
+        const sw = mk('button', 'gf-sw');
+        sw.type = 'button'; sw.setAttribute('role', 'switch');
+        const paintSw = () => { sw.setAttribute('aria-checked', filterConfig.active ? 'true' : 'false'); sw.title = filterConfig.active ? 'Filter on — click to show everything' : 'Filter off — click to hide matching videos'; };
+        paintSw();
+        sw.onclick = () => {
+            filterConfig.active = !filterConfig.active; d.active = filterConfig.active;
+            saveFilterConfig(); applyFilterToCards(); paintSw(); paintSub();
+        };
+        head.append(sub, sw);
+        box.appendChild(head);
+
+        const body = mk('div', 'gf-body');
+        box.appendChild(body);
+
+        // Term chips (exclude / require): Enter adds, click a chip toggles whole word, × removes.
+        const termSection = (key, label, placeholder, kind) => {
+            const s2 = sec(label);
+            const inp = mk('input'); inp.type = 'text'; inp.placeholder = placeholder; inp.spellcheck = false;
+            const chips = mk('div', 'gf-chips');
+            const draw = () => {
+                chips.textContent = '';
+                filterTerms(d[key]).forEach((t, i, all) => {
+                    const c = mk('span', 'gf-tag ' + kind);
+                    if (kind === 'neg') { const ic = mk('span'); ic.innerHTML = GF_SVG.ban; ic.style.display = 'inline-flex'; c.appendChild(ic); }
+                    const word = PMVX.isWordTerm(t);
+                    const tx = mk('span', 'txt', word ? `"${PMVX.termLabel(t)}"` : t);
+                    tx.title = word ? 'Whole word only — click to match anywhere in the text' : 'Matches anywhere in the text — click to match it only as a whole word';
+                    tx.onclick = () => { const next = all.slice(); next[i] = word ? PMVX.termLabel(t) : '=' + t; d[key] = joinFilterTerms(next); draw(); refreshPending(); };
+                    const x = mk('span', 'x'); x.innerHTML = GF_SVG.x; x.title = 'Remove';
+                    x.onclick = () => { d[key] = joinFilterTerms(all.filter((_, k) => k !== i)); draw(); refreshPending(); };
+                    c.append(tx, x);
+                    chips.appendChild(c);
+                });
+            };
+            inp.addEventListener('keydown', e => {
+                e.stopPropagation(); // site and script hotkeys stay out of the field
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const v = inp.value.trim();
+                    if (!v) { applyBtn.click(); return; }
+                    const add = filterTerms(v);
+                    const cur = filterTerms(d[key]);
+                    add.forEach(t => { if (!cur.includes(t)) cur.push(t); });
+                    d[key] = joinFilterTerms(cur);
+                    // A term cannot be both required and excluded.
+                    const other = key === 'exclude' ? 'include' : 'exclude';
+                    d[other] = joinFilterTerms(filterTerms(d[other]).filter(t => !add.includes(t)));
+                    inp.value = '';
+                    drawAllTerms(); refreshPending();
+                } else if (e.key === 'Backspace' && !inp.value) {
+                    const cur = filterTerms(d[key]); cur.pop(); d[key] = joinFilterTerms(cur); draw(); refreshPending();
+                }
+            });
+            s2.append(inp, chips);
+            s2.draw = draw;
+            draw();
+            return s2;
+        };
+        const sExc = termSection('exclude', 'Exclude', 'Hide videos with… (title, tag, performer, uploader)', 'neg');
+        const sInc = termSection('include', 'Require', 'Only videos with…', 'pos');
+        const drawAllTerms = () => { sExc.draw(); sInc.draw(); };
+        const hint = mk('div', 'gf-hint', 'Enter adds · Backspace in an empty field removes the last one · "quotes" or a click on a term: whole word only');
+        body.append(sExc, sInc, hint);
+
+        // Choice chips
+        const choice = (label, opts, get, set) => {
+            const s2 = sec(label);
+            const row = mk('div', 'gf-chips');
+            const btns = opts.map(o => {
+                const b = mk('button', 'gf-chip ' + (o.cls || ''), o.t);
+                b.type = 'button'; if (o.title) b.title = o.title;
+                b.onclick = () => { set(o.v); paint(); refreshPending(); };
+                row.appendChild(b);
+                return b;
+            });
+            const paint = () => btns.forEach((b, k) => b.classList.toggle('active', get() === opts[k].v));
+            paint();
+            s2.appendChild(row);
+            return s2;
+        };
+
+        // Playlist mode + which playlists count (dropdown, multi)
+        const sPl = choice('Playlist', [
+            { v: 'all', t: 'All' }, { v: 'in', t: '✓ In playlist', cls: 'in' }, { v: 'out', t: '✕ Not in playlist', cls: 'out' },
+        ], () => d.playlistMode, v => { d.playlistMode = v; plSel.style.display = v === 'all' ? 'none' : ''; });
+        const plSel = gfSelect({
+            placeholder: 'Any playlist',
+            label: () => { const n = d.playlistIds.length; if (!n) return ''; if (n === 1) { const p = State.playlists.get(d.playlistIds[0]); return p ? getPlaylistDisplayName(p.name, p.id) : '1 playlist'; } return `${n} playlists`; },
+            items: () => [...State.playlists.values()].sort((a, b) => playlistSortIndex(a.name) - playlistSortIndex(b.name))
+                .map(p => ({ value: p.id, title: getPlaylistDisplayName(p.name, p.id) || p.name, sub: `${p.ids.size} videos` })),
+            isSelected: v => d.playlistIds.includes(v),
+            onPick: v => { d.playlistIds = d.playlistIds.includes(v) ? d.playlistIds.filter(x => x !== v) : [...d.playlistIds, v]; refreshPending(); },
+            multi: true,
+        });
+        plSel.style.display = d.playlistMode === 'all' ? 'none' : '';
+        sPl.appendChild(plSel);
+        body.appendChild(sPl);
+
+        body.appendChild(choice('Watched', [
+            { v: 'any', t: 'All' }, { v: 'unseen', t: 'Unwatched' }, { v: 'seen', t: 'Watched' },
+        ], () => d.seen, v => { d.seen = v; }));
+
+        // Rating
+        const sRate = sec('Rating');
+        sRate.appendChild(gfRange({
+            max: 100,
+            get: () => [d.ratingMin || 0, d.ratingMax ?? 100],
+            set: (a, b) => { d.ratingMin = a; d.ratingMax = b; refreshPending(); },
+            fmt: (v, side) => side === 'b' && v >= 100 ? 'Any' : v + '%',
+            presets: [{ t: 'Any', a: 0, b: 100 }, { t: '90%+', a: 90, b: 100 }, { t: '80%+', a: 80, b: 100 }, { t: '70%+', a: 70, b: 100 }, { t: '50-80%', a: 50, b: 80 }],
+        }));
+        body.appendChild(sRate);
+
+        // Length: maximum only (0..60 min, 60 = any)
+        const sLen = sec('Max length');
+        const LEN_ANY = 60;
+        const lenWrap = gfRange({
+            max: LEN_ANY,
+            get: () => [0, d.maxMinutes > 0 ? Math.min(d.maxMinutes, LEN_ANY) : LEN_ANY],
+            set: (a, b) => { d.maxMinutes = b >= LEN_ANY ? 0 : b; refreshPending(); },
+            fmt: (v, side) => side === 'b' && v >= LEN_ANY ? 'Any' : v + 'm',
+            presets: [{ t: 'Any', a: 0, b: LEN_ANY }, { t: '≤5m', a: 0, b: 5 }, { t: '≤10m', a: 0, b: 10 }, { t: '≤20m', a: 0, b: 20 }, { t: '≤30m', a: 0, b: 30 }],
+        });
+        // Only the upper bound is used: hide the lower handle.
+        lenWrap.querySelectorAll('input[type=range]')[0].style.display = 'none';
+        sLen.appendChild(lenWrap);
+        body.appendChild(sLen);
+
+        // Saved search (lazy list)
+        const sSs = sec('Saved search');
+        const ssSel = gfSelect({
+            placeholder: 'None',
+            label: () => d.savedSearchName || '',
+            items: async () => {
+                const list = await fetchSavedSearches();
+                return [{ value: '', title: 'None', sub: 'No saved search' }, ...list.map(ss => {
+                    const name = ss.name || ss.title || '(unnamed)';
+                    return { value: name, title: name, sub: [ss.excludeTags?.length ? `${ss.excludeTags.length} excluded tags` : '', ss.minRating ? `rating ${ss.minRating}%+` : ''].filter(Boolean).join(' · ') || 'Saved search', ss };
+                })];
+            },
+            isSelected: v => (v || '') === (d.savedSearchName || ''),
+            onPick: (v, it) => { d.savedSearch = v && it.ss ? parseSavedSearch(it.ss) : null; d.savedSearchName = v || ''; refreshPending(); },
+        });
+        sSs.appendChild(ssSel);
+        body.appendChild(sSs);
+
+        // Pagination (folded)
+        const more = mk('button', 'gf-more'); more.type = 'button';
+        more.innerHTML = `Pagination ${GF_SVG.chev}`;
+        const pag = mk('div', 'gf-sec'); pag.hidden = true;
+        more.onclick = () => { pag.hidden = !pag.hidden; more.dataset.open = pag.hidden ? '0' : '1'; };
+        const toggleChip = (t, title, key) => {
+            const b = mk('button', 'gf-chip', t); b.type = 'button'; b.title = title;
+            const paint = () => b.classList.toggle('active', !!d[key]);
+            b.onclick = () => { d[key] = !d[key]; paint(); refreshPending(); };
+            paint();
+            return b;
+        };
+        const pchips = mk('div', 'gf-chips');
+        pchips.append(
+            toggleChip('100 per page', "Sets the site's own 'videos per page' preference to 100, the most the API serves. Takes effect on the next page change or reload.", 'bigPages'),
+            toggleChip('Pages instead of autoscroll', 'While the filter is hiding things, switch the site from autoscroll to pages, so videos your filter let through are not thrown away as more load.', 'pagedWhenFiltered'),
+            toggleChip('One grid', 'Merge the batches the site renders into one grid, which keeps the rows full.', 'mergeGrids'),
+        );
+        const numRow = (label, title, key, maxV) => {
+            const row = mk('label', 'gf-row'); row.title = title;
+            row.appendChild(mk('span', null, label));
+            const n = mk('input'); n.type = 'number'; n.min = '0'; n.max = String(maxV); n.value = d[key] || ''; n.placeholder = '0';
+            n.addEventListener('keydown', e => e.stopPropagation());
+            n.addEventListener('input', () => { d[key] = Math.max(0, Math.min(maxV, parseInt(n.value, 10) || 0)); refreshPending(); });
+            row.appendChild(n);
+            return row;
+        };
+        pag.append(pchips,
+            numRow('Fill to', 'With autoscroll on: keep asking the site for more until this many videos survive the filter. 0 is off.', 'topUpTarget', 100),
+            numRow('Skip pages under', 'With autoscroll off: skip to the next page when fewer than this many survive. 1 skips only empty pages, 0 is off.', 'skipBelow', 50));
+        body.append(more, pag);
+
+        // Actions
+        const actions = mk('div', 'gf-actions');
+        const applyBtn = mk('button', 'gf-apply', 'Applied'); applyBtn.type = 'button';
+        const clearBtn = mk('button', 'gf-ghost', 'Clear'); clearBtn.type = 'button'; clearBtn.title = 'Reset every filter setting';
+        const importBtn = mk('button', 'gf-ghost', 'Sync from playlists'); importBtn.type = 'button'; importBtn.title = 'Copy the filter of the playlist pages into this one';
+        const st2 = mk('span', 'gf-status');
+        status = msg => { st2.textContent = msg; };
+        actions.append(applyBtn, clearBtn, importBtn, st2);
+        box.appendChild(actions);
+
+        const reopen = () => { box.remove(); closeGfDropdown(); toggleFilterPanel(anchorBtn); };
+        applyBtn.onclick = () => {
+            filterConfig = { ...JSON.parse(JSON.stringify(d)), active: filterConfig.active };
+            saveFilterConfig();
+            syncSitePrefs();
+            if (filterConfig.mergeGrids) mergeListChunks(); else unmergeListChunks();
+            applyFilterToCards();
+            paintSub(); refreshPending();
+            status(filterConfig.active ? `${filterHiddenCount} hidden on this page` : 'Saved — the filter is off');
+        };
+        clearBtn.onclick = () => {
+            filterConfig = { ...FILTER_DEFAULTS };
+            saveFilterConfig(); applyFilterToCards(); reopen();
+        };
+        importBtn.onclick = () => {
+            const nf = loadNfFilter();
+            if (!nf) { status('Nothing saved on the playlist pages'); return; }
+            d = {
+                ...d,
+                exclude: joinFilterTerms(nf.tokens.textExclude),
+                include: joinFilterTerms(nf.tokens.textInclude),
+                ratingMin: nf.ratingMin, ratingMax: nf.ratingMax,
+                maxMinutes: Number.isFinite(nf.durationMax) ? Math.round(nf.durationMax / 60) : 0,
+                playlistMode: nf.playlistMode, playlistIds: nf.selectedPlaylistIds.slice(),
+                seen: nf.tokens.seenFilter || 'any',
+            };
+            filterConfig = { ...d, active: filterConfig.active };
+            saveFilterConfig(); reopen();
+        };
+        refreshPending();
+        // External changes (a tag clicked in the HUD) redraw the open panel from the stored config.
+        box.refresh = () => { d = JSON.parse(JSON.stringify(filterConfig)); reopen(); };
+
+        // Deferred close: binding synchronously would catch the click that opened the panel.
+        setTimeout(() => {
+            const onDocClick = e => {
+                if (!box.isConnected) { document.removeEventListener('click', onDocClick); return; }
+                // composedPath: a chip redrawn by its own click is no longer in the box, but was.
+                const path = e.composedPath ? e.composedPath() : [];
+                if (path.includes(box) || box.contains(e.target) || !e.target.isConnected || e.target.closest('[data-pmv-filter-btn], .pmv-gf-dd')) return;
+                closeGfDropdown();
+                if (!e.target.closest('.gf-sel')) { box.remove(); document.removeEventListener('click', onDocClick); }
+            };
+            document.addEventListener('click', onDocClick);
+        }, 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // Homepage state across Back / Forward
+    // ---------------------------------------------------------------------
+    // The site's homepage forgets its filters and starts over at page 1 when you come back to it. Its
+    // own saved-search component gets two functions as props, getCurrentFilters() and onLoad(filters)
+    // (the same pair "Saved searches" uses); they are found through Vue's vnode tree from #__nuxt.
+    // While on the homepage the filters, list depth, page and scroll position are kept per tab
+    // (sessionStorage); Back / Forward to the homepage puts them back. A fresh visit (logo, link) does not.
+    // Only while logged in: the site renders that component only then.
+    const HOME_STATE_KEY = 'pmvx_home_state_v1';
+    function homeFilterProps() {
+        const root = document.querySelector('#__nuxt')?._vnode;
+        if (!root) return null;
+        const seen = new Set(), stack = [root];
+        while (stack.length) {
+            const v = stack.pop();
+            if (!v || typeof v !== 'object' || seen.has(v)) continue;
+            seen.add(v);
+            const pr = v.props;
+            if (pr && typeof pr.getCurrentFilters === 'function' && typeof pr.onLoad === 'function') return pr;
+            if (v.component) stack.push(v.component.subTree);
+            if (v.suspense) stack.push(v.suspense.activeBranch);
+            if (Array.isArray(v.children)) for (const c of v.children) stack.push(c);
+            if (seen.size > 20000) break;
+        }
+        return null;
+    }
+    // "Saved Searches" next to "More Filters": the site keeps that button inside the folded filter
+    // panel. The copy mirrors its icon, label and count and clicks the original, which opens the
+    // site's own saved-searches dialog. Vue owns the row, so a 1 s check re-inserts it.
+    function nativeSavedSearchesBtn() {
+        return [...document.querySelectorAll('.filter-panel-wrapper button')]
+            .find(b => !b.dataset.pmvSavedShortcut && /^Saved Searches/.test(b.textContent.trim())) || null;
+    }
+    function ensureSavedSearchShortcut() {
+        const cur = document.querySelector('[data-pmv-saved-shortcut]');
+        const mf = [...document.querySelectorAll('button')].find(b => !b.dataset.pmvSavedShortcut && b.textContent.trim() === 'More Filters');
+        const native = mf ? nativeSavedSearchesBtn() : null;
+        if (!mf || !native) { cur?.remove(); return; }
+        let b = cur;
+        if (!b || b.parentElement !== mf.parentElement) {
+            cur?.remove();
+            b = document.createElement('button');
+            b.type = 'button';
+            b.dataset.pmvSavedShortcut = '1';
+            b.className = 'flex items-center gap-2 text-sm px-3 py-2.5 rounded-lg border transition-colors bg-[#1A1A1A] border-[#2A2A2A] hover:bg-[#232323] text-gray-300';
+            b.style.flexShrink = '0';
+            b.title = 'Saved searches';
+            b.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                const n = nativeSavedSearchesBtn();
+                if (n) n.click(); else toast('Saved searches not available');
+            });
+            mf.after(b);
+        }
+        if (b._pmvSrc !== native.innerHTML) {
+            b._pmvSrc = native.innerHTML;
+            b.innerHTML = native.innerHTML;
+        }
+    }
+    setInterval(() => { try { ensureSavedSearchShortcut(); } catch {} }, 1000);
+
+    const isHomePath = () => location.pathname === '/' || location.pathname === '';
+    function homeListCount() { return document.querySelectorAll('[data-video-id]').length; }
+    function captureHomeState() {
+        if (!isHomePath() || homeRestoring) return;
+        const pr = homeFilterProps();
+        if (!pr) return;
+        let filters;
+        try { filters = JSON.parse(JSON.stringify(pr.getCurrentFilters() || {})); } catch { return; }
+        const paging = siteListPaging();
+        const state = { filters, count: homeListCount(), page: paging?.page || 1, infinite: !!paging?.infinite, scrollY: Math.round(scrollY), at: Date.now() };
+        try { sessionStorage.setItem(HOME_STATE_KEY, JSON.stringify(state)); } catch {}
+    }
+    let homeRestoring = false;
+    let homeBackNav = false;
+    async function restoreHomeState() {
+        homeRestoring = true;
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        try {
+            let saved;
+            try { saved = JSON.parse(sessionStorage.getItem(HOME_STATE_KEY) || 'null'); } catch { saved = null; }
+            if (!saved || Date.now() - saved.at > 6 * 60 * 60 * 1000) return;
+            // Wait for the page and its filter component.
+            let pr = null;
+            for (let i = 0; i < 40 && isHomePath() && !(pr = homeFilterProps()); i++) await wait(250);
+            if (!pr || !isHomePath()) return;
+            const now = JSON.stringify(pr.getCurrentFilters() || {});
+            if (now !== JSON.stringify(saved.filters || {})) {
+                pr.onLoad(saved.filters || {});
+                await wait(600);
+            }
+            // Same depth: pages mode → the saved page; autoscroll → load batches until the count is back.
+            const paging = siteListPaging();
+            if (paging && !paging.infinite && saved.page > 1) {
+                for (let i = 0; i < 20 && siteListPaging()?.pending; i++) await wait(250);
+                const btn = [...document.querySelectorAll('nav[aria-label="Pagination"] button, [aria-label="Pagination"] button')]
+                    .find(b => b.textContent.trim() === String(saved.page));
+                btn?.click();
+                await wait(800);
+            } else if (saved.count > homeListCount()) {
+                const target = Math.min(saved.count, 100); // the site keeps about 100 cards
+                for (let i = 0; i < 12 && isHomePath() && homeListCount() < target; i++) {
+                    window.scrollTo(0, document.documentElement.scrollHeight);
+                    window.dispatchEvent(new Event('scroll'));
+                    await wait(700);
+                }
+            }
+            for (let i = 0; i < 20 && siteListPaging()?.pending; i++) await wait(250);
+            if (isHomePath()) window.scrollTo({ top: saved.scrollY || 0, left: 0, behavior: 'auto' });
+        } catch {} finally {
+            homeRestoring = false;
+        }
+    }
+    // Capture before the route changes (the homepage is still mounted), on link clicks and regularly.
+    (() => {
+        const push = history.pushState;
+        history.pushState = function (...a) { try { captureHomeState(); } catch {} return push.apply(this, a); };
+        document.addEventListener('click', e => { if (e.target.closest?.('a[href]')) { try { captureHomeState(); } catch {} } }, true);
+        setInterval(() => { if (isHomePath() && !document.hidden) { try { captureHomeState(); } catch {} } }, 2000);
+        window.addEventListener('pagehide', () => { try { captureHomeState(); } catch {} });
+        // Back / Forward: popstate fires before the router renders the homepage.
+        // The capture is held off right away, so the reset page is not saved over the state first.
+        window.addEventListener('popstate', () => {
+            homeBackNav = true;
+            homeRestoring = true;
+            setTimeout(() => {
+                if (homeBackNav && isHomePath()) restoreHomeState(); else homeRestoring = false;
+                homeBackNav = false;
+            }, 50);
+        });
+        // A Back that reloads the page (bfcache miss) is a back_forward navigation.
+        try {
+            const nav = performance.getEntriesByType('navigation')[0];
+            if (nav?.type === 'back_forward' && isHomePath()) { homeRestoring = true; setTimeout(restoreHomeState, 300); }
+        } catch {}
+    })();
 
     // ---------------------------------------------------------------------
     // Pagination
@@ -9192,13 +10284,99 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     // the two are not mixed up. While a card filter is active, rejecting takes two clicks: the first
     // turns the button red ("Reject?"), a second within REJECT_ARM_MS rejects.
     const REJECT_ARM_MS = 3000;
+    // Card action buttons share one size, matching the site's "+N" tag button; the reject ✕ is a badge
+    // in the thumbnail's top-left corner in the style of the aspect-ratio badge, and the site's own
+    // top-left badges (NEW, Seen …) move down one slot under it.
+    const CARD_ICON = {
+        external: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
+        queueAdd: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 6H3"/><path d="M12 12H3"/><path d="M12 18H3"/><path d="M18 12v7"/><path d="M14.5 15.5h7"/></svg>',
+        plus: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>',
+        // Up next: two play triangles and a bar (play next).
+        upNext: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5v11L10 12z"/><path d="M11 6.5v11l7.5-5.5z"/><path d="M21 6.5v11"/></svg>',
+    };
+    function ensureCardBtnStyle() {
+        if (document.getElementById('pmv-cardbtn-style')) return;
+        const st = document.createElement('style');
+        st.id = 'pmv-cardbtn-style';
+        st.textContent = `
+.pmv-cardbtn{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;height:26px;min-width:34px;padding:0 8px;
+  border-radius:8px;border:1px solid rgba(55,65,81,.3);background:rgba(31,41,55,.3);color:rgb(156,163,175);font-family:inherit;font-size:12px;
+  font-weight:600;line-height:1;cursor:pointer;flex-shrink:0;transition:color .15s,background .15s,border-color .15s;vertical-align:middle;}
+.pmv-cardbtn:hover{color:rgb(253,186,116);background:rgba(249,115,22,.2);border-color:rgba(249,115,22,.4);}
+.pmv-cardbtn svg{width:14px;height:14px;flex-shrink:0;}
+.pmv-cardbtn[data-kind="open"]{color:rgba(255,255,255,.85);background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.22);}
+.pmv-cardbtn[data-kind="open"]:hover{color:#fff;background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.4);}
+.pmv-cardbtn[data-kind="queue"], .pmv-cardbtn[data-kind="playlists"]{color:rgb(134,239,172);background:rgba(34,197,94,.1);border-color:rgba(34,197,94,.3);}
+.pmv-cardbtn[data-kind="queue"]:hover, .pmv-cardbtn[data-kind="playlists"]:hover{color:rgb(187,247,208);background:rgba(34,197,94,.2);border-color:rgba(34,197,94,.5);}
+.pmv-cardbtn[data-kind="fav"]{color:rgba(${FAV_RGB},.75);background:rgba(${FAV_RGB},.06);border-color:rgba(${FAV_RGB},.25);}
+.pmv-cardbtn[data-kind="fav"]:hover{color:rgb(${FAV_RGB});background:rgba(${FAV_RGB},.14);border-color:rgba(${FAV_RGB},.45);}
+.pmv-cardbtn[data-kind="fav"][data-on="1"]{color:rgb(${FAV_RGB});background:rgba(236,72,153,.2);border-color:rgba(236,72,153,.45);}
+.pmv-cardbtn[data-kind="fav"][data-on="1"]:hover{background:rgba(236,72,153,.3);}
+.pmv-cardbtn[data-rec="1"]{margin:2px 4px 0 0;}
+.pmv-thumbx{position:absolute;top:.75rem;left:.75rem;z-index:21;display:inline-flex;align-items:center;gap:4px;padding:.25rem .625rem;border-radius:.5rem;
+  font-family:inherit;font-size:12px;font-weight:700;line-height:1rem;cursor:pointer;color:rgb(241,245,249);border:1px solid rgba(100,116,139,.5);
+  background:linear-gradient(to right,rgba(51,65,85,.95),rgba(30,41,59,.95));box-shadow:0 10px 15px -3px rgba(0,0,0,.3);transition:background .15s,border-color .15s;}
+.pmv-thumbx:hover{border-color:rgba(${REJECT_RGB},.7);}
+.pmv-thumbx[data-on="1"]{color:#fff;border-color:rgba(${REJECT_RGB},.7);background:linear-gradient(to right,rgba(220,38,38,.92),rgba(153,27,27,.92));}
+.pmv-thumbx[data-armed="1"]{color:#fff;border-color:rgb(${REJECT_RGB});background:rgb(220,38,38);}
+.pmv-thumbx[data-small="1"]{top:5px;left:5px;width:20px;height:20px;padding:0;justify-content:center;border-radius:9999px;font-size:10px;line-height:1;
+  color:rgba(255,255,255,.8);background:rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.12);box-shadow:none;opacity:.55;transition:opacity .15s,background .15s;}
+a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], div:hover > .pmv-thumbx[data-small="1"], .pmv-thumbx[data-small="1"]:hover{opacity:1;}
+.pmv-thumbx[data-small="1"]:hover{background:rgba(220,38,38,.85);border-color:transparent;color:#fff;}
+.pmv-thumbx[data-small="1"][data-on="1"]{opacity:1;color:#fff;background:rgba(220,38,38,.75);border-color:transparent;}
+.pmv-thumbx[data-small="1"][data-armed="1"]{opacity:1;width:auto;padding:0 8px;border-radius:.5rem;color:#fff;background:rgb(220,38,38);}
+[data-pmv-rejthumb] > .absolute.left-3:not(.bottom-3):not([data-pmv-reject-btn]){transform:translateY(2.25rem);}`;
+        (document.head || document.documentElement).appendChild(st);
+    }
+    function cardBtn(kind, title, icon) {
+        ensureCardBtnStyle();
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'pmv-cardbtn';
+        b.dataset.kind = kind;
+        b.dataset.pmvBadge = '1';
+        b.title = title;
+        b.innerHTML = icon;
+        b.addEventListener('mousedown', e => e.stopPropagation());
+        return b;
+    }
+    // The card's thumbnail box (grid: .aspect-video, Recommended: .w-40).
+    function cardThumb(card) {
+        return card.querySelector('.aspect-video') || card.querySelector('.w-40') || card.querySelector('img')?.parentElement || null;
+    }
+    function placeRejectInThumb(card, btn) {
+        const thumb = cardThumb(card);
+        if (!thumb) return false;
+        if (getComputedStyle(thumb).position === 'static') thumb.style.position = 'relative';
+        thumb.dataset.pmvRejthumb = '1';
+        // Small, subtle variant where the card has no resolution pill (Recommended, More from, …).
+        if (!thumb.querySelector(':scope > .absolute.top-3.right-3')) btn.dataset.small = '1';
+        thumb.appendChild(btn);
+        return true;
+    }
+    // "+" on a card: the right-click playlist menu, opened under the button. A second click closes it.
+    function playlistPickButton(resolveId) {
+        const b = cardBtn('playlists', 'Add to a playlist', CARD_ICON.queueAdd);
+        b.dataset.pmvPlpick = '1';
+        b.addEventListener('mousedown', () => { b._wasOpen = document.getElementById('pmv-ctx-menu')?._pmvBtn === b; });
+        b.addEventListener('click', async e => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (b._wasOpen) { b._wasOpen = false; closeCtxMenu(); return; }
+            const id = await resolveId();
+            if (!id) { toast('Video not found'); return; }
+            const r = b.getBoundingClientRect();
+            buildCtxMenu(id, r.left, r.bottom + 4, b);
+            const menu = document.getElementById('pmv-ctx-menu');
+            if (menu) menu._pmvBtn = b;
+        });
+        return b;
+    }
+
     function styleRejectCardBtn(btn, on) {
         const armed = !on && btn.dataset.armed === '1';
-        btn.style.cursor = 'pointer';
-        btn.style.background = armed ? `rgba(${REJECT_RGB},0.85)` : on ? `rgba(${REJECT_RGB},0.18)` : 'rgba(255,255,255,0.05)';
-        btn.style.borderColor = armed ? `rgb(${REJECT_RGB})` : on ? `rgba(${REJECT_RGB},0.55)` : 'rgba(255,255,255,0.1)';
-        btn.style.color = armed ? '#fff' : on ? `rgb(${REJECT_RGB})` : 'rgb(156,163,175)';
-        btn.textContent = armed ? '\u2715 Reject?' : '\u2715';
+        btn.dataset.on = on ? '1' : '';
+        btn.textContent = armed ? '\u2298 Reject?' : '\u2298';
         btn.title = armed ? 'Click again to reject'
             : on ? 'Remove from reject list'
             : 'Reject (move to the reject list, remove from every other playlist)';
@@ -9211,25 +10389,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         styleRejectCardBtn(btn, btn.dataset.on === '1');
     }
 
-    // Keeps the ✕ away from "+": last and right-aligned in a flex row, floated right otherwise.
-    function placeRejectBtnApart(btn, parent) {
-        const d = getComputedStyle(parent).display;
-        if (d.includes('flex')) {
-            btn.style.order = '99';
-            btn.style.marginLeft = 'auto';
-        } else {
-            btn.style.cssFloat = 'right';
-            btn.style.marginLeft = '8px';
-        }
-        parent.appendChild(btn);
-    }
-
     function rejectCardButtonEl(card, resolveId, initialOn) {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.dataset.pmvRejectBtn = '1';
         btn.dataset.pmvBadge = '1';
-        btn.className = Q_CHIP;
+        ensureCardBtnStyle();
+        btn.className = 'pmv-thumbx';
         btn.dataset.on = initialOn ? '1' : '';
         styleRejectCardBtn(btn, initialOn);
         btn.addEventListener('mousedown', e => e.stopPropagation());
@@ -9249,10 +10415,15 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             btn.dataset.busy = '1';
             btn.style.opacity = '0.5';
             try {
+                const rect = btn.getBoundingClientRect();
                 const id = await resolveId();
                 if (!id) { toast('Video not found'); return; }
                 const now = await toggleRejectVideo(id);
                 if (now === null) return;
+                if (now && tagAfterReject()) {
+                    const title = State.videoMeta.get(id)?.title || card.querySelector('h3, h4')?.textContent.trim() || '';
+                    openTagPopup(id, rect, title);
+                }
                 btn.dataset.on = now ? '1' : '';
                 styleRejectCardBtn(btn, now);
                 // Re-render this card's badges and tint on the next pass.
@@ -9303,12 +10474,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         refreshFavButtons();
     }
     function styleFavCardBtn(btn, on) {
-        btn.style.cursor = 'pointer';
-        btn.style.background = on ? `rgba(${FAV_RGB},0.18)` : 'rgba(255,255,255,0.05)';
-        btn.style.borderColor = on ? `rgba(${FAV_RGB},0.55)` : 'rgba(255,255,255,0.1)';
-        btn.style.color = on ? `rgb(${FAV_RGB})` : 'rgb(156,163,175)';
+        btn.dataset.on = on ? '1' : '';
         btn.title = on ? 'Remove from favourites' : 'Add to favourites';
-        btn.innerHTML = HEART_SVG(on);
+        btn.innerHTML = HEART_SVG(false); // outline, like the site's own favourite button
     }
     function refreshFavButtons() {
         document.querySelectorAll('[data-pmv-fav-btn]').forEach(btn => {
@@ -9318,11 +10486,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
     // `knownId` gives the API _id if it is known without a request; `resolveId` may fetch it.
     function favCardButtonEl(knownId, resolveId) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
+        const btn = cardBtn('fav', 'Add to favourites', '');
         btn.dataset.pmvFavBtn = '1';
-        btn.dataset.pmvBadge = '1';
-        btn.className = Q_CHIP;
         btn._pmvFavId = knownId;
         styleFavCardBtn(btn, isFavourite(knownId()));
         loadFavIds();
@@ -9369,7 +10534,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             // Skip cards already processed for this video ID, unless it is in a playlist and its badge is
             // missing (Vue re-render); cheap Map lookup first, DOM query only for in-playlist cards.
             if (card.dataset.pmvChecked === videoId && State.ready
-                && !(isVideoInPlaylist(videoId) && !card.querySelector('[data-playlist-name]'))) return;
+                && !(isVideoInPlaylist(videoId) && !card.querySelector('[data-playlist-name]'))
+                && !(rejectPlaylistId && !card.querySelector('[data-pmv-reject-btn]'))
+                && card.querySelector('[data-pmv-plpick]')) return;
             card.dataset.pmvChecked = videoId;
 
             const tagRows = [...card.querySelectorAll('.flex.items-center.gap-1\\.5.flex-wrap')];
@@ -9391,15 +10558,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     ? card.getAttribute('href')
                     : card.querySelector('a[href*="/video/"]')?.getAttribute('href');
                 if (cardHref) {
-                    const otBtn = document.createElement('button');
-                    otBtn.type = 'button';
+                    const otBtn = cardBtn('open', 'Open in new tab', CARD_ICON.external);
                     otBtn.dataset.pmvOpentab = '1';
-                    otBtn.dataset.pmvBadge = '1';
-                    otBtn.title = 'Open in new tab';
-                    otBtn.textContent = '↗';
-                    otBtn.className = Q_CHIP_OFF;
-                    otBtn.style.cursor = 'pointer';
-                    otBtn.addEventListener('mousedown', e => e.stopPropagation());
                     otBtn.addEventListener('click', e => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -9412,15 +10572,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             // "+" button: add this card's video to the Smart Queue without navigating. Uses the card's
             // resolved videoId (real _id, not slug/asset ID).
             if (!targetRow.querySelector('[data-pmv-addqueue]')) {
-                const aqBtn = document.createElement('button');
-                aqBtn.type = 'button';
+                const aqBtn = cardBtn('queue', 'Add to Up next', CARD_ICON.upNext);
                 aqBtn.dataset.pmvAddqueue = '1';
-                aqBtn.dataset.pmvBadge = '1';
-                aqBtn.title = 'Add to Up next';
-                aqBtn.textContent = '+';
-                aqBtn.className = Q_CHIP_ADD;
-                aqBtn.style.cursor = 'pointer';
-                aqBtn.addEventListener('mousedown', e => e.stopPropagation());
                 aqBtn.addEventListener('click', e => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -9429,16 +10582,24 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 targetRow.appendChild(aqBtn);
             }
 
-            if (!targetRow.querySelector('[data-pmv-fav-btn]')) {
-                const fb = favCardButtonEl(() => card.dataset.videoId || videoId, async () => card.dataset.videoId || videoId);
+            // "+": add to a playlist (the right-click menu), after the Up next button.
+            if (!targetRow.querySelector('[data-pmv-plpick]')) {
+                const pb = playlistPickButton(async () => card.dataset.videoId || videoId);
                 const aq = targetRow.querySelector('[data-pmv-addqueue]');
-                if (aq) aq.after(fb); else targetRow.appendChild(fb);
+                if (aq) aq.after(pb); else targetRow.appendChild(pb);
             }
 
-            const rjBtn = targetRow.querySelector('[data-pmv-reject-btn]');
+            if (!targetRow.querySelector('[data-pmv-fav-btn]')) {
+                const fb = favCardButtonEl(() => card.dataset.videoId || videoId, async () => card.dataset.videoId || videoId);
+                const pb = targetRow.querySelector('[data-pmv-plpick]') || targetRow.querySelector('[data-pmv-addqueue]');
+                if (pb) pb.after(fb); else targetRow.appendChild(fb);
+            }
+
+            // ✕ in the thumbnail corner.
+            const rjBtn = card.querySelector('[data-pmv-reject-btn]');
             if (!rejectPlaylistId) rjBtn?.remove();
             else if (rjBtn) refreshRejectCardBtn(rjBtn, isRejected(videoId));
-            else placeRejectBtnApart(rejectCardButtonEl(card, async () => videoId, isRejected(videoId)), targetRow);
+            else placeRejectInThumb(card, rejectCardButtonEl(card, async () => videoId, isRejected(videoId)));
 
             if (!State.ready) {
                 if (!targetRow.querySelector('[data-playlist-loading]')) {
@@ -9466,7 +10627,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 const badgeRgb = playlistBadgeRgb(name, plId);
                 badge.style.cssText = `display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;font-size:11px;background:rgba(${badgeRgb},0.15);border:1px solid rgba(${badgeRgb},0.4);color:rgb(${badgeRgb});max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
                 badge.title = 'In playlist: ' + name;
-                badge.textContent = (isRejectList(plId) ? '\u2298 ' : '✓ ') + name;
+                // Short name (Settings → Playlist names) on the badge, the full name in its tooltip.
+                badge.textContent = (isRejectList(plId) ? '\u2298 ' : '✓ ') + (getPlaylistDisplayName(name, plId) || name);
                 targetRow.appendChild(badge);
             });
         });
@@ -9636,21 +10798,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return null;
     }
 
-    function resolveRecommendedVideoId(linkEl) {
-        // Try via href first, then via the thumbnail img src
-        const id = getVideoIdFromHref(linkEl.getAttribute('href'));
-        if (id) return id;
-        const img = linkEl.querySelector('img');
-        if (img) {
-            const fromSrc = getVideoIdFromThumbUrl(img.getAttribute('src') || img.src);
-            if (fromSrc) return fromSrc;
-            // Fallback: look up thumbnailIndex via the cleaned URL
-            const srcClean = (img.getAttribute('src') || '').split('?')[0];
-            if (srcClean && State.thumbnailIndex.has(srcClean)) return State.thumbnailIndex.get(srcClean);
-        }
-        return null;
-    }
-
     function isVideoInPlaylist(videoId) {
         if (!videoId || !State.ready) return false;
         for (const p of State.playlists.values()) {
@@ -9728,15 +10875,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         placeRecRejectButton(card, slugId, infoDiv);
         if (infoDiv.querySelector('[data-pmv-rec-addqueue]')) return;
 
-        const aqBtn = document.createElement('button');
-        aqBtn.type = 'button';
+        const aqBtn = cardBtn('queue', 'Add to Up next', CARD_ICON.upNext);
         aqBtn.dataset.pmvRecAddqueue = '1';
-        aqBtn.dataset.pmvBadge = '1';
-        aqBtn.title = 'Add to Up next';
-        aqBtn.textContent = '+';
-        aqBtn.className = Q_CHIP_ADD;
-        aqBtn.style.cssText = 'cursor:pointer;margin-top:2px;';
-        aqBtn.addEventListener('mousedown', e => e.stopPropagation());
+        aqBtn.dataset.rec = '1';
         // Added immediately under the card's slug id; the real API id is
         // resolved in the background and swapped in (needed only for dedupe and
         // playlist chips).
@@ -9754,27 +10895,27 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 })
                 .catch(() => noteLookupFailure(slugId));
         });
-        // Heart right after "+"; the resolved id is cached, so later clicks need no request.
-        const favBtn = favCardButtonEl(() => knownApiIdForCard(card, slugId), async () => {
+        // "+" (add to a playlist) and the heart after it; the resolved id is cached, so later clicks
+        // need no request.
+        const resolveId = async () => {
             const id = knownApiIdForCard(card, slugId);
             if (id) return id;
             const v = await fetchVideoDeduped(slugId).catch(() => { noteLookupFailure(slugId); return null; });
             if (!v?._id) return null;
             State.slugToApiId.set(slugId, v._id);
             return v._id;
-        });
-        favBtn.style.marginTop = '2px';
-        favBtn.style.marginLeft = '4px';
-        // Before the ✕ in DOM order, so a floated ✕ sits on the same line at the far right.
-        const rj = infoDiv.querySelector('[data-pmv-reject-btn]');
-        if (rj) { infoDiv.insertBefore(aqBtn, rj); infoDiv.insertBefore(favBtn, rj); }
-        else infoDiv.append(aqBtn, favBtn);
+        };
+        const plBtn = playlistPickButton(resolveId);
+        plBtn.dataset.rec = '1';
+        const favBtn = favCardButtonEl(() => knownApiIdForCard(card, slugId), resolveId);
+        favBtn.dataset.rec = '1';
+        infoDiv.append(aqBtn, plBtn, favBtn);
     }
 
     // ✕ on a Recommended / More from card. Placed from the card alone, id resolved
     // on click. Its colour follows the known id, re-checked on every badge pass.
     function placeRecRejectButton(card, slugId, infoDiv) {
-        const existing = infoDiv.querySelector('[data-pmv-reject-btn]');
+        const existing = card.querySelector('[data-pmv-reject-btn]');
         if (!rejectPlaylistId) { existing?.remove(); return; }
         const known = knownApiIdForCard(card, slugId);
         if (existing) { refreshRejectCardBtn(existing, isRejected(known)); return; }
@@ -9786,8 +10927,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             State.slugToApiId.set(slugId, v._id);
             return v._id;
         }, isRejected(known));
-        btn.style.marginTop = '2px';
-        placeRejectBtnApart(btn, infoDiv);
+        placeRejectInThumb(card, btn);
     }
 
     function placeRecBadge(card, videoId) {
@@ -9837,8 +10977,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     // Green "✓ <playlist names>" chip shared by Recommended and More from cards;
     // null when the video is in no playlist.
     function playlistCheckBadgeEl(videoId) {
-        const matching = [];
-        State.playlists.forEach(p => { if (p.ids.has(videoId)) matching.push(p.name); });
+        const matching = [], shown = [];
+        State.playlists.forEach(p => { if (p.ids.has(videoId)) { matching.push(p.name); shown.push(getPlaylistDisplayName(p.name, p.id) || p.name); } });
         if (!matching.length) return null;
 
         const badge = document.createElement('span');
@@ -9847,7 +10987,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const rej = isRejected(videoId);
         const rgb = rej ? REJECT_RGB : '100,255,0';
         badge.title = 'In playlist: ' + matching.join(', ');
-        badge.textContent = (rej ? '\u2298 ' : '✓ ') + matching.join(', ');
+        badge.textContent = (rej ? '\u2298 ' : '✓ ') + shown.join(', ');
         badge.style.cssText = `display:inline-flex;align-items:center;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:500;background:rgba(${rgb},0.15);border:1px solid rgba(${rgb},0.4);color:rgb(${rgb});max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;`;
         return badge;
     }
@@ -10567,40 +11707,17 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     setInterval(() => {
         getVideo();
         updateNativePlaylistButtons();
+        if (State.ready) { try { ensureRejectBarButton(getCurrentVideoId()); } catch {} }
     }, 2000);
 
 
     // ---------------------------------------------------------------------
     // Context menu
     // ---------------------------------------------------------------------
-    // Right-click on video cards.
+    // Playlist menu for a video, opened by the "+" button on cards.
 
     function closeCtxMenu() {
         document.getElementById('pmv-ctx-menu')?.remove();
-    }
-
-    function resolveCardVideoId(target) {
-        // [data-video-id] cards (browse, homepage, search results)
-        const card = target.closest('[data-video-id]');
-        if (card?.dataset.videoId) return card.dataset.videoId;
-
-        // Queue items in the sidebar (playlist page)
-        const queueImg = target.closest('.w-24.h-14 img') || (target.tagName === 'IMG' && target.closest('.w-24.h-14') ? target : null);
-        if (queueImg) {
-            const itemRoot = queueImg.closest('[role="button"]');
-            if (itemRoot) return resolveQueueItemVideoId(itemRoot);
-        }
-
-        // Recommended sidebar: <a href="/video/..."> wrapper
-        const recLink = target.closest('a[href*="/video/"]');
-        if (recLink) return resolveRecommendedVideoId(recLink);
-
-        // Recommended sidebar: div-based card (w-40 thumbnail next to flex-1.min-w-0)
-        const recCard = target.closest('[class*="w-40"]')?.parentElement ||
-                        target.closest('.flex-1.min-w-0')?.parentElement;
-        if (recCard) return resolveRecCardVideoId(recCard);
-
-        return null;
     }
 
     function buildCtxMenu(videoId, x, y, target) {
@@ -10750,33 +11867,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (rect.bottom > window.innerHeight) menu.style.top  = Math.max(0, window.innerHeight - rect.height - 8) + 'px';
     }
 
-    // A single delegated listener on document — no per-card listeners
-    document.addEventListener('contextmenu', async e => {
-        // Shift+right-click → native browser context menu
-        if (e.shiftKey) { closeCtxMenu(); return; }
-
-        const slugId = resolveCardVideoId(e.target);
-        if (!slugId) { closeCtxMenu(); return; }
-
-        e.preventDefault();
-
-        // Look up the real API _id: first the slugToApiId cache, then the reverse index, otherwise fetch
-        let videoId = State.slugToApiId.get(slugId) ||
-                      (State.reverse.has(slugId) ? slugId : null);
-        if (!videoId) {
-            try {
-                const v = await fetchVideoDeduped(slugId);
-                const apiId = v?._id;
-                if (apiId) {
-                    State.slugToApiId.set(slugId, apiId);
-                    videoId = apiId;
-                }
-            } catch {}
-            if (!videoId) videoId = slugId;
-        }
-
-        buildCtxMenu(videoId, e.clientX, e.clientY, e.target);
-    });
+    // No right-click menu on cards any more: the "+" button on a card opens the same playlist menu.
 
     // Close the menu on click outside it, or on scroll/escape
     document.addEventListener('click', e => {
@@ -11618,6 +12709,361 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return true;
     }
 
+    // After ✕ on a card: "Tag video", a small popup to give the rejected video a tag on the site
+    // (usually why it was rejected). Same calls as the site's own Vote on Tags modal:
+    //   GET  /api/videos/<id>/tags/stats    -> data.tags [{ tag, userVote }]
+    //   POST /api/videos/<id>/tags/suggest  { tag, tagType: 'general' }                      new tag, +1 vote
+    //   POST /api/videos/<id>/tags/vote     { tag, voteType: 'upvote', tagType: 'general' }  existing tag
+    // Voting again on a tag you already upvoted would remove the vote, so that case is left alone.
+    const TAG_AFTER_REJECT_KEY = 'pmv_tag_after_reject_v1';
+    const TAG_RECENT_KEY = 'pmv_tag_recent_v1';
+    const TAG_MAX_LEN = 50; // the site's limit for general tags
+    const TAG_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"></path><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"></circle></svg>';
+    function tagAfterReject() { try { return localStorage.getItem(TAG_AFTER_REJECT_KEY) !== '0'; } catch { return true; } }
+    function setTagAfterReject(on) { try { localStorage.setItem(TAG_AFTER_REJECT_KEY, on ? '1' : '0'); } catch {} }
+    // Performer chips' sparkle (the site's own icon for stars/models).
+    const STAR_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/></svg>';
+    // General tags and stars/models go through the same endpoints, told apart by tagType; the site's
+    // length limits are 50 and 100.
+    const TAG_KINDS = {
+        general: { recentKey: TAG_RECENT_KEY, max: TAG_MAX_LEN, stats: 'tags', meta: 'tags', noun: 'tag', icon: TAG_SVG, pre: '#' },
+        stars: { recentKey: 'pmv_star_recent_v1', max: 100, stats: 'stars', meta: 'starsTags', noun: 'model', icon: STAR_SVG, pre: '' },
+    };
+    const tagKind = k => TAG_KINDS[k] || TAG_KINDS.general;
+    function recentTags(kind = 'general') {
+        try {
+            const a = JSON.parse(localStorage.getItem(tagKind(kind).recentKey) || '[]');
+            return Array.isArray(a) ? a.filter(t => typeof t === 'string' && t).slice(0, 8) : [];
+        } catch { return []; }
+    }
+    function rememberTag(tag, kind = 'general') {
+        try {
+            const a = [tag, ...recentTags(kind).filter(t => t.toLowerCase() !== tag.toLowerCase())].slice(0, 8);
+            localStorage.setItem(tagKind(kind).recentKey, JSON.stringify(a));
+        } catch {}
+    }
+
+    // The site's vocabulary per kind for autocomplete, loaded once on first use.
+    const popularTagsP = {};
+    function popularTags(kind = 'general') {
+        const type = kind === 'stars' ? 'stars' : 'general';
+        if (!popularTagsP[type]) {
+            popularTagsP[type] = fetch(`/api/tags/popular?limit=1000&type=${type}`, { credentials: 'include' })
+                .then(r => (r.ok ? r.json() : null))
+                .then(j => (Array.isArray(j?.data) ? j.data : []).map(t => t?.name).filter(n => typeof n === 'string' && n))
+                .catch(() => { popularTagsP[type] = null; return []; });
+        }
+        return popularTagsP[type];
+    }
+
+    async function postSiteJson(url, body) {
+        const res = await fetch(url, {
+            method: 'POST', credentials: 'include',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify(body),
+        });
+        let j = null;
+        try { j = await res.json(); } catch {}
+        if (!res.ok || j?.success === false) throw new Error(j?.message || j?.statusMessage || `HTTP ${res.status}`);
+        return j;
+    }
+
+    // Resolves to 'added' | 'voted' | 'already'; throws with the site's message on failure.
+    async function tagVideoOnSite(id, tag, kind = 'general') {
+        const K = tagKind(kind), tagType = kind === 'stars' ? 'stars' : 'general';
+        let existing = null;
+        try {
+            existing = (await videoTagStats(id, kind)).find(t => String(t?.tag).toLowerCase() === tag.toLowerCase()) || null;
+        } catch {}
+        let result;
+        if (existing?.userVote === 'upvote') result = 'already';
+        else if (existing) {
+            await postSiteJson(`/api/videos/${id}/tags/vote`, { tag: existing.tag, voteType: 'upvote', tagType });
+            result = 'voted';
+        } else {
+            await postSiteJson(`/api/videos/${id}/tags/suggest`, { tag, tagType });
+            result = 'added';
+        }
+        forgetVideo(id);
+        // The filter sees the new tag right away.
+        const m = State.videoMeta.get(id);
+        if (m && Array.isArray(m[K.meta]) && !m[K.meta].includes(tag.toLowerCase())) m[K.meta].push(tag.toLowerCase());
+        try { applyFilterToCards(true); } catch {}
+        return result;
+    }
+
+    function ensureTagPopStyle() {
+        if (document.getElementById('pmv-tag-pop-style')) return;
+        const st = document.createElement('style');
+        st.id = 'pmv-tag-pop-style';
+        const P = '#pmv-tag-pop';
+        st.textContent = `
+${P}{position:fixed;z-index:1000002;width:320px;box-sizing:border-box;padding:12px;border-radius:12px;background:#111;border:1px solid #2A2A2A;
+  box-shadow:0 12px 32px rgba(0,0,0,.6);color:#e5e7eb;font-family:inherit;font-size:13px;line-height:1.3;}
+${P} *{box-sizing:border-box;font-family:inherit;}
+${P} .tp-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:2px;}
+${P} .tp-title{display:inline-flex;align-items:center;gap:6px;font-weight:600;font-size:14px;color:#fff;}
+${P} .tp-title svg{color:rgb(251,146,60);}
+${P}[data-kind="stars"] .tp-title svg{color:rgb(250,204,21);}
+${P}[data-kind="stars"] .tp-chip:not([data-hide]):not([data-vote="up"]){border-color:rgba(234,179,8,.45);background:rgba(234,179,8,.14);color:rgb(253,224,71);}
+${P} .tp-x{border:none;background:none;color:#9ca3af;cursor:pointer;font-size:13px;padding:2px 4px;border-radius:6px;}
+${P} .tp-x:hover{color:#fff;background:#1F1F1F;}
+${P} .tp-sub{color:#9ca3af;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:8px;}
+${P} .tp-in{position:relative;display:flex;gap:6px;}
+${P} input{flex:1;min-width:0;height:34px;padding:0 10px;border-radius:8px;border:1px solid #2A2A2A;background:#1A1A1A;color:#fff;font-size:13px;outline:none !important;box-shadow:none !important;}
+${P} input:focus{border-color:rgba(249,115,22,.6);}
+${P} input:disabled{opacity:.6;}
+${P} .tp-add{height:34px;padding:0 12px;border-radius:8px;border:none;cursor:pointer;color:#fff;font-weight:600;font-size:13px;
+  background:linear-gradient(to right,rgb(249,115,22),rgb(234,88,12));}
+${P} .tp-add:disabled{opacity:.5;cursor:default;}
+${P} .tp-sug{position:absolute;left:0;right:0;top:38px;z-index:2;max-height:210px;overflow-y:auto;padding:4px;border-radius:8px;background:#1A1A1A;border:1px solid #2A2A2A;box-shadow:0 8px 20px rgba(0,0,0,.5);}
+${P} .tp-sug[hidden]{display:none;}
+${P} .tp-opt{display:block;width:100%;text-align:left;padding:6px 8px;border:none;border-radius:6px;background:none;color:#d1d5db;font-size:13px;cursor:pointer;}
+${P} .tp-opt:hover, ${P} .tp-opt[data-hi="1"]{background:rgba(249,115,22,.15);color:#fff;}
+${P} .tp-opt b{color:rgb(251,146,60);font-weight:600;}
+${P} .tp-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;}
+${P} .tp-chips:empty{display:none;}
+${P} .tp-chip{display:inline-flex;align-items:center;gap:3px;padding:3px 9px;border-radius:9999px;border:1px solid #2A2A2A;background:#1F1F1F;color:#d1d5db;font-size:12px;cursor:pointer;}
+${P} .tp-chip:hover{border-color:rgba(249,115,22,.5);color:#fff;}
+${P} .tp-chip[data-vote="up"]{color:rgb(134,239,172);background:rgba(34,197,94,.1);border-color:rgba(34,197,94,.35);}
+${P} .tp-chip[data-vote="up"]:hover{border-color:rgba(34,197,94,.6);}
+${P} .tp-chip[data-vote="down"]{color:rgb(252,165,165);border-color:rgba(239,68,68,.35);}
+${P} .tp-chip .tp-n{margin-left:4px;font-size:10px;color:#6b7280;}
+${P} .tp-chip[data-hide="1"]{color:rgb(252,165,165);background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.45);}
+${P} .tp-chip[data-hide="1"]:hover{border-color:rgba(239,68,68,.7);color:#fff;}
+${P} .tp-chip[data-hide="1"][data-vote="up"]{background:rgba(239,68,68,.22);border-color:rgba(239,68,68,.6);}
+${P} .tp-opt[data-hide="1"]{color:rgb(252,165,165);}
+${P} .tp-opt[data-hide="1"] b{color:rgb(255,120,120);}
+${P} .tp-opt .tp-ban{margin-right:6px;color:rgb(255,110,110);}
+${P} .tp-label{margin-top:10px;font-size:11px;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;}
+${P} .tp-label[hidden]{display:none;}
+${P} .tp-label + .tp-chips{margin-top:5px;}
+${P} .tp-have{max-height:150px;overflow-y:auto;}
+${P} .tp-note{font-size:12px;color:#6b7280;}
+${P} .tp-msg{margin-top:8px;font-size:12px;color:#9ca3af;}
+${P} .tp-msg:empty{display:none;}
+${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    function closeTagPopup() { document.getElementById('pmv-tag-pop')?._pmvClose?.(); }
+
+    // Tag votes on the video, as the site's Vote on Tags modal has them: [{ tag, upvotes, downvotes, score, userVote }].
+    async function videoTagStats(id, kind = 'general') {
+        const st = await (await fetch(`/api/videos/${id}/tags/stats`, { credentials: 'include' })).json();
+        const list = st?.data?.[tagKind(kind).stats];
+        return Array.isArray(list) ? list : [];
+    }
+
+    // Compact tag menu: the video's tags (click = upvote, again = remove your upvote), plus an input
+    // with autocomplete and recent tags for adding. Used after a reject ("Tag video") and by the tag
+    // button in the action bar under the video ("Tags"). Opens under (or above) the rect it was
+    // opened from (the card itself may be hidden by the filter by then); align 'right' lines up the
+    // right edges. Closes on Esc, ✕, or a click outside; stays open for more tags.
+    function openTagPopup(id, rect, title, { heading = 'Tag video', align = 'left', toggleEl = null, kind = 'general' } = {}) {
+        closeTagPopup();
+        ensureTagPopStyle();
+        const K = tagKind(kind);
+        const tagType = kind === 'stars' ? 'stars' : 'general';
+        const pop = document.createElement('div');
+        pop.id = 'pmv-tag-pop';
+        pop.dataset.forVideo = id;
+        pop.dataset.kind = tagType;
+        pop.innerHTML = `
+            <div class="tp-head"><span class="tp-title">${K.icon}${escHtml(heading)}</span><button type="button" class="tp-x" title="Close (Esc)">✕</button></div>
+            ${title ? `<div class="tp-sub" title="${escHtml(title)}">${escHtml(title)}</div>` : ''}
+            <div class="tp-in">
+                <input type="text" maxlength="${K.max}" placeholder="Add a ${K.noun}\u2026" spellcheck="false" autocomplete="off">
+                <button type="button" class="tp-add">Add</button>
+                <div class="tp-sug" hidden></div>
+            </div>
+            <div class="tp-label" data-recent-label hidden>Recent</div>
+            <div class="tp-chips" data-recent></div>
+            <div class="tp-label" data-have-label>On this video</div>
+            <div class="tp-chips tp-have" data-have><span class="tp-note">Loading…</span></div>
+            <div class="tp-msg"></div>`;
+        const input = pop.querySelector('input');
+        const addBtn = pop.querySelector('.tp-add');
+        const sug = pop.querySelector('.tp-sug');
+        const haveBox = pop.querySelector('[data-have]');
+        const recentBox = pop.querySelector('[data-recent]');
+        const recentLabel = pop.querySelector('[data-recent-label]');
+        const msg = pop.querySelector('.tp-msg');
+        let have = null;       // stats, null while loading
+        let vocab = [];
+        let hi = -1;
+        let busy = false;
+        const onVideo = t => !!have?.some(x => String(x.tag).toLowerCase() === t.toLowerCase());
+        const say = (text, err) => { if (err) msg.dataset.err = '1'; else delete msg.dataset.err; msg.textContent = text || ''; };
+
+        const paintRecent = () => {
+            recentBox.innerHTML = '';
+            const list = recentTags(kind).filter(t => !onVideo(t)).slice(0, 6);
+            list.forEach(t => {
+                const c = document.createElement('button');
+                c.type = 'button';
+                c.className = 'tp-chip';
+                const by = tagHiddenBy(t);
+                c.textContent = (by ? '\u2298 ' : '+ ') + K.pre + t;
+                if (by) c.dataset.hide = '1';
+                c.title = by ? `Add this ${K.noun} \u2014 your filter hides videos with it (\u2298 ${by})` : `Add this ${K.noun}`;
+                c.onclick = () => submit(t);
+                recentBox.appendChild(c);
+            });
+            recentLabel.hidden = !list.length;
+        };
+        const paintHave = () => {
+            haveBox.innerHTML = '';
+            if (!have) { haveBox.innerHTML = `<span class="tp-note">Could not load ${K.noun}s</span>`; return; }
+            if (!have.length) { haveBox.innerHTML = `<span class="tp-note">No ${K.noun}s yet</span>`; return; }
+            [...have].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).forEach(t => {
+                const c = document.createElement('button');
+                c.type = 'button';
+                c.className = 'tp-chip';
+                const up = t.userVote === 'upvote', down = t.userVote === 'downvote';
+                c.dataset.vote = up ? 'up' : down ? 'down' : '';
+                const by = tagHiddenBy(t.tag);
+                if (by) c.dataset.hide = '1';
+                c.innerHTML = `${by ? '\u2298 ' : up ? '\u2713 ' : ''}${K.pre}${escHtml(t.tag)}<span class="tp-n">${escHtml(t.score ?? 0)}</span>`;
+                c.title = `${t.upvotes ?? 0} up \u2022 ${t.downvotes ?? 0} down \u2014 ` + (up ? 'click to remove your upvote' : 'click to upvote')
+                    + (by ? ` \u2014 your filter hides videos with it (\u2298 ${by})` : '');
+                c.onclick = () => toggleVote(t);
+                haveBox.appendChild(c);
+            });
+        };
+        async function reload() {
+            try { have = await videoTagStats(id, kind); } catch { have = null; }
+            if (!pop.isConnected) return;
+            paintHave();
+            paintRecent();
+            place();
+        }
+        async function toggleVote(t) {
+            if (busy) return;
+            busy = true;
+            say(t.userVote === 'upvote' ? 'Removing vote…' : 'Voting…');
+            try {
+                await postSiteJson(`/api/videos/${id}/tags/vote`, { tag: t.tag, voteType: 'upvote', tagType });
+                forgetVideo(id);
+                say(t.userVote === 'upvote' ? `Removed your vote on ${K.pre}${t.tag}` : `Upvoted ${K.pre}${t.tag}`);
+                if (t.userVote !== 'upvote') rememberTag(t.tag, kind);
+                await reload();
+            } catch (e) {
+                say(e?.message || 'Vote failed', true);
+            } finally {
+                busy = false;
+            }
+        }
+
+        const options = () => [...sug.querySelectorAll('.tp-opt')];
+        const paintHi = () => options().forEach((o, i) => { o.dataset.hi = i === hi ? '1' : ''; if (i === hi) o.scrollIntoView({ block: 'nearest' }); });
+        const paintSug = () => {
+            const q = input.value.trim().replace(/^#+/, '').toLowerCase();
+            hi = -1;
+            if (!q) { sug.hidden = true; sug.innerHTML = ''; return; }
+            const starts = [], has = [];
+            for (const t of vocab) {
+                const l = t.toLowerCase();
+                if (l === q || onVideo(t)) continue;
+                if (l.startsWith(q)) starts.push(t); else if (l.includes(q)) has.push(t);
+                if (starts.length >= 8) break;
+            }
+            const list = [...starts, ...has].slice(0, 8);
+            sug.innerHTML = '';
+            list.forEach(t => {
+                const o = document.createElement('button');
+                o.type = 'button';
+                o.className = 'tp-opt';
+                const i = t.toLowerCase().indexOf(q);
+                const by = tagHiddenBy(t);
+                o.innerHTML = (by ? '<span class="tp-ban">\u2298</span>' : '') + escHtml(t.slice(0, i)) + '<b>' + escHtml(t.slice(i, i + q.length)) + '</b>' + escHtml(t.slice(i + q.length));
+                if (by) { o.dataset.hide = '1'; o.title = `Your filter hides videos with this tag (\u2298 ${by})`; }
+                o.onmousedown = e => e.preventDefault();
+                o.onclick = () => submit(t);
+                sug.appendChild(o);
+            });
+            sug.hidden = !list.length;
+        };
+
+        async function submit(raw) {
+            const tag = String(raw || '').replace(/^#+/, '').replace(/\s+/g, ' ').trim();
+            if (!tag || busy) return;
+            if (tag.length > K.max) { say(`At most ${K.max} characters`, true); return; }
+            busy = true;
+            input.disabled = addBtn.disabled = true;
+            say('Adding…');
+            sug.hidden = true;
+            try {
+                const r = await tagVideoOnSite(id, tag, kind);
+                rememberTag(tag, kind);
+                const by = tagHiddenBy(tag);
+                const nm = K.pre + tag;
+                say((r === 'added' ? `${nm} added with +1 vote` : r === 'voted' ? `Upvoted ${nm}` : `You already upvoted ${nm}`)
+                    + (by ? ` \u2014 your filter now hides this video (\u2298 ${by})` : ''));
+                input.value = '';
+                await reload();
+            } catch (e) {
+                say(e?.message || 'Failed to add tag', true);
+            } finally {
+                busy = false;
+                input.disabled = addBtn.disabled = false;
+                if (pop.isConnected) input.focus();
+            }
+        }
+
+        input.addEventListener('input', paintSug);
+        input.addEventListener('keydown', e => {
+            e.stopPropagation();
+            const opts = options();
+            if (e.key === 'ArrowDown' && !sug.hidden && opts.length) { e.preventDefault(); hi = (hi + 1) % opts.length; paintHi(); }
+            else if (e.key === 'ArrowUp' && !sug.hidden && opts.length) { e.preventDefault(); hi = hi <= 0 ? opts.length - 1 : hi - 1; paintHi(); }
+            else if (e.key === 'Tab' && !sug.hidden && opts.length) { e.preventDefault(); input.value = opts[Math.max(0, hi)].textContent; paintSug(); }
+            else if (e.key === 'Enter') { e.preventDefault(); submit(hi >= 0 && opts[hi] ? opts[hi].textContent : input.value); }
+            else if (e.key === 'Escape') { e.preventDefault(); if (!sug.hidden) { sug.hidden = true; hi = -1; } else close(); }
+        });
+        input.addEventListener('keyup', e => e.stopPropagation());
+        input.addEventListener('keypress', e => e.stopPropagation());
+        addBtn.onclick = () => submit(input.value);
+        pop.querySelector('.tp-x').onclick = () => close();
+
+        // A click on the button that opened it is left to that button (it toggles).
+        const onDown = e => { const path = e.composedPath(); if (!path.includes(pop) && !(toggleEl && path.includes(toggleEl))) close(); };
+        const onKey = e => { if (e.key === 'Escape') close(); };
+        function close() {
+            document.removeEventListener('pointerdown', onDown, true);
+            document.removeEventListener('keydown', onKey, true);
+            pop.remove();
+        }
+        pop._pmvClose = close;
+
+        // Below the anchor when it fits, otherwise above; kept inside the viewport. Redone when the
+        // tag list arrives (it changes the height).
+        let above = null;
+        function place() {
+            const w = pop.offsetWidth, h = pop.offsetHeight;
+            const vw = document.documentElement.clientWidth, vh = window.innerHeight;
+            const r = rect && rect.width ? rect : { left: vw / 2 - w / 2, right: vw / 2 + w / 2, top: vh / 2 - h / 2, bottom: vh / 2 - h / 2 };
+            if (above === null) above = r.bottom + 6 + h + 220 > vh && r.top - h - 6 > 8;
+            const top = above ? r.top - h - 6 : r.bottom + 6;
+            pop.style.top = Math.round(Math.max(8, Math.min(top, vh - h - 8))) + 'px';
+            const left = align === 'right' ? r.right - w : r.left;
+            pop.style.left = Math.round(Math.max(8, Math.min(left, vw - w - 8))) + 'px';
+        }
+
+        paintRecent();
+        (document.fullscreenElement || document.body).appendChild(pop);
+        place();
+        setTimeout(() => {
+            if (!pop.isConnected) return;
+            document.addEventListener('pointerdown', onDown, true);
+            document.addEventListener('keydown', onKey, true);
+        }, 0);
+        input.focus({ preventScroll: true });
+        reload();
+        popularTags(kind).then(v => { vocab = v || []; if (pop.isConnected && input.value) paintSug(); });
+        return pop;
+    }
+
     // Toggle for any playlist mapped to any key (press again within 3s to confirm
     // removal). A key mapped to the reject list uses rejectCurrentVideo.
     async function handlePlaylistHotkey(playlistId) {
@@ -12182,7 +13628,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     // ---------------------------------------------------------------------
     // Filters only cards already loaded; the observer below re-filters new batches.
 
-    PMVX.filterChecks.push(() => playlistFilterMode !== 'any' && isFilterPage());
+    PMVX.filterChecks.push(() => playlistFilterMode !== 'any' && isFilterPage() && !PMVX.playlistFilterExempt());
 
     function setMode(mode) {
         playlistFilterMode = mode;
@@ -12228,8 +13674,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const cards = getAllCards();
         let visible = 0, hidden = 0;
 
+        // Off on the favourites views: everything there would count as "in a playlist" or not.
+        const off = playlistFilterMode === 'any' || PMVX.playlistFilterExempt();
         cards.forEach(card => {
-            if (playlistFilterMode === 'any') {
+            if (off) {
                 card.removeAttribute(HIDE_ATTR);
                 return;
             }

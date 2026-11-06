@@ -73,7 +73,53 @@ PMVX.markActed = id => { if (!id) return; actedFresh(); PMVX.acted.add(id); };
 PMVX.isActed = id => { actedFresh(); return !!id && PMVX.acted.has(id); };
 PMVX.clearActed = () => PMVX.acted.clear();
 
+// Filter terms: "=term" matches only as a whole word ("=ch" hits "ch" and "big ch", not
+// "challenge"); any other term matches anywhere in the text. Texts and terms are lower case.
+const termWordRes = new Map();
+PMVX.termMatch = (hay, term) => {
+    if (!hay || !term) return false;
+    if (term.length > 1 && term[0] === '=') {
+        const w = term.slice(1);
+        let re = termWordRes.get(w);
+        if (!re) {
+            re = new RegExp('(?:^|[^\\p{L}\\p{N}])' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:$|[^\\p{L}\\p{N}])', 'u');
+            if (termWordRes.size > 500) termWordRes.clear();
+            termWordRes.set(w, re);
+        }
+        return re.test(hay);
+    }
+    return hay.includes(term);
+};
+// Smart quotes from macOS / iOS keyboards count as plain quotes.
+PMVX.plainQuotes = s => String(s ?? '').replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"').replace(/[\u2018\u2019\u201A\u201B]/g, "'");
+PMVX.termLabel = term => (term && term.length > 1 && term[0] === '=') ? term.slice(1) : term;
+PMVX.isWordTerm = term => !!term && term.length > 1 && term[0] === '=';
+
 // Card filters register a check here; true while any of them can hide cards on this page.
+// Where an in/not-in-playlist filter would hide (nearly) everything: a playlist's own page and
+// the favourites views (profile Favorites tab, the homepage Favorites pill or content chip).
+// Checked per card, so the DOM lookup is cached for 250 ms.
+let pfxAt = 0, pfxVal = false;
+PMVX.playlistFilterExempt = () => {
+    const now = performance.now();
+    if (now - pfxAt < 250) return pfxVal;
+    pfxAt = now;
+    const p = location.pathname.replace(/\/+$/, '') || '/';
+    let v = /^\/playlists\/[^/]+/.test(p);
+    if (!v && p === '/profile') {
+        v = /favorites/i.test(location.hash) || [...document.querySelectorAll('button')]
+            .some(b => /^Favorites\b/.test(b.textContent.trim()) && /\btext-orange-4/.test(b.className));
+    }
+    if (!v && p === '/') {
+        v = [...document.querySelectorAll('button')]
+            .some(b => b.textContent.trim() === 'Favorites' && /\bbg-orange-|border-orange-|text-orange-/.test(b.className.replace(/hover:\S+/g, '')));
+    }
+    pfxVal = v;
+    return v;
+};
+// The playlist whose page this is (its own videos are always "in" it), or null.
+PMVX.currentPlaylistPageId = () => location.pathname.match(/^\/playlists\/([a-f0-9]{24})/i)?.[1] || null;
+
 PMVX.filterChecks = [];
 PMVX.anyCardFilterActive = () => PMVX.filterChecks.some(fn => { try { return !!fn(); } catch { return false; } });
 

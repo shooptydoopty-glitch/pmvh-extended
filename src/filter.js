@@ -152,9 +152,14 @@
     }
 
     // In/out check: membership of the selected playlists, or of any playlist when none is selected.
+    // The playlist whose page this is does not count: every row is in it.
     function inSelectedPlaylists(memberOf) {
-        const ids = BTN.selectedPlaylistIds;
-        return ids.length ? ids.some(id => memberOf.has(id)) : memberOf.size > 0;
+        const here = PMVX.currentPlaylistPageId();
+        const ids = BTN.selectedPlaylistIds.filter(id => id !== here);
+        if (ids.length) return ids.some(id => memberOf.has(id));
+        if (BTN.selectedPlaylistIds.length) return null; // only this playlist was selected: no effect
+        for (const id of memberOf) if (id !== here) return true;
+        return false;
     }
 
     // Saved state is only restored into the controls on load. Filtering starts once Enter or
@@ -164,7 +169,9 @@
     // On/off switch: off shows every row but keeps all filter settings; sorting is unaffected.
     // Persisted across reloads.
     const ENABLED_KEY = 'pmvnf_enabled_v1';
-    NF.enabled = (() => { try { return localStorage.getItem(ENABLED_KEY) !== '0'; } catch { return true; } })();
+    // There is no on/off switch any more (applying turns it on); an old "off" is not kept.
+    NF.enabled = true;
+    try { localStorage.removeItem(ENABLED_KEY); } catch {}
     function filterLive() { return sessionFilterArmed && NF.enabled; }
     function setFilterEnabled(on, { refilter = true } = {}) {
         NF.enabled = !!on;
@@ -394,8 +401,15 @@
     // Tokenizer: quoted substrings (optionally prefixed with -) form one token;
     // everything else splits on whitespace.
     function tokenizeRaw(raw) {
-        const re = /-?"[^"]*"|-?'[^']*'|\S+/g;
-        return raw.trim().match(re) || [];
+        const re = /-?=?"[^"]*"|-?=?'[^']*'|\S+/g;
+        return PMVX.plainQuotes(raw).trim().match(re) || [];
+    }
+    // "quoted" terms (smart quotes too) and =term match only as a whole word or phrase
+    // (PMVX.termMatch); internally they become "=term".
+    function stripTerm(term) {
+        if (term[0] === '=') return '=' + stripQuotes(term.slice(1));
+        const inner = stripQuotes(term);
+        return inner !== term ? '=' + inner : term;
     }
 
     function stripQuotes(term) {
@@ -427,9 +441,11 @@
             } else if (tok === '!unseen') {
                 result.seenFilter = 'unseen';
             } else if (tok.startsWith('-')) {
-                result.textExclude.push(stripQuotes(tok.slice(1)).toLowerCase());
+                const t = stripTerm(tok.slice(1)).toLowerCase();
+                if (t && t !== '=') result.textExclude.push(t);
             } else {
-                result.textInclude.push(stripQuotes(tok).toLowerCase());
+                const t = stripTerm(tok).toLowerCase();
+                if (t && t !== '=') result.textInclude.push(t);
             }
         });
 
@@ -460,10 +476,10 @@
         const haystacks = [text, ...(meta?.tags || []), ...(meta?.starsTags || [])];
         if (matchDesc && meta?.description) haystacks.push(meta.description);
         for (const term of textInclude) {
-            if (!haystacks.some(h => h.includes(term))) return false;
+            if (!haystacks.some(h => PMVX.termMatch(h, term))) return false;
         }
         for (const term of textExclude) {
-            if (haystacks.some(h => h.includes(term))) return false;
+            if (haystacks.some(h => PMVX.termMatch(h, term))) return false;
         }
 
         if (playlistFilters.length > 0) {
@@ -540,8 +556,8 @@
             const { reverse } = getLivePlaylists();
             const memberOf = videoId ? (reverse.get(videoId) || new Set()) : new Set();
             const inSelected = inSelectedPlaylists(memberOf);
-            if (BTN.playlistMode === 'in'  && !inSelected) return false;
-            if (BTN.playlistMode === 'out' &&  inSelected) return false;
+            if (inSelected !== null && BTN.playlistMode === 'in'  && !inSelected) return false;
+            if (inSelected !== null && BTN.playlistMode === 'out' &&  inSelected) return false;
         }
 
         return true;
@@ -622,8 +638,8 @@
         const upMeta = upVid ? PMVX.state?.videoMeta?.get(upVid) : null;
         const upHay = [text];
         if (matchDescEnabled() && upMeta?.description) upHay.push(upMeta.description);
-        for (const term of tokens.textInclude) if (!upHay.some(h => h.includes(term))) return false;
-        for (const term of tokens.textExclude) if (upHay.some(h => h.includes(term))) return false;
+        for (const term of tokens.textInclude) if (!upHay.some(h => PMVX.termMatch(h, term))) return false;
+        for (const term of tokens.textExclude) if (upHay.some(h => PMVX.termMatch(h, term))) return false;
 
         if (tokens.playlistFilters.length > 0) {
             const vid = getUpNextVideoId(btn);
@@ -689,8 +705,8 @@
             const { reverse } = getLivePlaylists();
             const memberOf2 = vid2 ? (reverse.get(vid2) || new Set()) : new Set();
             const inSelected = inSelectedPlaylists(memberOf2);
-            if (BTN.playlistMode === 'in'  && !inSelected) return false;
-            if (BTN.playlistMode === 'out' &&  inSelected) return false;
+            if (inSelected !== null && BTN.playlistMode === 'in'  && !inSelected) return false;
+            if (inSelected !== null && BTN.playlistMode === 'out' &&  inSelected) return false;
         }
 
         return true;
@@ -1116,7 +1132,9 @@
         UI.dneg.splice(0, UI.dneg.length, ...p.neg);
         UI.draw.splice(0, UI.draw.length, ...p.raw, ...(p.seen ? ['!' + p.seen] : []));
     }
-    function quoteTerm(term) { return /\s/.test(term) ? `"${term}"` : term; }
+    function quoteTerm(term) {
+        return PMVX.isWordTerm(term) || /\s/.test(term) ? `"${PMVX.termLabel(term)}"` : term;
+    }
     function compose(pos, neg, seen, raw) {
         const parts = [];
         pos.forEach(t => parts.push(quoteTerm(t)));
@@ -1171,6 +1189,7 @@
 .pmvnf-chips:empty{display:none;}
 .pmvnf-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 6px;border-radius:4px;border:none;cursor:default;font-size:11px;line-height:16px;font-family:inherit;}
 .pmvnf-tag svg{width:10px;height:10px;}
+.pmvnf-tag .w{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:0 4px;border-radius:3px;background:rgba(0,0,0,0.3);}
 .pmvnf-tag .x{display:inline-flex;opacity:.6;padding:2px;border-radius:3px;cursor:pointer;margin-left:1px;}
 .pmvnf-tag .x:hover{opacity:1;background:rgba(255,255,255,0.12);}
 .pmvnf-tag.pos{background:rgba(249,115,22,0.2);color:rgb(253,186,116);}
@@ -1463,21 +1482,10 @@
         const lbl = toggle.querySelector('.lbl');
         const chev = mk('button', 'pmvnf-toggle pmvnf-chev'); chev.type = 'button';
         chev.innerHTML = SVG_CHEV; chev.title = 'Expand filters';
-        const power = mk('button', 'pmvnf-power'); power.type = 'button';
-        power.setAttribute('role', 'switch');
-        power.innerHTML = '<span class="knob"></span>';
-        power.onclick = () => setFilterEnabled(!NF.enabled);
-        top.append(search, power, toggle, chev);
+        top.append(search, toggle, chev);
         const topChips = mk('div', 'pmvnf-chips');
         wrap.append(top, topChips);
-        NF.renderPower = () => {
-            power.setAttribute('aria-checked', NF.enabled ? 'true' : 'false');
-            power.title = NF.enabled
-                ? 'Filter on \u2014 click to turn off (settings are kept)'
-                : 'Filter off \u2014 click to turn on';
-            wrap.dataset.off = NF.enabled ? '0' : '1';
-        };
-        NF.renderPower();
+
         if (header) header.insertBefore(wrap, nativeWrapper.nextSibling); else document.body.prepend(wrap);
 
         // Drawer.
@@ -1519,7 +1527,16 @@
             list.forEach((term, i) => {
                 const c = mk('span', `pmvnf-tag ${kind.replace('d', '')} ${extraCls}`.trim());
                 if (kind.endsWith('neg')) { const ic = mk('span'); ic.innerHTML = SVG_BAN; ic.style.display = 'inline-flex'; c.appendChild(ic); }
-                c.appendChild(mk('span', 'txt', kind.endsWith('raw') ? term : '#' + term));
+                const isRaw = kind.endsWith('raw');
+                const word = !isRaw && PMVX.isWordTerm(term);
+                const txt = mk('span', 'txt', isRaw ? term : '#' + (word ? `"${PMVX.termLabel(term)}"` : term));
+                c.appendChild(txt);
+                // Click the term: whole word only ("term") on/off.
+                if (!isRaw) {
+                    txt.style.cursor = 'pointer';
+                    txt.title = word ? 'Whole word only — click to match it anywhere in the text' : 'Matches anywhere in the text — click to match it only as a whole word';
+                    txt.onclick = () => { list[i] = word ? term.slice(1) : '=' + term; afterChipChange(kind); };
+                }
                 const x = mk('span', 'x'); x.innerHTML = SVG_X; x.title = 'Remove';
                 x.onclick = () => { list.splice(i, 1); afterChipChange(kind); };
                 c.appendChild(x);
@@ -1570,7 +1587,7 @@
         inpNeg.placeholder = 'Hide videos with… (title, tag or performer)'; inpNeg.dataset.pmvnfKind = 'neg';
         inpNeg.addEventListener('keydown', e => e.stopPropagation(), true);
         const negChips = mk('div', 'pmvnf-chips');
-        secNeg.append(inpNeg, negChips, mk('div', 'pmvnf-hint', 'Enter adds · Enter in an empty field applies · Backspace in an empty field removes the last one'));
+        secNeg.append(inpNeg, negChips, mk('div', 'pmvnf-hint', 'Enter adds · Enter in an empty field applies · Backspace in an empty field removes the last one · "quotes" or a click on a term: whole word only'));
         body.appendChild(secNeg);
 
         // Default terms (always active).
@@ -1671,7 +1688,23 @@
         const actions = mk('div', 'pmvnf-actions');
         const counter = mk('span'); counter.id = 'pmvnf-counter';
         const closeBtn = mk('button', 'pmvnf-close', 'Close ✕'); closeBtn.type = 'button'; closeBtn.onclick = () => setOpen(false);
-        actions.append(counter, closeBtn);
+        // Copies the site-wide filter (header) into this one; staged like any edit, Filters applies it.
+        const syncBtn = mk('button', 'pmvnf-close', 'Sync from site filter'); syncBtn.type = 'button';
+        syncBtn.title = 'Copy the site-wide filter (terms, watched, playlist, rating, max length) into this one \u2014 then press Filters';
+        syncBtn.onclick = () => {
+            const g = PMVX.siteFilterSnapshot?.();
+            if (!g) { counter.textContent = 'Site filter not available'; return; }
+            UI.pos.splice(0, UI.pos.length, ...g.include);
+            UI.neg.splice(0, UI.neg.length, ...g.exclude);
+            UI.seen = g.seen === 'seen' || g.seen === 'unseen' ? g.seen : null;
+            pendingPlaylistMode = g.playlistMode || 'all';
+            pendingSelectedPlaylistIds = (g.playlistIds || []).slice();
+            pendingRatingMin = g.ratingMin ?? 0; pendingRatingMax = g.ratingMax ?? 100;
+            pendingDurationMin = 0; pendingDurationMax = g.maxMinutes > 0 ? g.maxMinutes * 60 : Infinity;
+            renderTagChips(); renderSeen(); updatePlBtn(); ratSlider.render(); durSlider.render(); refreshPendingMarks();
+            counter.textContent = 'Copied \u2014 press Filters to apply';
+        };
+        actions.append(counter, syncBtn, closeBtn);
         panel.appendChild(actions);
 
         NF.applyAll = () => applyAll();
@@ -1750,6 +1783,7 @@
         PMVX.clearActed();
         // Applying implies the filter switch turns on.
         if (!NF.enabled) setFilterEnabled(true, { refilter: false });
+        try { NF.renderPower?.(); } catch {}
 
         // Commit staged playlist-mode / saved-search button values only on Enter/Filter.
         BTN.playlistMode = pendingPlaylistMode;
@@ -2652,7 +2686,7 @@
             const hit = fracMemo.get(key);
             if (hit) return hit;
             const matchIdx = new Set();
-            entry.tags.forEach((t, i) => { if (t.includes(term)) matchIdx.add(i); });
+            entry.tags.forEach((t, i) => { if (PMVX.termMatch(t, term)) matchIdx.add(i); });
             let n = 0;
             if (matchIdx.size) {
                 for (const idx of entry.vids) {
@@ -2678,14 +2712,14 @@
                 if (o && ((mineRange.min != null && o.frac < mineRange.min) || (mineRange.max != null && o.frac > mineRange.max))) out.push('mine');
             }
             for (const { term, max } of PB.tokens.neg) {
-                if (desc && desc.includes(term)) { out.push('neg:' + term); continue; }
+                if (desc && PMVX.termMatch(desc, term)) { out.push('neg:' + term); continue; }
                 if (!entry) continue;
                 const f = fraction(id, entry, term);
                 if (f.n > 0 && f.frac > max) out.push('neg:' + term);
             }
             if (entry) {
                 for (const { term, min } of PB.tokens.pos) {
-                    if (desc && desc.includes(term)) continue;
+                    if (desc && PMVX.termMatch(desc, term)) continue;
                     const f = fraction(id, entry, term);
                     if (!(min == null ? f.n > 0 : (f.n > 0 && f.frac >= min))) out.push('pos:' + term);
                 }
@@ -2729,7 +2763,7 @@
             }
             for (const { term, max } of PB.tokens.neg) {
                 // A description hit applies to the whole playlist: no threshold.
-                if (desc && desc.includes(term)) { hits.push('description: ' + term); continue; }
+                if (desc && PMVX.termMatch(desc, term)) { hits.push('description: ' + term); continue; }
                 if (!entry) continue;
                 const f = fraction(id, entry, term);
                 if (f.n > 0 && f.frac > max) {
@@ -2739,7 +2773,7 @@
             if (hits.length) return { state: 'fail', hits };
             if (pending) return { state: 'pending', hits: [] };
             for (const { term, min } of PB.tokens.pos) {
-                if (desc && desc.includes(term)) continue;
+                if (desc && PMVX.termMatch(desc, term)) continue;
                 const f = entry ? fraction(id, entry, term) : { n: 0, total: 0, frac: 0 };
                 const ok = min == null ? f.n > 0 : (f.n > 0 && f.frac >= min);
                 if (!ok) return { state: 'fail', hits: [min == null ? 'no ' + term : `${term} ${pct(f.frac)} (${f.n}/${f.total}, min ${pct(min)})`] };
@@ -3159,8 +3193,11 @@
                 inp.placeholder = placeholder; inp.setAttribute('list', dl.id);
                 inp.addEventListener('focus', refreshSuggest);
                 const add = () => {
-                    const term = inp.value.trim().replace(/^#/, '').toLowerCase();
-                    if (!term) return;
+                    let term = PMVX.plainQuotes(inp.value).trim().replace(/^#/, '').toLowerCase();
+                    // "quoted": whole word only.
+                    const q = term.match(/^["'](.+)["']$/);
+                    if (q) term = '=' + q[1].trim();
+                    if (!term || term === '=') return;
                     const list = PB.terms[kind];
                     if (!list.some(t => t.term === term)) list.push(kind === 'neg' ? { term, max: 0 } : { term, min: null });
                     // A tag can't be both required and excluded.
@@ -3203,7 +3240,7 @@
                             ic.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>';
                             c.appendChild(ic);
                         }
-                        c.appendChild(el('span', 'txt', '#' + t.term));
+                        c.appendChild(el('span', 'txt', '#' + (PMVX.isWordTerm(t.term) ? `"${PMVX.termLabel(t.term)}"` : t.term)));
                         const th = thrText(kind, t);
                         if (th) c.appendChild(el('span', 'thr', th));
                         const x = el('span', 'x');
@@ -3236,7 +3273,8 @@
                 const cur = neg ? Math.round((t.max || 0) * 100) : Math.round((t.min ?? 0) * 100);
                 const box = el('div', 'pmvpb-edit ' + editing.kind);
                 const head = el('div', 'pmvpb-edit-head');
-                head.innerHTML = `<b>#${t.term}</b> — ${neg ? 'hide if more than' : 'require at least'} <span class="val">${cur}%</span> of the videos to have this tag`;
+                head.innerHTML = `<b></b> — ${neg ? 'hide if more than' : 'require at least'} <span class="val">${cur}%</span> of the videos to have this tag`;
+                head.querySelector('b').textContent = '#' + (PMVX.isWordTerm(t.term) ? `"${PMVX.termLabel(t.term)}"` : t.term);
                 const r = el('input'); r.type = 'range'; r.min = '0'; r.max = '100'; r.step = '1'; r.value = String(cur);
                 const val = head.querySelector('.val');
                 const presets = el('div', 'pmvpb-chips');
@@ -3255,6 +3293,18 @@
                 const hint = el('div', 'pmvpb-hint', neg
                     ? 'Without a share, a single video with this tag hides the playlist.'
                     : 'Without a share, a single video with this tag is enough.');
+                // Whole word only: "=ch" matches the tag "ch" or "big ch", not "challenge".
+                const isWord = PMVX.isWordTerm(t.term);
+                const wordChip = chip('Whole word', isWord ? 'Only tags containing this as a separate word — click to match anywhere' : 'Match only as a separate word (ch, not challenge)', () => {
+                    const next = isWord ? t.term.slice(1) : '=' + t.term;
+                    if (PB.terms[editing.kind].some(o => o !== t && o.term === next)) return;
+                    t.term = next;
+                    editing = { kind: editing.kind, term: next };
+                    fracMemo.clear();
+                    applyTerms();
+                });
+                wordChip.classList.toggle('active', isWord);
+                presets.appendChild(wordChip);
                 box.append(head, r, presets, hint);
                 editorHost.appendChild(box);
             };

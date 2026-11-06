@@ -222,7 +222,7 @@
     // ---------------------------------------------------------------------
     // Filters only cards already loaded; the observer below re-filters new batches.
 
-    PMVX.filterChecks.push(() => playlistFilterMode !== 'any' && isFilterPage());
+    PMVX.filterChecks.push(() => playlistFilterMode !== 'any' && isFilterPage() && !PMVX.playlistFilterExempt());
 
     function setMode(mode) {
         playlistFilterMode = mode;
@@ -268,8 +268,10 @@
         const cards = getAllCards();
         let visible = 0, hidden = 0;
 
+        // Off on the favourites views: everything there would count as "in a playlist" or not.
+        const off = playlistFilterMode === 'any' || PMVX.playlistFilterExempt();
         cards.forEach(card => {
-            if (playlistFilterMode === 'any') {
+            if (off) {
                 card.removeAttribute(HIDE_ATTR);
                 return;
             }

@@ -23,9 +23,9 @@
 <td width="33%" valign="top"><b>Up next queue</b><br>Your own queue next to Recommended, auto-refilled with videos that match your taste.</td>
 </tr>
 <tr>
-<td valign="top"><b>Filter by tags</b><br>Hide videos and even whole playlists by tags, performers, rating, length or watch status.</td>
+<td valign="top"><b>Filter by tags</b><br>Hide videos and even whole playlists by tags, performers, rating, length or watch status — and see what was hidden, and why.</td>
 <td valign="top"><b>Better playlist pages</b><br>Search tags and performers in the queue, sort it, and skip filtered videos while playing.</td>
-<td valign="top"><b>Keyboard first</b><br>Remap every hotkey, bind keys to playlists, and jump anywhere with <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd>.</td>
+<td valign="top"><b>Tags and models in one click</b><br>Vote on a video's tags and models, or add new ones, from a compact menu. Remappable hotkeys and <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd> too.</td>
 </tr>
 </table>
 
@@ -41,15 +41,15 @@ Updates arrive automatically through your userscript manager.
 
 ### Your playlists, everywhere
 
-Every video shows whether it is already in one of your playlists, and adding or removing it takes one click — under the player, on any card, or from the right-click menu.
+Every video shows whether it is already in one of your playlists, and adding or removing it takes one click — under the player or on any card.
 
 ![Playlist buttons under the player](docs/screenshots/03-playlist-buttons.png)
-*① Your playlists under the player: one click adds or removes the video. ② The site's own Add to playlist button lights up when the video is saved.*
+*① Reject, Tags and Models, right in the site's own button row. ② Your playlists: one click adds or removes the video. ③ The site's own Add to playlist button lights up when the video is saved.*
 
 <table>
 <tr>
-<td width="50%" valign="top"><img src="docs/screenshots/04-recommended.png" alt="Recommended with playlist badges"><br><sub>① All / In playlist / Not in playlist. ② Playlist badge on saved videos. ③ Add to Up next, add to favourites. ④ Reject, kept apart from the other buttons.</sub></td>
-<td width="50%" valign="top"><img src="docs/screenshots/17-context-menu.png" alt="Right-click menu on a video card"><br><sub>① Right-click any video card to toggle it in your playlists or open it in a new tab.</sub><br><br><img src="docs/screenshots/19-sidebar.png" alt="Saved content in the sidebar" width="220"><br><sub>① <i>Saved content</i> in the site's sidebar: your favourites and every playlist, with its size.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/04-recommended.png" alt="Recommended with playlist badges"><br><sub>① All / In playlist / Not in playlist. ② Playlist badge on saved videos. ③ Play next, add to a playlist, add to favourites. ④ Reject, in the corner of the thumbnail.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/20-tag-menu.png" alt="Compact tag menu"><br><sub>① The tag menu: the video's tags with their votes (click to upvote, again to take it back), recent tags, and autocomplete for new ones. Tags your filter excludes show in red. The same menu exists for models.</sub><br><br><img src="docs/screenshots/19-sidebar.png" alt="Saved content in the sidebar" width="220"><br><sub>① <i>Saved content</i> in the site's sidebar: your favourites and every playlist, with its size, rating and views.</sub></td>
 </tr>
 </table>
 
@@ -58,7 +58,10 @@ Every video shows whether it is already in one of your playlists, and adding or 
 
 - Badges on the home, browse, search and profile grids, *Recommended*, *More from* and notifications.
 - **Favourites from any card**: the heart on a card adds or removes the video from your site favourites without opening it.
-- **Reject list**: pick one playlist as your reject list. Adding a video there removes it from every other playlist; rejected videos show in red, and cards get a reject button at the far end of their row. While a filter is on, it asks for a second click first.
+- **Reject list**: pick one playlist as your reject list. Adding a video there removes it from every other playlist; rejected videos show in red. Cards get a ⊘ in the corner of the thumbnail, and the player a ⊘ in its button row. While a filter is on, a card asks for a second click first.
+- **Tag after reject**: after a reject, a small menu asks why — add a tag to the video on the site in a few keystrokes (can be turned off).
+- **Tags and models**: the site's *Vote on Tags* opens the compact menu instead (<kbd>Shift</kbd>+click for the original); a second menu does the same for models.
+- On playlist pages the button row also gets *open in a new tab* for the video that is playing.
 - Saving, removing or rejecting never makes a card vanish under your cursor: filters pick the change up the next time you apply them.
 - **Watch history**: a video counts as watched at 85 % or when it ends — usable in the filters.
 - Playlists are cached locally and kept in sync across tabs; refresh any time with <kbd>R</kbd>.
@@ -68,10 +71,10 @@ Every video shows whether it is already in one of your playlists, and adding or 
 
 ### A HUD for fullscreen
 
-Move the mouse to the bottom of the screen — or press <kbd>I</kbd> — and everything about the video is there: rating, tags and performers, your playlist buttons, the timeline and what plays next. Click a tag to require it in your filter, click again to exclude it.
+Move the mouse to the bottom of the screen — or press <kbd>I</kbd> — and everything about the video is there: title, rating, tags and performers, your playlist buttons, the timeline and what plays next. Click a tag to require it in your filter, click again to exclude it.
 
 ![Fullscreen HUD](docs/screenshots/07-fullscreen-hud.png)
-*① Click a tag to require, exclude or clear it in the filter. ② Playlist buttons. ③ Timeline thumbnails. ④ Next video in Up next.*
+*① The button row, including reject, tags and models. ② Click a tag to require, exclude or clear it in the filter. ③ Playlist buttons. ④ Timeline thumbnails. With a queue, the next video and how many are left sit on the right.*
 
 A frame preview follows the mouse along the seek bar, in normal and fullscreen mode.
 
@@ -89,17 +92,18 @@ A frame preview follows the mouse along the seek bar, in normal and fullscreen m
 
 ### Up next, your way
 
-Line up videos from any card, the right-click menu or a hotkey. The queue lives next to *Recommended* and in the header, survives reloads, and <kbd>N</kbd> follows it.
+Line up videos from any card or with a hotkey. The queue lives next to *Recommended* and in the header, survives reloads, and <kbd>N</kbd> follows it.
 
-![Up next queue next to the player](docs/screenshots/05-up-next.png)
-*① The Up next queue sits above Recommended. ② It is also available from the header.*
+<img src="docs/screenshots/05-up-next.png" alt="Up next queue next to the player" width="440">
+
+*① The Up next queue sits above Recommended; rows show your playlists, and why your filter would hide a video. ② Clear the videos you already played.*
 
 <details>
 <summary>More</summary>
 
 - **Auto-refill** from Recommended, ranked by how well the tags match your own playlists, optionally through your filter.
 - **Fill from your playlists** by count, minimum rating, maximum length, unwatched only and tag.
-- Drag to reorder; played items stay as history.
+- Drag to reorder; played items stay as history (*Show more* for older ones), and the filter never removes anything from the queue.
 
 </details>
 
@@ -107,20 +111,28 @@ Line up videos from any card, the right-click menu or a hotkey. The queue lives 
 
 One filter for the whole site, from the funnel in the header: exclude or require terms in titles, uploaders, tags and performers, and narrow by rating, length, watch status, playlists or one of your saved searches.
 
-<img src="docs/screenshots/01-header.png" alt="Header buttons" width="600">
+<img src="docs/screenshots/01-header.png" alt="Header buttons" width="620">
 
-*① Site-wide video filter. ② Up next queue, with the number of queued videos.*
+*① How many videos the filter hides on this page — click for the list. ② Site-wide video filter. ③ Up next, with the number of queued videos.*
+
+<img src="docs/screenshots/21-hidden-list.png" alt="Videos hidden by the filter, grouped by reason" width="448">
+
+*Everything the filter hid on this page, grouped by reason; open a group to see the videos.*
 
 ![Video grid with playlist badges and filter buttons](docs/screenshots/16-browse-grid.png)
-*① Right in the site's own filter menu: only videos in, or not in, your playlists — and which playlists count. It applies with the site's* Apply *and is stored with your saved filters. ② Playlist badge on saved videos. ③ Open in a new tab, add to Up next, add to favourites. ④ Reject.*
+*① Right in the site's own filter menu: only videos in, or not in, your playlists — and which playlists count. It applies with the site's* Apply *and is stored with your saved filters. ② Playlist badge on saved videos. ③ Open in a new tab, play next, add to a playlist, add to favourites. ④ Reject.*
+
+Your saved searches sit right next to *More Filters*, and on the homepage the site's filters, page and scroll position come back when you return with Back.
 
 <details>
 <summary>The filter panel</summary>
 
 ![Site-wide filter panel](docs/screenshots/02-filter-panel.png)
-*① The funnel in the header opens the filter. ② Terms, rating, length, playlists and watched status. ③ On/off switch.*
+*① The funnel in the header opens the filter. ② On/off switch. ③ Copy the filter from the playlist pages.*
 
-- Quoted phrases are supported; an on/off switch keeps your settings.
+- Terms, rating, length, playlists, watched status and one of your saved searches; an on/off switch keeps your settings.
+- Put a term in quotes, or click it, to match only the whole word: `"ch"` no longer hits *challenge*.
+- In / not in playlist is ignored on a playlist's own page and on your favourites, where it would hide everything.
 - Pagination helpers: larger pages, one continuous grid, paged mode while filtering, keep loading until enough results remain, skip near-empty pages.
 
 </details>
@@ -131,15 +143,15 @@ The queue search finally looks at **tags, performers and descriptions**, not jus
 
 <table>
 <tr>
-<td width="50%" valign="top"><img src="docs/screenshots/12-playlist-queue.png" alt="Playlist queue with search, filter switch and sort"><br><sub>① Sort the queue. ② Search titles, tags and performers. ③ Filter on/off.</sub></td>
-<td width="50%" valign="top"><img src="docs/screenshots/13-playlist-filters.png" alt="Filter drawer over the queue"><br><sub>① The filter drawer over the queue.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/12-playlist-queue.png" alt="Playlist queue with search, filters and sort"><br><sub>① Sort the queue. ② Search titles, tags and performers. ③ Apply the filters; the badge counts the active ones.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/13-playlist-filters.png" alt="Filter drawer over the queue"><br><sub>① The filter drawer over the queue. <i>Sync from site filter</i> copies the site-wide filter into it.</sub></td>
 </tr>
 </table>
 
 <details>
 <summary>More</summary>
 
-- Drawer: excluded and required tags, default terms that apply in every playlist, in / not in playlist, watched/unwatched, rating and duration sliders, saved search. Changes apply on <kbd>Enter</kbd> or *Filters*.
+- Drawer: excluded and required tags, default terms that apply in every playlist, in / not in playlist (the playlist you are viewing does not count), watched/unwatched, rating and duration sliders, saved search. Changes apply on <kbd>Enter</kbd> or *Filters*.
 - Search syntax: `-term`, `"two words"`, `!in`, `!out`, `!in:name`, `!out:name`, `!seen`, `!unseen`.
 - **Filter-aware playback**: next and auto-advance skip hidden videos, and the *Up Next* preview shows the real next video. <kbd>N</kbd> follows the sort order.
 - *Fetch all* loads the complete playlist; deep links (`?index=N`) open at the right video even beyond the first page.
@@ -194,8 +206,8 @@ Quick options live in a **PMVH Extended** section inside the site's own *Setting
 
 <table>
 <tr>
-<td width="50%" valign="top"><img src="docs/screenshots/09-settings.png" alt="PMVH Extended section in the site's Settings dialog"><br><sub>① Performance mode. ② Seekbar preview source. ③ Volume lock. ④ Reject list. ⑤ A shortcut to the full settings page.</sub></td>
-<td width="50%" valign="top"><img src="docs/screenshots/18-full-settings.png" alt="PMVH Extended on the site's full Settings page"><br><sub>① Hotkey editor. ② Short names and colours for your playlists. ③ Settings backup.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/09-settings.png" alt="PMVH Extended section in the site's Settings dialog"><br><sub>① Performance mode. ② Seekbar preview source. ③ Volume lock. ④ Reject list. ⑤ Tag after reject. ⑥ A shortcut to the full settings page.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/18-full-settings.png" alt="PMVH Extended on the site's full Settings page"><br><sub>① Hotkey editor. ② Short names and colours for your playlists. ③ Hide sidebar items you never use. ④ Settings backup.</sub></td>
 </tr>
 </table>
 
@@ -212,6 +224,7 @@ Quick options live in a **PMVH Extended** section inside the site's own *Setting
 
 - **Volume lock** keeps the player unmuted at 100 % (off by default).
 - **Playlist names & colours**: give long playlist names a short label for the buttons, badges and sidebar, and pick their colour.
+- **Sidebar**: hide any item or group of the site's sidebar.
 - **Export / import** all settings as JSON — copy, download or load a file.
 
 ## Privacy and fair use
