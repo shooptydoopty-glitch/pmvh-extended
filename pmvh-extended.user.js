@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.2.46
+// @version      1.2.47
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -140,6 +140,7 @@ PMVX.playlistFilterExempt = () => {
 // The playlist whose page this is (its own videos are always "in" it), or null.
 PMVX.currentPlaylistPageId = () => location.pathname.match(/^\/playlists\/([a-f0-9]{24})/i)?.[1] || null;
 
+PMVX.apiTaps = [];
 PMVX.filterChecks = [];
 PMVX.anyCardFilterActive = () => PMVX.filterChecks.some(fn => { try { return !!fn(); } catch { return false; } });
 
@@ -3959,7 +3960,7 @@ whenBody(() => {
 
             State.playlists.clear();
             cached.playlists.forEach(p => {
-                State.playlists.set(p.id, { id: p.id, name: p.name, ids: new Set(p.ids || []), stats: p.stats || null });
+                State.playlists.set(p.id, { id: p.id, name: p.name, ids: new Set(p.ids || []) });
             });
             State.cacheLoadedAt = cached.updatedAt;
             State.ready = true;
@@ -3989,7 +3990,7 @@ whenBody(() => {
             const data = {
                 updatedAt: Date.now(),
                 playlists: [...State.playlists.values()].map(p => ({
-                    id: p.id, name: p.name, ids: [...p.ids], stats: p.stats || null
+                    id: p.id, name: p.name, ids: [...p.ids]
                 }))
             };
             localStorage.setItem(CACHE_KEY, JSON.stringify(data));
@@ -3997,16 +3998,6 @@ whenBody(() => {
             // Notify the other modules that the cache is ready.
             notifyCacheReady();
         } catch {}
-    }
-
-    // Rating and views of an own playlist, from the list response (the API has no follower count).
-    function playlistStats(p) {
-        return {
-            // Without votes the site's bayesian rating is a flat 50 %: not shown.
-            rating: Number.isFinite(p?.bayesianRating) && ((p.likes || 0) + (p.dislikes || 0)) > 0 ? p.bayesianRating : null,
-            views: Number.isFinite(p?.views) ? p.views : 0,
-            isPublic: p?.isPublic !== false,
-        };
     }
 
     function cacheIsFresh() {
@@ -4077,24 +4068,8 @@ whenBody(() => {
         return ownerIdPromise;
     }
 
-    // A fresh cache from before stats were stored: one list request fills them in (once per page load).
-    let statsFillDone = false;
-    async function fillPlaylistStats() {
-        if (statsFillDone || ![...State.playlists.values()].some(p => !p.stats)) return;
-        statsFillDone = true;
-        try {
-            const ownerId = await getOwnerId();
-            if (!ownerId) return;
-            const j = await api(`/api/playlists?owner=${ownerId}&limit=100`);
-            const list = j?.data || j?.playlists || [];
-            list.forEach(p => { const e = State.playlists.get(p._id); if (e) e.stats = playlistStats(p); });
-            saveCache();
-            try { injectSavedNav(); } catch {}
-        } catch {}
-    }
-
     async function refreshUserPlaylists({ force = false } = {}) {
-        if (!force && State.ready && cacheIsFresh()) { fillPlaylistStats(); return; }
+        if (!force && State.ready && cacheIsFresh()) return;
         if (State.refreshPromise) return State.refreshPromise;
 
         State.refreshPromise = (async () => {
@@ -4125,7 +4100,7 @@ whenBody(() => {
                 });
                 indexVideoDetails(videoDetails);
 
-                return { id: p._id, name: p.name || p.title || p._id, ids, stats: playlistStats(p) };
+                return { id: p._id, name: p.name || p.title || p._id, ids };
             }
 
             const nextPlaylists = new Map();
@@ -4368,6 +4343,11 @@ whenBody(() => {
             const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
             // One parse shared by all handlers below.
             const jsonP = /\/api\//.test(url) ? pmvResJson(res) : null;
+
+            // Extension point: PMVX.apiTaps listeners get (url, json) of every API response.
+            if (jsonP && PMVX.apiTaps.length) {
+                jsonP.then(json => PMVX.apiTaps.forEach(fn => { try { fn(url, json); } catch {} })).catch(() => {});
+            }
 
             // Learn slug to _id mappings from any API response.
             if (jsonP) {
@@ -5247,10 +5227,9 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         else location.href = href;
     }
 
-    const NAV_EYE_SVG = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-1px;"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></svg>';
-    const NAV_LOCK_SVG = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-1px;"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
-    const compactCount = n => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M'
-        : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K' : String(n);
+    // Extension points for builds that add to the sidebar rows: navRowHook(link, playlist) and
+    // navRowSig(playlist) (part of the redraw signature); refreshSavedNav redraws.
+    PMVX.refreshSavedNav = () => { try { injectSavedNav(); } catch {} };
 
     function savedNavLink(template, href, label, icon, extraTitle) {
         const a = template.cloneNode(true);
@@ -5289,7 +5268,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             playlistSortIndex(a.name) - playlistSortIndex(b.name) || (a.name || '').localeCompare(b.name || ''));
         // Logged out (no playlists known): no group.
         if (!playlists.length) { existing?.remove(); return; }
-        const sig = savedNavOpen + '|' + playlists.map(p => p.id + ':' + getPlaylistDisplayName(p.name, p.id) + ':' + p.ids.size + ':' + JSON.stringify(p.stats || null)).join('|');
+        const sig = savedNavOpen + '|' + playlists.map(p => p.id + ':' + getPlaylistDisplayName(p.name, p.id) + ':' + p.ids.size + ':' + (PMVX.navRowSig?.(p) || '')).join('|');
         if (existing && existing.previousElementSibling === exploreGroup && savedNavSig === sig) return;
 
         const headRowTpl = exploreToggle.closest('div.flex.items-center.justify-between');
@@ -5348,24 +5327,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
                 n.textContent = String(p.ids.size);
                 n.style.cssText = 'flex-shrink:0;font-size:11px;color:rgb(107,114,128);font-variant-numeric:tabular-nums;';
                 a.appendChild(n);
-                // Second line: rating and views (or "private").
-                const st = p.stats;
-                const label = a.querySelector('span.flex-1');
-                if (st && label) {
-                    const nameEl = document.createElement('span');
-                    nameEl.textContent = label.textContent;
-                    nameEl.style.cssText = 'display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-                    const sub = document.createElement('span');
-                    sub.style.cssText = 'display:flex;gap:8px;margin-top:1px;font-size:10.5px;line-height:1.2;color:rgb(107,114,128);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;';
-                    const parts = [];
-                    if (st.rating !== null) parts.push(`<span style="color:rgba(250,204,21,.75);">\u2605 ${Math.round(st.rating)}%</span>`);
-                    if (st.isPublic) parts.push(`<span>${NAV_EYE_SVG} ${escHtml(compactCount(st.views))}</span>`);
-                    else parts.push(`<span>${NAV_LOCK_SVG} private</span>`);
-                    sub.innerHTML = parts.join('');
-                    label.textContent = '';
-                    label.append(nameEl, sub);
-                    a.title += ` \u2014 ${st.rating !== null ? Math.round(st.rating) + '% rating, ' : ''}${st.isPublic ? st.views.toLocaleString() + ' views' : 'private'}`;
-                }
+                try { PMVX.navRowHook?.(a, p); } catch {}
                 items.appendChild(a);
             });
             group.appendChild(items);

@@ -7,7 +7,7 @@ The images in this folder were taken in headless Chromium (Playwright) at 1440×
 - The built `pmvh-extended.user.js` was injected at document start, like a userscript manager does, with the default Balanced performance mode.
 - All requests that would change account data were blocked; only GET requests reached the site. Up next is stored in the browser only.
 - Thumbnails, avatars and player frames are blurred heavily with injected CSS, and video streams were not loaded. Sponsored cards and content-warning labels were removed from the page.
-- Older player shots use a safe video on a checked frame, left unblurred; newer ones blur the player and its timeline thumbnails as well.
+- The player shots use a safe video on a checked frame, left unblurred, as are its own timeline thumbnails in the HUD; the fullscreen HUD shot shows that video filling the screen.
 - Video titles, tags, song titles and uploader names were replaced with neutral demo text in the page before each screenshot, and the account's own playlist names in the API responses (display only).
 - Ads were hidden and every image was checked by hand before committing.
 

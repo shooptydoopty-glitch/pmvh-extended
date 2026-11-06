@@ -120,6 +120,7 @@ PMVX.playlistFilterExempt = () => {
 // The playlist whose page this is (its own videos are always "in" it), or null.
 PMVX.currentPlaylistPageId = () => location.pathname.match(/^\/playlists\/([a-f0-9]{24})/i)?.[1] || null;
 
+PMVX.apiTaps = [];
 PMVX.filterChecks = [];
 PMVX.anyCardFilterActive = () => PMVX.filterChecks.some(fn => { try { return !!fn(); } catch { return false; } });
 

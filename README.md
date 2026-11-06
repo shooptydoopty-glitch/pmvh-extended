@@ -49,7 +49,7 @@ Every video shows whether it is already in one of your playlists, and adding or 
 <table>
 <tr>
 <td width="50%" valign="top"><img src="docs/screenshots/04-recommended.png" alt="Recommended with playlist badges"><br><sub>① All / In playlist / Not in playlist. ② Playlist badge on saved videos. ③ Play next, add to a playlist, add to favourites. ④ Reject, in the corner of the thumbnail.</sub></td>
-<td width="50%" valign="top"><img src="docs/screenshots/20-tag-menu.png" alt="Compact tag menu"><br><sub>① The tag menu: the video's tags with their votes (click to upvote, again to take it back), recent tags, and autocomplete for new ones. Tags your filter excludes show in red. The same menu exists for models.</sub><br><br><img src="docs/screenshots/19-sidebar.png" alt="Saved content in the sidebar" width="220"><br><sub>① <i>Saved content</i> in the site's sidebar: your favourites and every playlist, with its size, rating and views.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/20-tag-menu.png" alt="Compact tag menu"><br><sub>① The tag menu: the video's tags with their votes (click to upvote, again to take it back), recent tags, and autocomplete for new ones. Tags your filter excludes show in red. The same menu exists for models.</sub><br><br><img src="docs/screenshots/19-sidebar.png" alt="Saved content in the sidebar" width="220"><br><sub>① <i>Saved content</i> in the site's sidebar: your favourites and every playlist, with its size.</sub></td>
 </tr>
 </table>
 
@@ -74,7 +74,7 @@ Every video shows whether it is already in one of your playlists, and adding or 
 Move the mouse to the bottom of the screen — or press <kbd>I</kbd> — and everything about the video is there: title, rating, tags and performers, your playlist buttons, the timeline and what plays next. Click a tag to require it in your filter, click again to exclude it.
 
 ![Fullscreen HUD](docs/screenshots/07-fullscreen-hud.png)
-*① The button row, including reject, tags and models. ② Click a tag to require, exclude or clear it in the filter. ③ Playlist buttons. ④ Timeline thumbnails. With a queue, the next video and how many are left sit on the right.*
+*① The button row, including reject, tags and models. ② Click a tag to require, exclude or clear it in the filter. ③ Playlist buttons. ④ Timeline thumbnails. With an Up next queue, how many videos are left sits on the right.*
 
 A frame preview follows the mouse along the seek bar, in normal and fullscreen mode.
 
