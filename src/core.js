@@ -121,6 +121,14 @@ PMVX.playlistFilterExempt = () => {
 PMVX.currentPlaylistPageId = () => location.pathname.match(/^\/playlists\/([a-f0-9]{24})/i)?.[1] || null;
 
 PMVX.apiTaps = [];
+// Content flags [API key, label]: the site's own moderation list first (Nudity = hasExplicitContent),
+// then three that only some lists carry. Order matters: the flag cache stores them as bits.
+PMVX.contentFlags = [
+    ['hasExplicitContent', 'Nudity'], ['hasGayContent', 'Gay'], ['hasTransContent', 'Trans'],
+    ['hasExtremeContent', 'Extreme'], ['hasVoiceOver', 'Voice-over'], ['isRemix', 'Remix'],
+    ['isPromotional', 'Promo'], ['seizureWarning', 'Seizure warning'],
+    ['hasFunscript', 'Funscript'], ['isVertical', 'Vertical'], ['hasMusicData', 'Music'],
+];
 PMVX.filterChecks = [];
 PMVX.anyCardFilterActive = () => PMVX.filterChecks.some(fn => { try { return !!fn(); } catch { return false; } });
 

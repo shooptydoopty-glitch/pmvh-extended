@@ -27,6 +27,7 @@
         ratingMax: 100,
         durationMin: 0, // seconds; Infinity max = no cap
         durationMax: Infinity,
+        flags: {}, // content flag key -> 'out' (hide) | 'in' (only these)
     };
 
     // Staged values: panel controls only change these; onOwnInput() (Enter / Filter button)
@@ -39,6 +40,7 @@
     let pendingRatingMax = BTN.ratingMax;
     let pendingDurationMin = BTN.durationMin;
     let pendingDurationMax = BTN.durationMax;
+    let pendingFlags = { ...BTN.flags };
     // Default terms are staged the same way and committed in onOwnInput().
     let pendingDefaultTerms = '';
     // Assigned in buildOwnInput(); declared here so onOwnInput() can call them.
@@ -46,6 +48,7 @@
     let updateSsBtn = () => {};
     let updateRatBtn = () => {};
     let updateDurBtn = () => {};
+    let updateFlagBtns = () => {};
     let updateDefaultsBtn = () => {};
 
 
@@ -91,6 +94,7 @@
                 durationMin: BTN.durationMin,
                 // Infinity is not valid JSON; -1 stands for 'no cap'.
                 durationMax: Number.isFinite(BTN.durationMax) ? BTN.durationMax : -1,
+                flags: BTN.flags,
             }));
         } catch {}
     }
@@ -111,6 +115,7 @@
             if (typeof s.ratingMax === 'number') BTN.ratingMax = s.ratingMax;
             if (typeof s.durationMin === 'number') BTN.durationMin = s.durationMin;
             if (typeof s.durationMax === 'number') BTN.durationMax = s.durationMax < 0 ? Infinity : s.durationMax;
+            if (s.flags && typeof s.flags === 'object') BTN.flags = { ...s.flags };
         } catch {}
         // Align pending values with the loaded state so the UI shows no unapplied changes.
         pendingPlaylistMode = BTN.playlistMode;
@@ -121,9 +126,25 @@
         pendingRatingMax = BTN.ratingMax;
         pendingDurationMin = BTN.durationMin;
         pendingDurationMax = BTN.durationMax;
+        pendingFlags = { ...BTN.flags };
     }
 
     loadSettings();
+
+    // Content flags (the same list as the site-wide filter; hud.js fills PMVX.contentFlags).
+    const sameFlags = (a, b) => { const ka = Object.keys(a).filter(k => a[k]), kb = Object.keys(b).filter(k => b[k]); return ka.length === kb.length && ka.every(k => a[k] === b[k]); };
+    const flagKeysActive = () => Object.keys(BTN.flags).filter(k => BTN.flags[k]);
+    // True when a known flag rules the video out; an unknown flag never does.
+    function flagsReject(videoId) {
+        if (!videoId || typeof PMVX.videoFlag !== 'function') return false;
+        for (const key of flagKeysActive()) {
+            const v = PMVX.videoFlag(videoId, key);
+            if (v === undefined) continue;
+            if (BTN.flags[key] === 'out' && v) return true;
+            if (BTN.flags[key] === 'in' && !v) return true;
+        }
+        return false;
+    }
 
     // ---------------------------------------------------------------------
     // Default filter terms
@@ -202,6 +223,7 @@
             || BTN.savedSearch !== null
             || BTN.ratingMin > 0 || BTN.ratingMax < 100
             || BTN.durationMin > 0 || Number.isFinite(BTN.durationMax)
+            || flagKeysActive().length > 0
         );
     }
 
@@ -526,6 +548,8 @@
             if (dur > 0 && (dur < BTN.durationMin || dur > BTN.durationMax)) return false;
         }
 
+        if (flagsReject(videoId)) return false;
+
         if (BTN.savedSearch) {
             const ss = BTN.savedSearch;
             // excludeTags/gay/trans also work from text; rating and aspect need meta.
@@ -681,6 +705,8 @@
             if (dur2 > 0 && (dur2 < BTN.durationMin || dur2 > BTN.durationMax)) return false;
         }
 
+        if (flagsReject(vid2)) return false;
+
         if (BTN.savedSearch && meta2) {
             const ss = BTN.savedSearch;
             if (ss.excludeTags?.length) {
@@ -737,6 +763,7 @@
             || BTN.savedSearch !== null
             || BTN.ratingMin > 0 || BTN.ratingMax < 100
             || BTN.durationMin > 0 || Number.isFinite(BTN.durationMax)
+            || flagKeysActive().length > 0
         );
 
         // Auto-fetch: if the active filter needs videoMeta that is incomplete, start the Fetch all
@@ -747,8 +774,15 @@
             || BTN.durationMin > 0 || Number.isFinite(BTN.durationMax)
             || tokens.textInclude.length > 0
             || tokens.textExclude.length > 0
+            || flagKeysActive().length > 0
         );
         autoFetchAllIfNeeded(effectiveValue, hasOwnFilter, needsMeta);
+
+        // Content flags the playlist data does not carry: fetched in bulk, then the rows are judged again.
+        if (hasOwnFilter && flagKeysActive().length && typeof PMVX.fetchFlags === 'function') {
+            const ids = queueRows().map(r => getRowVideoId(r)).filter(Boolean);
+            PMVX.fetchFlags(ids, flagKeysActive(), () => applyFilter(NF.lastOwnValue, true));
+        }
 
         // All queue rows.
         const rows = queueRows();
@@ -1153,6 +1187,7 @@
             || pendingSavedSearchName !== BTN.savedSearchName
             || pendingRatingMin !== BTN.ratingMin || pendingRatingMax !== BTN.ratingMax
             || pendingDurationMin !== BTN.durationMin || pendingDurationMax !== BTN.durationMax
+            || !sameFlags(pendingFlags, BTN.flags)
             || pendingDefaultTerms !== NF.defaultTerms;
     }
 
@@ -1648,6 +1683,37 @@
         secSeen.appendChild(seenRow);
         body.appendChild(secSeen);
 
+        // Content flags: off -> hide (⊘) -> only these (✓) -> off; applied with Filters like the rest.
+        const secFlags = mk('div', 'pmvnf-sec');
+        secFlags.appendChild(mk('div', 'pmvnf-lab', 'Content'));
+        const flagRow = mk('div', 'pmvnf-chips');
+        const flagChips = (PMVX.contentFlags || []).map(([key, label]) => {
+            const c = mkChip(label, () => {
+                const f = { ...pendingFlags };
+                const m = f[key];
+                if (!m) f[key] = 'out'; else if (m === 'out') f[key] = 'in'; else delete f[key];
+                pendingFlags = f;
+                updateFlagBtns();
+            });
+            c.dataset.flag = key; c.dataset.label = label;
+            flagRow.appendChild(c);
+            return c;
+        });
+        updateFlagBtns = () => {
+            flagChips.forEach(c => {
+                const m = pendingFlags[c.dataset.flag];
+                c.className = 'pmvnf-chip' + (m ? ' active ' + m : '') + ((m || '') !== (BTN.flags[c.dataset.flag] || '') ? ' pending' : '');
+                c.textContent = (m === 'out' ? '\u2298 ' : m === 'in' ? '\u2713 ' : '') + c.dataset.label;
+                c.title = m === 'out' ? `Hides videos flagged ${c.dataset.label} \u2014 click: only these`
+                    : m === 'in' ? `Only videos flagged ${c.dataset.label} \u2014 click: off`
+                    : `Click: hide videos flagged ${c.dataset.label}`;
+            });
+            refreshPendingMarks();
+        };
+        updateFlagBtns();
+        secFlags.append(flagRow, mk('div', 'pmvnf-hint', 'Click: hide (\u2298) \u2192 only these (\u2713) \u2192 off. Flags the playlist data lacks are fetched once; videos whose flag is still unknown stay visible.'));
+        body.appendChild(secFlags);
+
         // Rating / duration.
         const secRat = mk('div', 'pmvnf-sec'); secRat.appendChild(mk('div', 'pmvnf-lab', 'Rating'));
         const ratSlider = mkDualSlider({ min: 0, max: 100,
@@ -1690,7 +1756,7 @@
         const closeBtn = mk('button', 'pmvnf-close', 'Close ✕'); closeBtn.type = 'button'; closeBtn.onclick = () => setOpen(false);
         // Copies the site-wide filter (header) into this one; staged like any edit, Filters applies it.
         const syncBtn = mk('button', 'pmvnf-close', 'Sync from site filter'); syncBtn.type = 'button';
-        syncBtn.title = 'Copy the site-wide filter (terms, watched, playlist, rating, max length) into this one \u2014 then press Filters';
+        syncBtn.title = 'Copy the site-wide filter (terms, watched, playlist, rating, max length, content flags) into this one \u2014 then press Filters';
         syncBtn.onclick = () => {
             const g = PMVX.siteFilterSnapshot?.();
             if (!g) { counter.textContent = 'Site filter not available'; return; }
@@ -1701,6 +1767,7 @@
             pendingSelectedPlaylistIds = (g.playlistIds || []).slice();
             pendingRatingMin = g.ratingMin ?? 0; pendingRatingMax = g.ratingMax ?? 100;
             pendingDurationMin = 0; pendingDurationMax = g.maxMinutes > 0 ? g.maxMinutes * 60 : Infinity;
+            pendingFlags = { ...(g.flags || {}) }; updateFlagBtns();
             renderTagChips(); renderSeen(); updatePlBtn(); ratSlider.render(); durSlider.render(); refreshPendingMarks();
             counter.textContent = 'Copied \u2014 press Filters to apply';
         };
@@ -1722,6 +1789,7 @@
             const t = parseTokens(NF.lastOwnValue || '');
             n += t.textInclude.length + t.textExclude.length + (t.seenFilter ? 1 : 0);
             if (BTN.playlistMode !== 'all') n++;
+            n += flagKeysActive().length;
             if (BTN.ratingMin > 0 || BTN.ratingMax < 100) n++;
             if (BTN.durationMin > 0 || Number.isFinite(BTN.durationMax)) n++;
             if (BTN.savedSearchName) n++;
@@ -1794,6 +1862,8 @@
         BTN.ratingMax = pendingRatingMax;
         BTN.durationMin = pendingDurationMin;
         BTN.durationMax = pendingDurationMax;
+        BTN.flags = { ...pendingFlags };
+        updateFlagBtns();
         if (NF.defaultTerms !== pendingDefaultTerms) {
             NF.defaultTerms = pendingDefaultTerms;
             saveDefaultTerms();

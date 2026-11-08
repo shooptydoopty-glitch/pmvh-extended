@@ -109,7 +109,7 @@ Line up videos from any card or with a hotkey. The queue lives next to *Recommen
 
 ### Filter what you see
 
-One filter for the whole site, from the funnel in the header: exclude or require terms in titles, uploaders, tags and performers, and narrow by rating, length, watch status, playlists or one of your saved searches.
+One filter for the whole site, from the funnel in the header: exclude or require terms in titles, uploaders, tags and performers, hide or keep only videos with a content flag (nudity, gay, trans, extreme and more), and narrow by rating, length, watch status, playlists or one of your saved searches.
 
 <img src="docs/screenshots/01-header.png" alt="Header buttons" width="620">
 
@@ -128,9 +128,10 @@ Your saved searches sit right next to *More Filters*, and on the homepage the si
 <summary>The filter panel</summary>
 
 ![Site-wide filter panel](docs/screenshots/02-filter-panel.png)
-*① The funnel in the header opens the filter. ② On/off switch. ③ Copy the filter from the playlist pages.*
+*① The funnel in the header opens the filter. ② On/off switch. ③ Content flags: click to hide, again for only these, again to clear. ④ Copy the filter from the playlist pages.*
 
-- Terms, rating, length, playlists, watched status and one of your saved searches; an on/off switch keeps your settings.
+- Terms, content flags, rating, length, playlists, watched status and one of your saved searches; an on/off switch keeps your settings.
+- Content flags are the site's own (Nudity, Gay, Trans, Extreme, Voice-over, Remix, Promo, Seizure warning) plus Funscript, Vertical and Music. Flags a list does not include are looked up in batches of 100 and remembered; a video whose flag is still unknown is never hidden.
 - Put a term in quotes, or click it, to match only the whole word: `"ch"` no longer hits *challenge*.
 - In / not in playlist is ignored on a playlist's own page and on your favourites, where it would hide everything.
 - Pagination helpers: larger pages, one continuous grid, paged mode while filtering, keep loading until enough results remain, skip near-empty pages.
@@ -144,14 +145,14 @@ The queue search finally looks at **tags, performers and descriptions**, not jus
 <table>
 <tr>
 <td width="50%" valign="top"><img src="docs/screenshots/12-playlist-queue.png" alt="Playlist queue with search, filters and sort"><br><sub>① Sort the queue. ② Search titles, tags and performers. ③ Apply the filters; the badge counts the active ones.</sub></td>
-<td width="50%" valign="top"><img src="docs/screenshots/13-playlist-filters.png" alt="Filter drawer over the queue"><br><sub>① The filter drawer over the queue. <i>Sync from site filter</i> copies the site-wide filter into it.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/13-playlist-filters.png" alt="Filter drawer over the queue"><br><sub>① The filter drawer over the queue. ② Content flags, as in the site-wide filter. <i>Sync from site filter</i> copies the site-wide filter into it.</sub></td>
 </tr>
 </table>
 
 <details>
 <summary>More</summary>
 
-- Drawer: excluded and required tags, default terms that apply in every playlist, in / not in playlist (the playlist you are viewing does not count), watched/unwatched, rating and duration sliders, saved search. Changes apply on <kbd>Enter</kbd> or *Filters*.
+- Drawer: excluded and required tags, default terms that apply in every playlist, in / not in playlist (the playlist you are viewing does not count), watched/unwatched, content flags, rating and duration sliders, saved search. Changes apply on <kbd>Enter</kbd> or *Filters*.
 - Search syntax: `-term`, `"two words"`, `!in`, `!out`, `!in:name`, `!out:name`, `!seen`, `!unseen`.
 - **Filter-aware playback**: next and auto-advance skip hidden videos, and the *Up Next* preview shows the real next video. <kbd>N</kbd> follows the sort order.
 - *Fetch all* loads the complete playlist; deep links (`?index=N`) open at the right video even beyond the first page.

@@ -277,6 +277,55 @@
         return pmvResJson(res);
     }
 
+    // The site's content flags (its own moderation list: Gay, Trans, Nudity, Extreme, VO, Remix, Promo,
+    // Seizure) plus three that only some lists carry. Nudity is hasExplicitContent; SFW is its inverse.
+    // The list lives in core.js (PMVX.contentFlags), shared with the playlist-page filter.
+    const CONTENT_FLAGS = PMVX.contentFlags;
+
+    // Content flags per video, kept across pages and visits (localStorage): id -> [trueBits, knownBits],
+    // bit i = CONTENT_FLAGS[i]. Full video documents (they carry moderationStatus / isReleased) leave the
+    // site's eight moderation flags out when a video was never flagged: those count as known and false.
+    // Partial copies (playlist videoDetails) only add the flags they do carry.
+    const FLAG_CACHE_KEY = 'pmvx_flag_cache_v1';
+    const FLAG_CACHE_MAX = 15000;
+    let flagCache = null;
+    let flagSaveTimer = 0;
+    function flagCacheMap() {
+        if (!flagCache) {
+            flagCache = new Map();
+            try {
+                const o = JSON.parse(localStorage.getItem(FLAG_CACHE_KEY) || '{}');
+                for (const k in o) if (Array.isArray(o[k])) flagCache.set(k, o[k]);
+            } catch {}
+        }
+        return flagCache;
+    }
+    function saveFlagCache() {
+        clearTimeout(flagSaveTimer);
+        flagSaveTimer = setTimeout(() => {
+            try {
+                const entries = [...flagCacheMap().entries()];
+                localStorage.setItem(FLAG_CACHE_KEY, JSON.stringify(Object.fromEntries(entries.slice(-FLAG_CACHE_MAX))));
+            } catch {}
+        }, 1500);
+    }
+    function rememberFlags(v) {
+        if (!v?._id) return;
+        const full = 'moderationStatus' in v || 'isReleased' in v;
+        let t = 0, k = 0;
+        CONTENT_FLAGS.forEach(([key], i) => {
+            if (typeof v[key] === 'boolean') { k |= 1 << i; if (v[key]) t |= 1 << i; }
+            else if (full && i < 8) k |= 1 << i;
+        });
+        if (!k) return;
+        const m = flagCacheMap();
+        const prev = m.get(v._id);
+        if (prev) { t = (prev[0] & ~k) | t; k = prev[1] | k; if (prev[0] === t && prev[1] === k) return; }
+        m.delete(v._id);
+        m.set(v._id, [t, k]);
+        saveFlagCache();
+    }
+
     // Returns the number of new thumbnail URLs; the interceptor invalidates queue badges only when > 0.
     function indexVideoDetails(details) {
         if (!Array.isArray(details)) return 0;
@@ -292,6 +341,7 @@
             [v.thumbnailUrl, v.rawThumbnailUrl, v.previewUrl].forEach(u => putThumb(u, v._id));
             Object.values(v.thumbnailSizes || {}).forEach(t => putThumb(t?.url, v._id));
             if (v.title) State.titleIndex.set(v.title.trim().toLowerCase(), v._id);
+            rememberFlags(v);
             // Full metadata for the tag filter.
             State.videoMeta.set(v._id, {
                 tags: (v.tags || v.top5Tags || []).map(t => t.toLowerCase()),
@@ -2987,6 +3037,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 ratingMax: typeof s.ratingMax === 'number' ? s.ratingMax : 100,
                 durationMin: typeof s.durationMin === 'number' ? s.durationMin : 0,
                 durationMax: typeof s.durationMax === 'number' && s.durationMax >= 0 ? s.durationMax : Infinity,
+                flags: s.flags && typeof s.flags === 'object' ? { ...s.flags } : {},
             };
         } catch { return null; }
     }
@@ -3252,12 +3303,33 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         try { arr = JSON.parse(el.textContent); } catch { return 0; }
         if (!Array.isArray(arr)) return 0;
         const val = ref => (typeof ref === 'number' ? arr[ref] : ref);
+        // Resolves a field: indices into the array, arrays of indices, devalue's Reactive/Ref wrappers.
+        const res = (ref, depth = 0) => {
+            if (typeof ref !== 'number' || ref < 0 || depth > 4) return typeof ref === 'number' ? undefined : ref;
+            const x = arr[ref];
+            if (Array.isArray(x)) {
+                if (typeof x[0] === 'string' && /^(Reactive|ShallowReactive|Ref|ShallowRef)$/.test(x[0])) return res(x[1], depth + 1);
+                return x.map(r => res(r, depth + 1));
+            }
+            return x;
+        };
+        const FIELDS = ['_id', 'title', 'duration', 'tags', 'top5Tags', 'starsTags', 'bayesianRating', 'width', 'height',
+            'uploaderUsername', 'uploader', 'thumbnailUrl', 'previewUrl', 'uploadDate', 'views', 'description',
+            ...CONTENT_FLAGS.map(([k]) => k)];
         let added = 0;
+        const videos = [];
         for (const o of arr) {
             if (!o || typeof o !== 'object' || Array.isArray(o) || !('_id' in o) || !('title' in o)) continue;
             if (!('duration' in o || 'previewUrl' in o || 'oldId' in o)) continue;
             added += learnVideoId(val(o._id), val(o.oldId));
+            // Server-rendered lists (the homepage's first page) never pass the fetch interceptor:
+            // their metadata (all tags, content flags) is read from here.
+            if (!('tags' in o || 'top5Tags' in o)) continue;
+            const v = {};
+            FIELDS.forEach(k => { if (k in o) v[k] = res(o[k]); });
+            if (typeof v._id === 'string' && typeof v.title === 'string') videos.push(v);
         }
+        if (videos.length) { try { indexVideoDetails(videos); } catch {} }
         return added;
     }
 
@@ -4889,6 +4961,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         seen: 'any',       // 'any' | 'seen' | 'unseen'
         savedSearch: null,  // parsed copy of a saved search
         savedSearchName: '',
+        flags: {},          // content flag key -> 'out' (hide) | 'in' (only these)
         // Pagination options (see the Pagination section).
         bigPages: false,   // raise the site's own page size to its maximum
         mergeGrids: true,  // one grid instead of one per loaded batch
@@ -5024,7 +5097,75 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             || c.maxMinutes > 0
             || c.playlistMode !== 'all'
             || c.seen !== 'any'
-            || !!c.savedSearch;
+            || !!c.savedSearch
+            || Object.values(c.flags || {}).some(Boolean);
+    }
+
+    // A content flag of a video, or undefined when it is not known (then it never hides anything).
+    // Vertical falls back to the stored size.
+    function videoFlag(id, key) {
+        if (!id) return undefined;
+        const i = CONTENT_FLAGS.findIndex(([k]) => k === key);
+        const e = flagCacheMap().get(id);
+        if (i >= 0 && e && (e[1] >> i) & 1) return !!((e[0] >> i) & 1);
+        if (key === 'isVertical') {
+            const m = State.videoMeta.get(id);
+            if (m?.width && m?.height) return m.height > m.width;
+        }
+        return undefined;
+    }
+    PMVX.videoFlag = videoFlag;
+
+    // Flags still unknown for any of `keys` get fetched in bulk: GET /api/videos/bulk?ids=… (up to 100
+    // ids per call, full documents). One call at a time, a short pause between calls, a longer one on
+    // HTTP 429; each id is asked for once per page load. onDone runs when the queue is empty.
+    const FLAG_BULK = 100;
+    const flagQueue = new Set();
+    const flagTried = new Set();
+    const flagDone = new Set();
+    let flagFetching = false;
+    function flagsUnknown(id, keys) {
+        return keys.some(k => videoFlag(id, k) === undefined);
+    }
+    PMVX.fetchFlags = (ids, keys, onDone) => {
+        let added = 0;
+        ids.forEach(id => {
+            if (!id || flagTried.has(id) || !flagsUnknown(id, keys)) return;
+            flagTried.add(id); flagQueue.add(id); added++;
+        });
+        if (onDone) flagDone.add(onDone);
+        if (added) runFlagFetch();
+        return added;
+    };
+    async function runFlagFetch() {
+        if (flagFetching) return;
+        flagFetching = true;
+        let got = 0;
+        try {
+            while (flagQueue.size) {
+                const batch = [...flagQueue].slice(0, FLAG_BULK);
+                batch.forEach(id => flagQueue.delete(id));
+                try {
+                    const res = await fetch('/api/videos/bulk?ids=' + batch.join(','), { credentials: 'include' });
+                    if (res.status === 429) {
+                        batch.forEach(id => flagQueue.add(id));
+                        await new Promise(r => setTimeout(r, 8000));
+                        continue;
+                    }
+                    if (res.ok) {
+                        const j = await res.json();
+                        const list = j?.videos || j?.data || [];
+                        if (Array.isArray(list)) { indexVideoDetails(list); got += list.length; }
+                    }
+                } catch {}
+                await new Promise(r => setTimeout(r, 400));
+            }
+        } finally {
+            flagFetching = false;
+            const fns = [...flagDone];
+            flagDone.clear();
+            if (got) fns.forEach(fn => { try { fn(); } catch {} });
+        }
     }
 
     // `meta` is what could be read off the card; the cache fills in the rest. Unknown data never
@@ -5067,6 +5208,16 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             const watched = PMVX.isWatched(id);
             if (c.seen === 'seen' && !watched && hit('not watched')) return out;
             if (c.seen === 'unseen' && watched && hit('watched')) return out;
+        }
+
+        const fl = c.flags || {};
+        for (const [key, label] of CONTENT_FLAGS) {
+            const mode = fl[key];
+            if (!mode) continue;
+            const v = videoFlag(id, key);
+            if (v === undefined) continue;
+            if (mode === 'out' && v && hit('\u2298 ' + label)) return out;
+            if (mode === 'in' && !v && hit('needs ' + label)) return out;
         }
 
         const ss = c.savedSearch;
@@ -5217,6 +5368,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
         filterHiddenCount = Math.max(filterHiddenLog.size, document.querySelectorAll('[data-pmv-filtered="1"]').length);
         updateFilterButton();
+
+        // Content flags the cards' data did not carry: fetched in bulk, then judged again.
+        const flagKeys = Object.keys(filterConfig.flags || {}).filter(k => filterConfig.flags[k]);
+        if (flagKeys.length && full) {
+            const ids = [...filterSeen].filter(k => /^[a-f0-9]{24}$/.test(k));
+            PMVX.fetchFlags(ids, flagKeys, () => { filterFullPassAt = 0; applyFilterToCards(true); });
+        }
     }
 
     const FILTER_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>';
@@ -5697,6 +5855,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         include: filterTerms(filterConfig.include), exclude: filterTerms(filterConfig.exclude),
         seen: filterConfig.seen, playlistMode: filterConfig.playlistMode, playlistIds: (filterConfig.playlistIds || []).slice(),
         ratingMin: filterConfig.ratingMin, ratingMax: filterConfig.ratingMax, maxMinutes: filterConfig.maxMinutes,
+        flags: { ...(filterConfig.flags || {}) },
     });
 
     function toggleFilterPanel(anchorBtn) {
@@ -5828,6 +5987,34 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             { v: 'any', t: 'All' }, { v: 'unseen', t: 'Unwatched' }, { v: 'seen', t: 'Watched' },
         ], () => d.seen, v => { d.seen = v; }));
 
+        // Content flags: off -> hide (⊘) -> only these (✓) -> off, like the playlist choice.
+        const sFlags = sec('Content');
+        const fRow = mk('div', 'gf-chips');
+        CONTENT_FLAGS.forEach(([key, label]) => {
+            const b = mk('button', 'gf-chip');
+            b.type = 'button';
+            const paint = () => {
+                const m = d.flags?.[key];
+                b.className = 'gf-chip' + (m ? ' active ' + m : '');
+                b.textContent = (m === 'out' ? '\u2298 ' : m === 'in' ? '\u2713 ' : '') + label;
+                b.title = m === 'out' ? `Hides videos flagged ${label} \u2014 click: only these`
+                    : m === 'in' ? `Only videos flagged ${label} \u2014 click: off`
+                    : `Click: hide videos flagged ${label}`;
+            };
+            paint();
+            b.onclick = () => {
+                const f = { ...(d.flags || {}) };
+                const m = f[key];
+                if (!m) f[key] = 'out'; else if (m === 'out') f[key] = 'in'; else delete f[key];
+                d.flags = f;
+                paint(); refreshPending();
+            };
+            fRow.appendChild(b);
+        });
+        sFlags.appendChild(fRow);
+        sFlags.appendChild(mk('div', 'gf-hint', 'Click: hide (\u2298) \u2192 only these (\u2713) \u2192 off. Videos whose flag is not known yet stay visible.'));
+        body.appendChild(sFlags);
+
         // Rating
         const sRate = sec('Rating');
         sRate.appendChild(gfRange({
@@ -5939,6 +6126,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 maxMinutes: Number.isFinite(nf.durationMax) ? Math.round(nf.durationMax / 60) : 0,
                 playlistMode: nf.playlistMode, playlistIds: nf.selectedPlaylistIds.slice(),
                 seen: nf.tokens.seenFilter || 'any',
+                flags: { ...nf.flags },
             };
             filterConfig = { ...d, active: filterConfig.active };
             saveFilterConfig(); reopen();
