@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.2.50
+// @version      1.2.51
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -10538,7 +10538,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 .pmv-cardbtn[data-kind="queue"]:hover, .pmv-cardbtn[data-kind="playlists"]:hover{color:rgb(187,247,208);background:rgba(34,197,94,.2);border-color:rgba(34,197,94,.5);}
 .pmv-cardbtn[data-kind="fav"]{color:rgba(${FAV_RGB},.75);background:rgba(${FAV_RGB},.06);border-color:rgba(${FAV_RGB},.25);}
 .pmv-cardbtn[data-kind="fav"]:hover{color:rgb(${FAV_RGB});background:rgba(${FAV_RGB},.14);border-color:rgba(${FAV_RGB},.45);}
-.pmv-cardbtn[data-kind="fav"][data-on="1"]{color:rgb(${FAV_RGB});background:rgba(236,72,153,.2);border-color:rgba(236,72,153,.45);}
+.pmv-cardbtn[data-kind="fav"][data-on="1"]{color:rgb(${FAV_RGB});background:rgba(236,72,153,.28);border-color:rgba(236,72,153,.6);}
 .pmv-cardbtn[data-kind="fav"][data-on="1"]:hover{background:rgba(236,72,153,.3);}
 .pmv-cardbtn[data-rec="1"]{margin:2px 4px 0 0;}
 .pmv-thumbx{position:absolute;top:.75rem;left:.75rem;z-index:21;display:inline-flex;align-items:center;gap:4px;padding:.25rem .625rem;border-radius:.5rem;
@@ -10704,7 +10704,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     function styleFavCardBtn(btn, on) {
         btn.dataset.on = on ? '1' : '';
         btn.title = on ? 'Remove from favourites' : 'Add to favourites';
-        btn.innerHTML = HEART_SVG(false); // outline, like the site's own favourite button
+        btn.innerHTML = HEART_SVG(on); // filled when favourited, outline otherwise
     }
     function refreshFavButtons() {
         document.querySelectorAll('[data-pmv-fav-btn]').forEach(btn => {
