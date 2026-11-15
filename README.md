@@ -44,7 +44,7 @@ Updates arrive automatically through your userscript manager.
 Every video shows whether it is already in one of your playlists, and adding or removing it takes one click — under the player or on any card.
 
 ![Playlist buttons under the player](docs/screenshots/03-playlist-buttons.png)
-*① Reject, Tags and Models, right in the site's own button row. ② Your playlists: one click adds or removes the video. ③ The site's own Add to playlist button lights up when the video is saved.*
+*① Reject, Tags and Models, right in the site's own button row. ② Your playlists: one click adds or removes the video; a playlist with a hotkey shows its key. ③ The site's own Add to playlist button lights up when the video is saved.*
 
 <table>
 <tr>
@@ -57,7 +57,8 @@ Every video shows whether it is already in one of your playlists, and adding or 
 <summary>More</summary>
 
 - Badges on the home, browse, search and profile grids, *Recommended*, *More from* and notifications.
-- **Favourites from any card**: the heart on a card adds or removes the video from your site favourites without opening it.
+- **Favourites from any card**: the heart on a card adds or removes the video from your site favourites without opening it, and is filled when the video is already a favourite.
+- **Add to several playlists at once**: the playlist menu on a card stays open after each pick; click next to it to close it.
 - **Reject list**: pick one playlist as your reject list. Adding a video there removes it from every other playlist; rejected videos show in red. Cards get a ⊘ in the corner of the thumbnail, and the player a ⊘ in its button row. While a filter is on, a card asks for a second click first.
 - **Tag after reject**: after a reject, a small menu asks why — add a tag to the video on the site in a few keystrokes (can be turned off).
 - **Tags and models**: the site's *Vote on Tags* opens the compact menu instead (<kbd>Shift</kbd>+click for the original); a second menu does the same for models.
@@ -74,7 +75,7 @@ Every video shows whether it is already in one of your playlists, and adding or 
 Move the mouse to the bottom of the screen — or press <kbd>I</kbd> — and everything about the video is there: title, rating, tags and performers, your playlist buttons, the timeline and what plays next. Click a tag to require it in your filter, click again to exclude it.
 
 ![Fullscreen HUD](docs/screenshots/07-fullscreen-hud.png)
-*① The button row, including reject, tags and models. ② Click a tag to require, exclude or clear it in the filter. ③ Playlist buttons. ④ Timeline thumbnails. With an Up next queue, how many videos are left sits on the right.*
+*① The button row, including reject, tags and models. ② Click a tag to require, exclude or clear it in the filter. ③ Playlist buttons, with their hotkeys. ④ Timeline thumbnails. With an Up next queue, how many videos are left sits on the right.*
 
 A frame preview follows the mouse along the seek bar, in normal and fullscreen mode.
 
@@ -104,6 +105,8 @@ Line up videos from any card or with a hotkey. The queue lives next to *Recommen
 - **Auto-refill** from Recommended, ranked by how well the tags match your own playlists, optionally through your filter.
 - **Fill from your playlists** by count, minimum rating, maximum length, unwatched only and tag.
 - Drag to reorder; played items stay as history (*Show more* for older ones), and the filter never removes anything from the queue.
+- **Saved queues**: save Up next under a name and load or append it later, even after a restart.
+- A fresh page load every 20 videos (10 in fullscreen, adjustable or off) keeps long sessions light; fullscreen resumes with one click or key.
 
 </details>
 
@@ -133,6 +136,7 @@ Your saved searches sit right next to *More Filters*, and on the homepage the si
 - Terms, content flags, rating, length, playlists, watched status and one of your saved searches; an on/off switch keeps your settings.
 - Content flags are the site's own (Nudity, Gay, Trans, Extreme, Voice-over, Remix, Promo, Seizure warning) plus Funscript, Vertical and Music. Flags a list does not include are looked up in batches of 100 and remembered; a video whose flag is still unknown is never hidden.
 - Put a term in quotes, or click it, to match only the whole word: `"ch"` no longer hits *challenge*.
+- Right-click any tag (on cards, under the player, in the HUD) to require or exclude it in the filter.
 - In / not in playlist is ignored on a playlist's own page and on your favourites, where it would hide everything.
 - Pagination helpers: larger pages, one continuous grid, paged mode while filtering, keep loading until enough results remain, skip near-empty pages.
 

@@ -618,6 +618,16 @@
             const method0 = (args[1]?.method || (args[0] instanceof Request ? args[0].method : 'GET')).toUpperCase();
             const mut = method0 !== 'GET' && u0.match(/\/api\/videos\/([a-f0-9]{24})\//);
             if (mut) forgetVideo(mut[1]);
+            // The page saves watch progress for the video it holds; after an in-place hand-over that is
+            // the earlier one, while the time and duration come from the one playing. Save it for that.
+            if (staleFullscreenId && method0 === 'PUT' && /\/api\/users\/watch-progress$/.test(u0) && typeof args[1]?.body === 'string') {
+                try {
+                    const body = JSON.parse(args[1].body);
+                    if (body.videoId && body.videoId !== staleFullscreenId) {
+                        args[1] = { ...args[1], body: JSON.stringify({ ...body, videoId: staleFullscreenId }) };
+                    }
+                } catch {}
+            }
             // The site's own favourite toggles keep the card hearts in step.
             if (mut && /\/favorite$/.test(u0) && typeof args[1]?.body === 'string') {
                 try { const a = JSON.parse(args[1].body).action; if (a) noteFavourite(mut[1], a === 'favorite'); } catch {}
@@ -2272,7 +2282,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     // Queue settings are a preference, so they live in localStorage (included in settings export).
     const QUEUE_SETTINGS_KEY = 'pmv_queue_settings_v1';
-    const QUEUE_SETTINGS_DEFAULTS = { count: 20, minRating: 0, maxDuration: 0, unseenOnly: false, tagFilter: '', autoRefill: true, targetSize: 5, useNfFilter: true };
+    const QUEUE_SETTINGS_DEFAULTS = { count: 20, minRating: 0, maxDuration: 0, unseenOnly: false, tagFilter: '', autoRefill: true, targetSize: 5, useNfFilter: true, freshEvery: 20, freshEveryFs: 10 };
     function loadQueueSettings() {
         try { return { ...QUEUE_SETTINGS_DEFAULTS, ...JSON.parse(localStorage.getItem(QUEUE_SETTINGS_KEY) || '{}') }; }
         catch { return { ...QUEUE_SETTINGS_DEFAULTS }; }
@@ -2480,6 +2490,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     // While fullscreen, the next video is instead loaded into the same <video> (as site playlists do),
     // and the page itself catches up when fullscreen ends.
     let staleFullscreenHref = null;
+    // API id of the video playing in place; the page still holds the earlier one until it catches up.
+    let staleFullscreenId = null;
 
     async function videoStreamUrl(videoId) {
         // Deduped: the following page-data lookup (onUrlChange, ensureCurrentVideoData) is answered from this.
@@ -2503,7 +2515,16 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (!url || !document.fullscreenElement) return false;
 
         // Detach first: attaching a new hls.js source over buffered data causes bufferAppendError.
+        // hls.js resumes a new source at the previous one's last position when no start position is
+        // given (startLoad(-1) takes lastCurrentTime), so every handed-over video would start where
+        // the earlier one was. Start at 0 for this load, then give the site its own setting back.
         try {
+            const prevStart = hls.config.startPosition;
+            hls.config.startPosition = 0;
+            const restore = () => { try { hls.config.startPosition = prevStart; } catch {} };
+            // The first loaded fragment means loading has started (from the manifest or on attach).
+            try { hls.once?.('hlsFragLoaded', restore); } catch {}
+            setTimeout(restore, 15000);
             hls.stopLoad();
             hls.detachMedia();
             hls.loadSource(url);
@@ -2511,15 +2532,44 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         } catch { return false; }
         try { video.play()?.catch(() => {}); } catch {}
 
+        guardHandoverStart(video);
         // Keep the address bar in step, since the rest of the script reads the video id from it.
         try { history.replaceState(history.state, '', href); } catch {}
         staleFullscreenHref = href;
+        staleFullscreenId = videoId;
         const hudWasOpen = !!State.hud;
         inPlaceHandover = true;
         try { onUrlChange(); } catch {} finally { inPlaceHandover = false; }
         // onUrlChange closes the panel; restore it once the new video's data has arrived.
         refreshHudAfterHandover(videoId, hudWasOpen);
         return true;
+    }
+
+    // The video page restores its own video's watch progress (watchProgress % of the duration) each
+    // time the player reports a loaded source. After an in-place hand-over the page still holds the
+    // earlier video, so every new one would jump to that percentage. For a few seconds after the
+    // swap, a seek nobody asked for (no click or key since) goes back to the start.
+    let handoverGuardOff = null;
+    function guardHandoverStart(video) {
+        handoverGuardOff?.();
+        let userActed = false;
+        const onInput = () => { userActed = true; };
+        const onSeeking = () => {
+            if (userActed || !(video.currentTime > 1)) return;
+            try { video.currentTime = 0; } catch {}
+        };
+        window.addEventListener('pointerdown', onInput, true);
+        window.addEventListener('keydown', onInput, true);
+        video.addEventListener('seeking', onSeeking);
+        const off = () => {
+            window.removeEventListener('pointerdown', onInput, true);
+            window.removeEventListener('keydown', onInput, true);
+            video.removeEventListener('seeking', onSeeking);
+            clearTimeout(timer);
+            if (handoverGuardOff === off) handoverGuardOff = null;
+        };
+        const timer = setTimeout(off, 6000);
+        handoverGuardOff = off;
     }
 
     // The fetch is fired by the core and nothing re-renders the panel when it lands, so rebuild once
@@ -2553,10 +2603,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     document.addEventListener('fullscreenchange', () => {
-        if (document.fullscreenElement || !staleFullscreenHref) return;
+        if (document.fullscreenElement || !staleFullscreenHref || freshLoading) return;
         const href = staleFullscreenHref;
         staleFullscreenHref = null;
+        staleFullscreenId = null;
         const at = (() => { try { return getVideo()?.currentTime || 0; } catch { return 0; } })();
+        if (freshLoadDue()) { freshLoad(href, at); return; }
         if (!navigateInPage(href)) { location.href = href; return; }
         resumePlaybackAt(at);
         // The address bar already points here, so onUrlChange has nothing to react to; run the
@@ -2578,8 +2630,84 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         } catch { return href; }
     }
 
+    // Fresh page load every N videos (Up next settings). Every in-page hop leaves some of the site's
+    // state behind (player instances, cached pages, buffers), so a long session keeps growing. A
+    // full load clears that; the queue survives via sessionStorage, and the flag below lets the new
+    // page resume playback (and the position, after leaving fullscreen). Fullscreen has its own,
+    // usually lower, count: a page load ends fullscreen and a browser only re-enters it on a click or
+    // key, so the new page asks for exactly one.
+    const FRESH_LOAD_KEY = 'pmvx_fresh_load_v1';
+    let videoHopsThisPage = 0;
+    let freshLoading = false;
+    function freshLoadDue(fullscreen = false) {
+        const n = fullscreen ? queueSettings.freshEveryFs : queueSettings.freshEvery;
+        return n > 0 && videoHopsThisPage >= n;
+    }
+    function freshLoad(href, resumeAt = 0, fs = false) {
+        freshLoading = true;
+        try { saveQueueState(); } catch {}
+        try {
+            const path = new URL(href, location.origin).pathname;
+            sessionStorage.setItem(FRESH_LOAD_KEY, JSON.stringify({ at: Date.now(), path, t: resumeAt || 0, fs }));
+        } catch {}
+        try { document.querySelectorAll('video, audio').forEach(el => el.pause()); } catch {}
+        location.href = href;
+    }
+    // One click or key (Esc skips) puts the player back in fullscreen and plays; the gesture also
+    // satisfies a browser that blocked autoplay.
+    function offerFullscreenResume(video) {
+        if (document.getElementById('pmvx-fs-resume')) return;
+        const ov = document.createElement('div');
+        ov.id = 'pmvx-fs-resume';
+        ov.style.cssText = 'position:fixed;inset:0;z-index:2147483646;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45);cursor:pointer;';
+        ov.innerHTML = `<div style="display:flex;align-items:center;gap:14px;padding:18px 26px;border-radius:14px;background:rgba(0,0,0,0.82);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.12);color:#fff;font:600 16px/1.3 system-ui,sans-serif;">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+            <div>Continue in fullscreen<div style="font-weight:400;font-size:12px;color:rgba(255,255,255,0.6);margin-top:2px;">Click or press any key \u00b7 Esc to stay here</div></div>
+        </div>`;
+        const done = () => {
+            ov.remove();
+            window.removeEventListener('keydown', onKey, true);
+        };
+        const go = () => {
+            done();
+            try { playerFullscreenTarget()?.requestFullscreen?.().catch(() => {}); } catch {}
+            try { (getVideo() || video).play()?.catch(() => {}); } catch {}
+        };
+        const onKey = e => {
+            if (e.ctrlKey || e.altKey || e.metaKey) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (e.key === 'Escape') done(); else go();
+        };
+        ov.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); go(); });
+        window.addEventListener('keydown', onKey, true);
+        document.body.appendChild(ov);
+    }
+    // After a fresh load: start playback (and seek back) once the player is ready. A browser that
+    // blocks autoplay without a click gets a hint instead.
+    (function resumeAfterFreshLoad() {
+        let d = null;
+        try {
+            d = JSON.parse(sessionStorage.getItem(FRESH_LOAD_KEY) || 'null');
+            sessionStorage.removeItem(FRESH_LOAD_KEY);
+        } catch {}
+        if (!d || Date.now() - d.at > 60000 || d.path !== location.pathname) return;
+        let tries = 0;
+        const timer = setInterval(() => {
+            const v = getVideo();
+            if (!v || (v.readyState < 1 && !d.fs)) { if (++tries > 80) clearInterval(timer); return; }
+            clearInterval(timer);
+            if (d.t > 1) resumePlaybackAt(d.t);
+            if (d.fs) { try { v.play()?.catch(() => {}); } catch {} offerFullscreenResume(v); return; }
+            if (!v.paused) return;
+            const p = v.play();
+            if (p?.catch) p.catch(() => toast('Fresh page loaded \u2014 press play to continue'));
+        }, 250);
+    })();
+
     function goToVideo(href, id) {
         const target = cleanVideoHref(href) || `/video/${id}`;
+        if (document.fullscreenElement && id && freshLoadDue(true)) { freshLoad(target, 0, true); return; }
         if (document.fullscreenElement && id) {
             playInPlace(target, id).then(handled => {
                 if (handled) return;
@@ -2587,6 +2715,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             });
             return;
         }
+        if (freshLoadDue()) { freshLoad(target); return; }
         if (!navigateInPage(target)) location.href = target;
     }
 
@@ -2870,6 +2999,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             row.addEventListener('click', e => {
                 if (e.target.closest('[data-remove-queue]')) return;
                 if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; // let modified clicks open a new tab
+                if (!document.fullscreenElement && freshLoadDue()) { e.preventDefault(); freshLoad(row.getAttribute('href')); return; }
                 // Via goToVideo, so a click from fullscreen hands over the source instead of navigating.
                 if (!document.fullscreenElement && !navigateInPage(row.getAttribute('href'))) return;
                 e.preventDefault();
@@ -3139,6 +3269,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     <label class="flex items-center gap-1"><span>Min. rating</span><input id="sq-rating" type="number" min="0" max="100" value="${s.minRating}" style="${Q_INPUT}width:46px;"><span>%</span></label>
                     <label class="flex items-center gap-1"><span>Max length</span><input id="sq-duration" type="number" min="0" placeholder="none" value="${s.maxDuration || ''}" style="${Q_INPUT}width:70px;"><span>min</span></label>
                 </div>
+                <label class="flex items-center gap-1" style="margin-bottom:6px;" title="A long session in one page keeps growing in memory. A full page load clears it; Up next and the playback position are kept. A page load ends fullscreen; one click or key on the new page puts it back.">
+                    <span>Fresh page load every</span>
+                    <input id="sq-fresh" type="number" min="0" max="200" placeholder="off" value="${s.freshEvery || ''}" style="${Q_INPUT}width:52px;">
+                    <span>videos, in fullscreen every</span>
+                    <input id="sq-fresh-fs" type="number" min="0" max="200" placeholder="off" value="${s.freshEveryFs || ''}" style="${Q_INPUT}width:52px;">
+                    <span>(empty = off)</span>
+                </label>
                 <label class="flex items-center gap-1" style="margin-bottom:6px;" title="Uses the filter behind the funnel button in the header">
                     <input id="sq-nffilter" type="checkbox" ${s.useNfFilter ? 'checked' : ''}>
                     <span>Apply my filter${filterSummary()}</span>
@@ -3151,7 +3288,44 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     <button id="sq-generate" type="button" class="${Q_CHIP_ON}" style="cursor:pointer;">Fill from your playlists</button>
                     <span id="sq-status" class="text-gray-500"></span>
                 </div>
+                <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);">
+                    <div class="text-gray-300" style="margin-bottom:6px;font-weight:600;">Saved queues</div>
+                    <div class="flex items-center gap-2" style="margin-bottom:6px;">
+                        <input id="sq-save-name" type="text" placeholder="Name this queue\u2026" maxlength="60" style="${Q_INPUT}flex:1;min-width:90px;">
+                        <button id="sq-save" type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" title="Save Up next from the current video on; kept until you delete it">Save</button>
+                    </div>
+                    <div id="sq-saved-list">${savedQueuesHtml()}</div>
+                </div>
             </div>`;
+    }
+
+    // Saved queues: named copies of Up next in localStorage, kept until deleted (the automatic backup
+    // only bridges a restart within QUEUE_BACKUP_MAX_AGE_MS). Newest first, at most SAVED_QUEUES_MAX.
+    const SAVED_QUEUES_KEY = 'pmv_saved_queues_v1';
+    const SAVED_QUEUES_MAX = 20;
+    function loadSavedQueues() {
+        try {
+            const a = JSON.parse(localStorage.getItem(SAVED_QUEUES_KEY) || '[]');
+            return Array.isArray(a) ? a.filter(q => q && typeof q.name === 'string' && Array.isArray(q.items)) : [];
+        } catch { return []; }
+    }
+    function storeSavedQueues(list) {
+        try { localStorage.setItem(SAVED_QUEUES_KEY, JSON.stringify(list.slice(0, SAVED_QUEUES_MAX))); return true; }
+        catch { return false; }
+    }
+    function savedQueuesHtml() {
+        const list = loadSavedQueues();
+        if (!list.length) return '<div class="text-gray-500">None yet. Saved queues stay until you delete them.</div>';
+        return list.map((q, i) => {
+            const when = q.at ? new Date(q.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '';
+            return `<div class="flex items-center gap-2" style="margin-bottom:4px;">
+                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;" title="${escHtml(q.name)}">${escHtml(q.name)}</span>
+                <span class="text-gray-500" style="white-space:nowrap;">${q.items.length} \u2022 ${escHtml(when)}</span>
+                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-load="${i}" title="Replace Up next with this queue">Load</button>
+                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-append="${i}" title="Add these videos to the end of Up next">Add</button>
+                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-del="${i}" title="Delete (click twice)">\u2715</button>
+            </div>`;
+        }).join('');
     }
 
     function wireQueueSettings(panel) {
@@ -3168,6 +3342,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         bind('#sq-duration', 'maxDuration', el => parseInt(el.value, 10) || 0);
         bind('#sq-unseen', 'unseenOnly', el => el.checked);
         bind('#sq-nffilter', 'useNfFilter', el => el.checked);
+        bind('#sq-fresh', 'freshEvery', el => Math.max(0, parseInt(el.value, 10) || 0));
+        bind('#sq-fresh-fs', 'freshEveryFs', el => Math.max(0, parseInt(el.value, 10) || 0));
         q('#sq-tag').onchange = () => { queueSettings.tagFilter = q('#sq-tag').value; saveQueueSettings(); };
 
         q('#sq-generate').onclick = () => {
@@ -3192,6 +3368,67 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     ? 'Nothing cached yet \u2014 browse around or refresh playlists.'
                     : 'Nothing matched these filters.';
             }
+        };
+
+        // Saved queues.
+        const savedList = q('#sq-saved-list');
+        const redrawSaved = () => { if (savedList) savedList.innerHTML = savedQueuesHtml(); };
+        const copyItems = items => items.filter(it => it?.id).map(it => ({ id: it.id, href: it.href, meta: it.meta ? { ...it.meta } : {} }));
+        const saveBtn = q('#sq-save');
+        if (saveBtn) saveBtn.onclick = () => {
+            const items = copyItems(smartQueueItems.slice(Math.max(0, queueCursor)));
+            if (!items.length) { toast('Up next is empty'); return; }
+            const input = q('#sq-save-name');
+            const name = (input.value || '').trim() || `Queue ${new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
+            const list = loadSavedQueues().filter(x => x.name !== name);
+            list.unshift({ name, at: Date.now(), items });
+            if (!storeSavedQueues(list)) { toast('Could not save (storage full)', 'red'); return; }
+            input.value = '';
+            redrawSaved();
+            toast(`\u2713 Saved "${name}" (${items.length} videos)`, 'green');
+        };
+        if (savedList) savedList.onclick = e => {
+            const b = e.target.closest('button');
+            if (!b) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const list = loadSavedQueues();
+            const idx = +(b.dataset.sqLoad ?? b.dataset.sqAppend ?? b.dataset.sqDel);
+            const saved = list[idx];
+            if (!saved) return;
+            if (b.dataset.sqDel !== undefined) {
+                // Two clicks: the first arms the button.
+                if (b.dataset.armed !== '1') {
+                    b.dataset.armed = '1'; b.textContent = 'Delete?';
+                    setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = '\u2715'; } }, 3000);
+                    return;
+                }
+                list.splice(idx, 1);
+                storeSavedQueues(list);
+                redrawSaved();
+                return;
+            }
+            const items = copyItems(saved.items);
+            if (b.dataset.sqLoad !== undefined) {
+                // Replacing a queue that still has videos to come asks for a second click.
+                if (upcomingCount() > 0 && b.dataset.armed !== '1') {
+                    b.dataset.armed = '1'; b.textContent = 'Replace?';
+                    setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Load'; } }, 3000);
+                    return;
+                }
+                smartQueueItems = items;
+                queueCursor = -1;
+                dismissedCurrentId = null;
+                queueHistoryShown = QUEUE_HISTORY_SHOWN;
+            } else {
+                const have = new Set(smartQueueItems.map(it => it.id));
+                smartQueueItems = smartQueueItems.concat(items.filter(it => !have.has(it.id)));
+            }
+            // Loaded videos count as added by hand, so auto-refill never swaps them out.
+            items.forEach(it => manuallyAddedIds.add(it.id));
+            smartQueueActive = true;
+            toast(b.dataset.sqLoad !== undefined ? `Loaded "${saved.name}" (${items.length} videos)` : `Added "${saved.name}" to Up next`, 'green');
+            renderQueueSidebar();
         };
     }
 
@@ -4241,6 +4478,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             exclude: 'Excluded in filter — click: remove from filter',
         };
         const makeTagSwitch = (el, tag, neutralStyle, render) => {
+            el.dataset.pmvTagChip = tag;
             const paint = () => {
                 const state = tagFilterState(tag);
                 el.style.cssText = TAG_STYLE_BASE + neutralStyle + (TAG_STATE_STYLE[state] || '');
@@ -4299,7 +4537,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 const inactiveRgb = mixToGrayStr(colorHex);
 
                 // Fixed width regardless of label length.
-                const BTN_WIDTH = 'width:82px;box-sizing:border-box;text-align:center;overflow:hidden;text-overflow:ellipsis;';
+                const BTN_WIDTH = 'width:82px;box-sizing:border-box;text-align:center;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;justify-content:center;';
                 // Active: muted playlist colour, thicker bright border.
                 // Inactive: near gray with a hint of the colour (mixToGrayStr).
                 const STYLE_ACTIVE = `font-size:12px;font-weight:700;padding:5px 6px;border-radius:6px;cursor:pointer;background:rgba(${activeRgb},.24);border:2px solid rgba(${activeRgb},.9);color:rgb(${activeRgb});white-space:nowrap;${BTN_WIDTH}box-shadow:0 0 0 1px rgba(${activeRgb},.22) inset;`;
@@ -4307,9 +4545,15 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 // Busy: grayer; the green success state is the indicator.
                 const STYLE_BUSY = `font-size:12px;font-weight:400;padding:5px 6px;border-radius:6px;cursor:default;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);color:rgba(255,255,255,.3);white-space:nowrap;${BTN_WIDTH}`;
 
+                // Label in a span plus the hotkey cap, as on the buttons under the player (syncPageBtnKey).
                 const restyle = () => {
-                    btn.textContent = displayName;
+                    btn.textContent = '';
+                    const lbl = document.createElement('span');
+                    lbl.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;';
+                    lbl.textContent = displayName;
+                    btn.appendChild(lbl);
                     btn.style.cssText = active ? STYLE_ACTIVE : STYLE_INACTIVE;
+                    syncPageBtnKey(btn, playlist.id);
                 };
                 restyle();
 
@@ -4319,6 +4563,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     if (!vid) return;
                     btn.disabled = true;
                     btn.style.cssText = STYLE_BUSY;
+                    syncPageBtnKey(btn, playlist.id); // keeps the width
                     try {
                         if (active) { if (await removeFromPlaylist(vid, playlist.id)) active = false; }
                         else        { if (await addToPlaylist(vid, playlist.id))       active = true;  }
@@ -4729,9 +4974,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             applyPageBtnStyle(b, inPl);
 
             const lbl = document.createElement('span');
-            lbl.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+            lbl.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;';
             lbl.textContent = displayName;
             b.appendChild(lbl);
+            syncPageBtnKey(b, pl.id);
 
             b.addEventListener('click', async e => {
                 e.stopPropagation();
@@ -4918,12 +5164,44 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         want.forEach((el, i) => { if (bar.children[i] !== el) bar.insertBefore(el, bar.children[i] || null); });
     }
 
+    // The hotkey bound to a playlist, as a small key cap after the label (the first if several).
+    // It fills the pill's height with a 2px gap to its border (negative margins into the 5px/6px padding).
+    function playlistHotkeys(plId) {
+        return Object.keys(keybindings)
+            .filter(k => keybindings[k]?.action === 'playlist' && keybindings[k].playlistId === plId)
+            .sort();
+    }
+    function syncPageBtnKey(btn, plId) {
+        const keys = playlistHotkeys(plId);
+        let cap = btn.querySelector('[data-pmv-plkey]');
+        // With a cap the label takes the remaining width (centred), so the cap sits at the right edge.
+        const lbl = btn.querySelector('span');
+        if (lbl) { lbl.style.flex = keys.length ? '1 1 auto' : ''; lbl.style.textAlign = keys.length ? 'center' : ''; }
+        // Up to 24px wider for the cap (24px + 4px gap - 4px into the padding), so a long label keeps the
+        // usual 82px room; a short one stays at 82px.
+        btn.style.width = keys.length ? 'auto' : '82px';
+        btn.style.minWidth = keys.length ? '82px' : '';
+        btn.style.maxWidth = keys.length ? '106px' : '';
+        if (!keys.length) { cap?.remove(); return; }
+        if (!cap) {
+            cap = document.createElement('kbd');
+            cap.dataset.pmvPlkey = '1';
+            cap.style.cssText = 'flex:0 0 auto;display:inline-block;min-width:24px;height:24px;padding:0 4px;margin:-3px -4px -3px 4px;box-sizing:border-box;border-radius:4px;border:1px solid currentColor;background:rgba(255,255,255,0.06);font:700 13px/22px system-ui,-apple-system,"Segoe UI",sans-serif;text-align:center;font-variant-numeric:tabular-nums;opacity:0.8;';
+        }
+        // Always after the label (the button may be styled before its label is added).
+        if (btn.lastElementChild !== cap) btn.appendChild(cap);
+        const k = keys[0];
+        cap.textContent = k.length === 1 ? k.toUpperCase() : k.slice(0, 3);
+        btn.title = (State.playlists.get(plId)?.name || '') + ' \u2014 key ' + keys.map(x => x.toUpperCase()).join(', ');
+    }
+
     function applyPageBtnStyle(btn, active) {
         const plId = btn.dataset.pmvPlBtn;
         const name = State.playlists.get(plId)?.name || '';
         btn.title = name;
         const lbl = btn.querySelector('span');
         if (lbl) lbl.textContent = getPlaylistDisplayName(name, plId);
+        syncPageBtnKey(btn, plId);
 
         // Active: muted playlist colour, thicker bright border. Inactive: near gray with a hint of the colour.
         const customStyle = getPlaylistStyle(name, plId);
@@ -5052,7 +5330,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     function cycleTagInFilter(tag) {
         const t = String(tag).toLowerCase().trim();
         if (!t) return null;
-        const next = TAG_CYCLE[tagFilterState(t)];
+        return setTagInFilter(t, TAG_CYCLE[tagFilterState(t)]);
+    }
+    // Puts a tag in the filter as 'include', 'exclude' or null (removed).
+    function setTagInFilter(tag, next) {
+        const t = String(tag).toLowerCase().trim();
+        if (!t) return null;
         const include = filterTerms(filterConfig.include).filter(x => x !== t);
         const exclude = filterTerms(filterConfig.exclude).filter(x => x !== t);
         if (next === 'include') include.push(t);
@@ -5066,6 +5349,85 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         document.getElementById('pmv-filter-panel')?.refresh?.();
         return next;
     }
+
+    // Right-click on a tag anywhere on the site (cards, under the player, Recommended, the HUD):
+    // a small menu to require (+) or exclude (−) it in the filter, or take it out again.
+    // Shift + right-click keeps the browser's own menu.
+    function tagFromElement(el) {
+        const node = el?.closest?.('a, button, span');
+        if (!node || node.closest('#pmvx-tag-ctx')) return null;
+        const href = node.tagName === 'A' ? node.getAttribute('href') || '' : '';
+        if (/[?&]tags=/.test(href)) {
+            try { return new URL(href, location.origin).searchParams.get('tags')?.split(',')[0]?.trim() || null; } catch {}
+        }
+        if (node.dataset.pmvTagChip) return node.dataset.pmvTagChip;
+        const text = node.textContent.trim();
+        if (!/^#\S/.test(text) || text.length > 60 || node.children.length > 2) return null;
+        // The site's tag chip style (orange gradient); "#" alone is not enough (titles, hashtags in text).
+        if (!/text-orange-300|from-orange-500/.test(node.className || '')) return null;
+        return text.slice(1).trim() || null;
+    }
+    let tagMenuOpenedAt = 0;
+    function closeTagMenu() {
+        document.getElementById('pmvx-tag-ctx')?.remove();
+        window.removeEventListener('keydown', tagMenuKey, true);
+    }
+    function tagMenuKey(e) { if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); closeTagMenu(); } }
+    function openTagMenu(tag, x, y) {
+        closeTagMenu();
+        const state = tagFilterState(tag);
+        const m = document.createElement('div');
+        m.id = 'pmvx-tag-ctx';
+        m.style.cssText = 'position:fixed;z-index:2147483647;min-width:190px;padding:5px;border-radius:10px;background:#141414;border:1px solid #2A2A2A;box-shadow:0 10px 30px rgba(0,0,0,.55);font:13px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;color:#E5E7EB;user-select:none;';
+        const head = document.createElement('div');
+        head.style.cssText = 'padding:5px 9px 6px;font-size:11px;color:#9CA3AF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px;';
+        head.textContent = '#' + tag + (state === 'include' ? ' · required' : state === 'exclude' ? ' · excluded' : '');
+        m.appendChild(head);
+        const item = (icon, color, label, next) => {
+            const on = state === next;
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.style.cssText = `display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px;border:0;border-radius:7px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;`;
+            b.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:5px;font-weight:700;background:rgba(${color},.18);border:1px solid rgba(${color},.5);color:rgb(${color});">${icon}</span><span style="flex:1"></span><span style="color:rgb(249,115,22);font-weight:700;">${on ? '✓' : ''}</span>`;
+            b.children[1].textContent = label;
+            b.onmouseenter = () => { b.style.background = 'rgba(255,255,255,.07)'; };
+            b.onmouseleave = () => { b.style.background = 'transparent'; };
+            b.onclick = e => {
+                e.preventDefault();
+                e.stopPropagation();
+                closeTagMenu();
+                if (on) return;
+                const res = setTagInFilter(tag, next);
+                toast(res === 'include' ? '+ #' + tag + ' required in filter' : res === 'exclude' ? '− #' + tag + ' excluded in filter' : '#' + tag + ' removed from filter',
+                    res === 'exclude' ? 'red' : res === 'include' ? 'green' : null);
+                try { scheduleBadges(); } catch {}
+            };
+            m.appendChild(b);
+        };
+        item('+', '249,115,22', 'Require in filter', 'include');
+        item('−', '239,68,68', 'Exclude in filter', 'exclude');
+        if (state) item('✕', '156,163,175', 'Remove from filter', null);
+        (document.fullscreenElement || document.body).appendChild(m);
+        const r = m.getBoundingClientRect();
+        m.style.left = Math.max(6, Math.min(x, innerWidth - r.width - 6)) + 'px';
+        m.style.top = Math.max(6, Math.min(y, innerHeight - r.height - 6)) + 'px';
+        window.addEventListener('keydown', tagMenuKey, true);
+        tagMenuOpenedAt = Date.now();
+    }
+    document.addEventListener('contextmenu', e => {
+        if (e.shiftKey) return;
+        const tag = tagFromElement(e.target);
+        if (!tag) { closeTagMenu(); return; }
+        e.preventDefault();
+        e.stopPropagation();
+        openTagMenu(tag, e.clientX, e.clientY);
+    }, true);
+    document.addEventListener('pointerdown', e => {
+        if (!e.target.closest?.('#pmvx-tag-ctx')) closeTagMenu();
+    }, true);
+    // A scroll right after opening is the page settling (or the browser bringing the tag into view).
+    window.addEventListener('scroll', () => { if (Date.now() - tagMenuOpenedAt > 250) closeTagMenu(); }, { passive: true, capture: true });
+    window.addEventListener('blur', closeTagMenu);
 
     // The tag is also written to the playlist-page filter's fixed default terms (always required /
     // excluded), straight into its storage; an event makes it refilter if active. Any earlier token
@@ -8070,6 +8432,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         if (location.href === State.lastUrl) return;
         sweepDetachedMediaFor();
         State.lastUrl = location.href;
+        if (location.pathname.startsWith('/video/')) videoHopsThisPage++;
         closeHud();
         hideQueueSidebarNow();
         // Reset immediately so getCurrentVideoId() does not return the previous
@@ -8248,9 +8611,14 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 row.appendChild(icon);
                 row.appendChild(label);
 
+                // The menu stays open: the row is busy while the change runs, then the menu is drawn
+                // again in place (a reject list change also moves the video out of other playlists).
                 row.addEventListener('click', async e => {
                     e.stopPropagation();
-                    closeCtxMenu();
+                    if (row.dataset.busy) return;
+                    row.dataset.busy = '1';
+                    row.style.opacity = '0.5';
+                    row.style.pointerEvents = 'none';
                     if (inPl) {
                         const ok = await removeFromPlaylist(videoId, pl.id);
                         updateNativePlaylistButtons(true);
@@ -8261,6 +8629,13 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                         updateNativePlaylistButtons(true);
                         scheduleBadges();
                         toast(ok ? '✓ ' + displayName : 'Add failed', ok ? 'green' : null);
+                    }
+                    // Redrawn only if this menu is still the open one (a click outside closes it).
+                    if (document.getElementById('pmv-ctx-menu') === menu) {
+                        const btn = menu._pmvBtn;
+                        buildCtxMenu(videoId, parseFloat(menu.style.left) || x, parseFloat(menu.style.top) || y, target);
+                        const next = document.getElementById('pmv-ctx-menu');
+                        if (next && btn) next._pmvBtn = btn;
                     }
                 });
 
@@ -9047,7 +9422,11 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return defaults;
     }
     let keybindings = loadKeybindings();
-    function saveKeybindings() { try { localStorage.setItem(KEYBIND_KEY, JSON.stringify(keybindings)); } catch {} }
+    function saveKeybindings() {
+        try { localStorage.setItem(KEYBIND_KEY, JSON.stringify(keybindings)); } catch {}
+        // Key caps on the playlist buttons under the player.
+        try { document.querySelectorAll('#pmv-page-playlists [data-pmv-pl-btn]').forEach(b => syncPageBtnKey(b, b.dataset.pmvPlBtn)); } catch {}
+    }
 
     // On playlist pages the playlist owns "next" (the site's N); elsewhere the next
     // Up next item, else the first Recommended card that is neither current nor
@@ -9537,6 +9916,8 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         if (dispatchingSyntheticNext) return;
         // The hotkey editor takes letters itself (pressing a key selects it).
         if (document.getElementById('pmv-keyeditor')) return;
+        // The fullscreen-resume prompt after a fresh page load takes the next key itself.
+        if (document.getElementById('pmvx-fs-resume')) return;
         const tag = e.target?.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
         const binding = keybindings[e.key.toLowerCase()];
