@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.2.64
+// @version      1.2.73
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -3816,7 +3816,7 @@ PMVX.scheduler = fn => {
 
 })();
 
-// Core (HUD, queue, badges, settings, hotkeys) and the browse filter need <body>.
+// Core (HUD, queue, badges, settings, hotkeys), the browse filter, header search and tag menu need <body>.
 whenBody(() => {
 
 (function () {
@@ -4166,6 +4166,8 @@ whenBody(() => {
             State.videoMeta.set(v._id, {
                 tags: (v.tags || v.top5Tags || []).map(t => t.toLowerCase()),
                 starsTags: (v.starsTags || v.stars || []).map(s => (typeof s === 'string' ? s : (s?.name || '')).toLowerCase()).filter(Boolean),
+                // Music artists, so a filter term can require or exclude an artist (tag menu).
+                music: (Array.isArray(v.music) ? v.music : []).map(m => String(m?.artist || '').toLowerCase().trim()).filter(Boolean),
                 bayesianRating: v.bayesianRating || 0,
                 width: v.width || 0,
                 height: v.height || 0,
@@ -6042,7 +6044,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     let queueCursor = -1;
     // History is capped.
     // Played items kept in Up next; one is shown, "Show more" reveals older ones in steps.
-    const QUEUE_HISTORY_MAX = 50;
+    const QUEUE_HISTORY_MAX = 200;
     const QUEUE_HISTORY_SHOWN = 1;
     const QUEUE_HISTORY_STEP = 10;
     let queueHistoryShown = QUEUE_HISTORY_SHOWN;
@@ -6290,6 +6292,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     function stopCurrentPlayback() { sweepDetachedMediaFor(); }
 
+    PMVX.navigate = href => navigateInPage(href);
     function navigateInPage(href) {
         if (!href) return false;
         try {
@@ -6565,7 +6568,15 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (dismissedCurrentId && dismissedCurrentId !== id) dismissedCurrentId = null;
 
         const idx = smartQueueItems.findIndex(it => it.id === id);
-        if (idx !== -1) { queueCursor = idx; }
+        if (idx !== -1 && idx !== queueCursor && idx !== queueCursor + 1) {
+            // A queued video opened out of turn (a card, a row further down, Back to one already played)
+            // cuts in line: it moves right behind the current one and plays now. What was still to come
+            // keeps its order and follows it, instead of everything in between counting as played.
+            const [item] = smartQueueItems.splice(idx, 1);
+            if (idx < queueCursor) queueCursor--;
+            queueCursor++;
+            smartQueueItems.splice(queueCursor, 0, item);
+        } else if (idx !== -1) { queueCursor = idx; }
         else if (smartQueueActive && id !== dismissedCurrentId) {
             const at = Math.min(queueCursor + 1, smartQueueItems.length);
             smartQueueItems.splice(at, 0, {
@@ -6598,7 +6609,28 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return upcomingCount();
     }
 
-    function addVideoToQueue(videoId, card) {
+    // Position of a video among the videos still to come in Up next (1 = next), or 0.
+    function queuedPosition(id) {
+        if (!id) return 0;
+        const idx = smartQueueItems.findIndex(it => it.id === id);
+        return idx > queueCursor ? idx - queueCursor : 0;
+    }
+    // The Up next button on a card shows whether the video is queued, and where.
+    // Recommended rows carry the slug id; the API id is tried first.
+    function syncQueueCardBtn(btn) {
+        const raw = btn.dataset.qid;
+        const pos = queuedPosition(State.slugToApiId.get(raw)) || queuedPosition(raw);
+        const on = pos > 0;
+        if ((btn.dataset.on === '1') === on && (!on || btn.dataset.qpos === String(pos))) return;
+        btn.dataset.on = on ? '1' : '';
+        if (on) btn.dataset.qpos = String(pos); else delete btn.dataset.qpos;
+        btn.title = on ? `In Up next (#${pos}) \u2014 click to remove` : 'Add to Up next';
+    }
+    function syncQueueCardBtns() {
+        document.querySelectorAll('[data-pmv-addqueue], [data-pmv-rec-addqueue]').forEach(syncQueueCardBtn);
+    }
+
+    function addVideoToQueue(videoId, card, hrefOverride, metaOverride) {
         if (!videoId) { toast('No video'); return; }
         smartQueueActive = true;
         manuallyAddedIds.add(videoId);
@@ -6614,9 +6646,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             smartQueueItems.splice(was, 1);
             queueCursor--;                           // keep pointing at the same item
         }
-        const href = cardHref(card) || (card ? null : location.pathname + location.search);
+        const href = hrefOverride || cardHref(card) || (card ? null : location.pathname + location.search);
         // Appended at the end to preserve click order.
-        smartQueueItems.push({ id: videoId, href, meta: resolveQueueMeta(videoId, card) });
+        smartQueueItems.push({ id: videoId, href, meta: metaOverride || resolveQueueMeta(videoId, card) });
         toast(`+ Added to Up next (${upcomingCount()})`, 'green', { under: upNextToastAnchor() });
         renderQueueSidebar();
     }
@@ -6627,6 +6659,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return [...document.querySelectorAll('[data-pmv-queue-btn]')].find(b => b.getClientRects().length) || null;
     }
     function addCurrentVideoToQueue() { addVideoToQueue(getCurrentVideoId()); }
+    // For panels with their own video lists (the star popout): the id and link are known, no card.
+    PMVX.upNext = {
+        add: (id, href, meta) => addVideoToQueue(id, null, href, meta),
+        remove: id => { removeFromQueue(id); toast('\u2212 Removed from Up next', null, { under: upNextToastAnchor() }); },
+        position: id => queuedPosition(id),
+    };
     // A row added before its API _id was known is keyed by slug id; move it over in place once known.
     function adoptResolvedQueueId(tempId, realId) {
         if (tempId === realId) return;
@@ -6762,7 +6800,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             : '';
         const rows = smartQueueItems.length
             ? moreBtn + smartQueueItems.map((item, i) => i < firstShown ? '' : sidebarRowHtml(item, item.id === currentId, i, manuallyAddedIds.has(item.id), queueCursor >= 0 && i < queueCursor)).join('')
-            : '<div class="text-xs text-gray-500 p-2">Nothing queued yet.</div>';
+            : '<div class="text-xs text-gray-500 p-2">Nothing queued yet.' + (prevQueueCount() ? ' <button id="pmv-sq-restore-prev2" type="button" style="cursor:pointer;color:rgb(134,239,172);background:none;border:none;font:inherit;text-decoration:underline;">\u21ba Restore the previous queue</button>' : '') + '</div>';
 
         return `
             <div class="mb-2 flex items-center justify-between gap-2">
@@ -6774,6 +6812,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 <div class="flex items-center gap-1.5 flex-wrap">
                     <button id="pmv-sq-settings" type="button" title="Settings" class="${queueSettingsOpen ? Q_CHIP_ON : Q_CHIP_OFF}" style="cursor:pointer;">Settings</button>
                     <button id="pmv-sq-collapse" type="button" title="${queueCollapsed ? 'Expand' : 'Collapse'}" class="${Q_CHIP_OFF}" style="cursor:pointer;">${queueCollapsed ? '\u2304' : '\u2303'}</button>
+                    ${prevQueueCount() ? `<button id="pmv-sq-restore-prev" type="button" title="Restore the previous queue (${prevQueueCount()} kept; all of them in Settings)" class="${Q_CHIP_OFF}" style="cursor:pointer;">\u21ba</button>` : ''}
                     <button id="pmv-sq-clear" type="button" title="Clear Up next" class="${Q_CHIP_OFF}" style="cursor:pointer;">\u2715</button>
                 </div>
             </div>
@@ -6790,18 +6829,32 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (more) more.onclick = e => { e.preventDefault(); e.stopPropagation(); queueHistoryShown += QUEUE_HISTORY_STEP; rerender(); };
         const less = panel.querySelector('#pmv-sq-less');
         if (less) less.onclick = e => { e.preventDefault(); e.stopPropagation(); queueHistoryShown = QUEUE_HISTORY_SHOWN; rerender(); };
+        ['#pmv-sq-restore-prev', '#pmv-sq-restore-prev2'].forEach(sel => {
+            const rb = panel.querySelector(sel);
+            if (rb) rb.onclick = e => { e.preventDefault(); e.stopPropagation(); restoreQueueSnapshot(loadQueueUndo()); };
+        });
+        // Both clears ask for a second click, then offer Undo (the old queue also goes into Previous queues).
         const clearPlayed = panel.querySelector('#pmv-sq-clear-played');
         if (clearPlayed) clearPlayed.onclick = e => {
             e.preventDefault();
             e.stopPropagation();
             const n = Math.max(0, queueCursor);
             if (!n) return;
+            if (!confirmClick(clearPlayed, `Clear ${n} played?`)) return;
+            const snap = snapshotQueue(`Cleared ${n} played \u2022 ${smartQueueItems.length} videos`);
             smartQueueItems.splice(0, n).forEach(it => manuallyAddedIds.delete(it.id));
             queueCursor -= n;
             queueHistoryShown = QUEUE_HISTORY_SHOWN;
             rerender();
+            showQueueUndo(`Cleared ${n} played`, snap);
         };
-        panel.querySelector('#pmv-sq-clear').onclick = () => {
+        const clearAll = panel.querySelector('#pmv-sq-clear');
+        clearAll.onclick = e => {
+            e?.preventDefault?.();
+            e?.stopPropagation?.();
+            if (!smartQueueItems.length) return;
+            if (!confirmClick(clearAll, 'Clear all?')) return;
+            const snap = snapshotQueue(`Cleared \u2022 ${smartQueueItems.length} videos`);
             smartQueueItems = [];
             manuallyAddedIds = new Set();
             smartQueueActive = false;
@@ -6809,6 +6862,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             queueCursor = -1;
             dismissedCurrentId = null;
             rerender();
+            showQueueUndo('Up next cleared', snap);
         };
 
         const rowsEl = panel.querySelector('#pmv-sq-rows');
@@ -6834,6 +6888,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         syncQueueCursor();
         healQueueMeta();
         saveQueueState();
+        try { syncQueueCardBtns(); } catch {}
         updateQueueButton();
         renderQueueFloating();
 
@@ -7115,8 +7170,122 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                         <button id="sq-save" type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" title="Save Up next from the current video on; kept until you delete it">Save</button>
                     </div>
                     <div id="sq-saved-list">${savedQueuesHtml()}</div>
+                    <div class="text-gray-300" style="margin:10px 0 6px;font-weight:600;">Previous queues</div>
+                    <div id="sq-prev-list">${prevQueuesHtml()}</div>
                 </div>
             </div>`;
+    }
+
+    // A click that arms the button first ("Clear all?"); the second click within 3 s goes through.
+    function confirmClick(btn, label) {
+        if (btn.dataset.armed === '1') { clearTimeout(btn._pmvArm); delete btn.dataset.armed; return true; }
+        btn.dataset.armed = '1';
+        btn._pmvLabel = btn.textContent;
+        btn.textContent = label;
+        btn.style.color = 'rgb(252,165,165)';
+        btn.style.borderColor = 'rgba(239,68,68,.5)';
+        btn._pmvArm = setTimeout(() => {
+            if (!btn.isConnected) return;
+            delete btn.dataset.armed;
+            btn.textContent = btn._pmvLabel;
+            btn.style.color = ''; btn.style.borderColor = '';
+        }, 3000);
+        return false;
+    }
+
+    // Previous queues: Up next as it was before a clear or a replace, newest first. Kept in
+    // localStorage (at most QUEUE_PREV_MAX, for QUEUE_PREV_MAX_AGE_MS), so a cleared queue can come
+    // back later too, not only through the Undo right after.
+    const QUEUE_PREV_KEY = 'pmv_queue_prev_v1';
+    const QUEUE_PREV_MAX = 10;
+    const QUEUE_PREV_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+    try {
+        const old = JSON.parse(localStorage.getItem('pmv_queue_undo_v1') || 'null');
+        if (old?.items?.length) {
+            const a = JSON.parse(localStorage.getItem('pmv_queue_prev_v1') || '[]');
+            localStorage.setItem('pmv_queue_prev_v1', JSON.stringify([old, ...(Array.isArray(a) ? a : [])]));
+        }
+        localStorage.removeItem('pmv_queue_undo_v1');
+    } catch {}
+    function loadPrevQueues() {
+        try {
+            const a = JSON.parse(localStorage.getItem(QUEUE_PREV_KEY) || '[]');
+            const now = Date.now();
+            return (Array.isArray(a) ? a : []).filter(q => q && Array.isArray(q.items) && q.items.length && now - (q.at || 0) < QUEUE_PREV_MAX_AGE_MS);
+        } catch { return []; }
+    }
+    function storePrevQueues(list) {
+        try { localStorage.setItem(QUEUE_PREV_KEY, JSON.stringify(list.slice(0, QUEUE_PREV_MAX))); } catch {}
+    }
+    const queueSig = items => items.map(it => it.id).join(',');
+    function snapshotQueue(label) {
+        const snap = {
+            label, at: Date.now(), cursor: queueCursor, active: smartQueueActive, manual: [...manuallyAddedIds],
+            items: smartQueueItems.map(it => ({ id: it.id, href: it.href, meta: it.meta ? { ...it.meta } : {} })),
+        };
+        if (!snap.items.length) return snap;
+        // The same queue twice in a row is kept once (the newest copy).
+        const list = loadPrevQueues().filter(q => queueSig(q.items) !== queueSig(snap.items));
+        list.unshift(snap);
+        storePrevQueues(list);
+        return snap;
+    }
+    function loadQueueUndo() { return loadPrevQueues()[0] || null; }
+    function prevQueueCount() { return loadPrevQueues().length; }
+    // Restores a previous queue; the queue it replaces (if any) goes into the list, so this is undoable too.
+    function restoreQueueSnapshot(snap) {
+        if (!snap) return;
+        const rest = loadPrevQueues().filter(q => !(q.at === snap.at && queueSig(q.items) === queueSig(snap.items)));
+        storePrevQueues(rest);
+        // The queue being replaced goes into the list, unless it is only part of the restored one (an undo).
+        const restoredIds = new Set(snap.items.map(it => it.id));
+        if (smartQueueItems.length && !smartQueueItems.every(it => restoredIds.has(it.id))) snapshotQueue(`Replaced by a restore \u2022 ${smartQueueItems.length} videos`);
+        smartQueueItems = snap.items.map(it => ({ ...it, meta: it.meta ? { ...it.meta } : {} }));
+        manuallyAddedIds = new Set(snap.manual || []);
+        smartQueueActive = snap.active !== false;
+        queueCursor = Math.min(snap.cursor ?? -1, smartQueueItems.length - 1);
+        dismissedCurrentId = null;
+        document.getElementById('pmv-undo-toast')?.remove();
+        renderQueueSidebar();
+        toast(`↺ Up next restored (${upcomingCount()} to come)`, 'green', { under: upNextToastAnchor() });
+    }
+    function prevQueuesHtml() {
+        const list = loadPrevQueues();
+        if (!list.length) return '<div class="text-gray-500">Nothing yet. Cleared or replaced queues are kept here for 14 days.</div>';
+        return list.map((q, i) => {
+            const d = new Date(q.at);
+            const when = d.toDateString() === new Date().toDateString()
+                ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+                : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+            const first = q.items[Math.max(0, (q.cursor ?? -1) + 1)]?.meta?.title || q.items[0]?.meta?.title || '';
+            return `<div class="flex items-center gap-2" style="margin-bottom:4px;">
+                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;" title="${escHtml(first)}">${escHtml(q.label || q.items.length + ' videos')}</span>
+                <span class="text-gray-500" style="white-space:nowrap;">${escHtml(when)}</span>
+                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-prev="${i}" title="Put this queue back (the current one is kept in this list)">Restore</button>
+            </div>`;
+        }).join('');
+    }
+
+    // A message with an Undo button, under Up next in the header; gone after 10 s.
+    function showQueueUndo(msg, snap) {
+        document.getElementById('pmv-undo-toast')?.remove();
+        const el = document.createElement('div');
+        el.id = 'pmv-undo-toast';
+        el.style.cssText = 'position:fixed;bottom:30px;right:30px;z-index:1000003;display:flex;align-items:center;gap:12px;padding:8px 8px 8px 14px;' +
+            'border-radius:10px;background:rgba(0,0,0,.9);border:1px solid rgba(255,255,255,.15);color:#fff;font-size:14px;box-shadow:0 8px 24px rgba(0,0,0,.5);';
+        const t = document.createElement('span');
+        t.textContent = msg;
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = 'Undo';
+        b.style.cssText = 'padding:5px 12px;border-radius:7px;border:none;cursor:pointer;font:inherit;font-weight:600;color:#000;background:rgb(100,255,0);';
+        b.onclick = e => { e.preventDefault(); e.stopPropagation(); restoreQueueSnapshot(snap); };
+        el.append(t, b);
+        const anchor = upNextToastAnchor();
+        const r = anchor && !document.fullscreenElement && anchor.isConnected ? anchor.getBoundingClientRect() : null;
+        if (r && r.width) { el.style.bottom = 'auto'; el.style.top = Math.round(r.bottom + 8) + 'px'; el.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px'; }
+        (document.fullscreenElement || document.body).appendChild(el);
+        setTimeout(() => el.remove(), 10000);
     }
 
     // Saved queues: named copies of Up next in localStorage, kept until deleted (the automatic backup
@@ -7177,6 +7346,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 const existing = smartQueueItems.find(it => it.id === id);
                 return { id, href: existing?.href || knownHrefForId(id), meta: resolveQueueMeta(id) };
             });
+            if (smartQueueItems.length) snapshotQueue(`Before "Fill from your playlists" \u2022 ${smartQueueItems.length} videos`);
             smartQueueItems = [...added, ...generated];
             smartQueueActive = true;
 
@@ -7188,6 +7358,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     ? 'Nothing cached yet \u2014 browse around or refresh playlists.'
                     : 'Nothing matched these filters.';
             }
+        };
+
+        const prevList = q('#sq-prev-list');
+        if (prevList) prevList.onclick = e => {
+            const b = e.target.closest('[data-sq-prev]');
+            if (!b) return;
+            e.preventDefault(); e.stopPropagation();
+            restoreQueueSnapshot(loadPrevQueues()[+b.dataset.sqPrev]);
         };
 
         // Saved queues.
@@ -7236,6 +7414,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Load'; } }, 3000);
                     return;
                 }
+                if (smartQueueItems.length) snapshotQueue(`Replaced by "${saved.name}" \u2022 ${smartQueueItems.length} videos`);
                 smartQueueItems = items;
                 queueCursor = -1;
                 dismissedCurrentId = null;
@@ -7701,6 +7880,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     // color: 'green' | 'red' | null (neutral)
     // `under`: an element the toast sits directly below (right-aligned), instead of the bottom corner.
+    PMVX.toast = (...a) => toast(...a);
     function toast(msg, color, { under = null } = {}) {
         document.getElementById('pmv-toast')?.remove();
         // Fixed system messages default to green.
@@ -9170,84 +9350,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return next;
     }
 
-    // Right-click on a tag anywhere on the site (cards, under the player, Recommended, the HUD):
-    // a small menu to require (+) or exclude (−) it in the filter, or take it out again.
-    // Shift + right-click keeps the browser's own menu.
-    function tagFromElement(el) {
-        const node = el?.closest?.('a, button, span');
-        if (!node || node.closest('#pmvx-tag-ctx')) return null;
-        const href = node.tagName === 'A' ? node.getAttribute('href') || '' : '';
-        if (/[?&]tags=/.test(href)) {
-            try { return new URL(href, location.origin).searchParams.get('tags')?.split(',')[0]?.trim() || null; } catch {}
-        }
-        if (node.dataset.pmvTagChip) return node.dataset.pmvTagChip;
-        const text = node.textContent.trim();
-        if (!/^#\S/.test(text) || text.length > 60 || node.children.length > 2) return null;
-        // The site's tag chip style (orange gradient); "#" alone is not enough (titles, hashtags in text).
-        if (!/text-orange-300|from-orange-500/.test(node.className || '')) return null;
-        return text.slice(1).trim() || null;
-    }
-    let tagMenuOpenedAt = 0;
-    function closeTagMenu() {
-        document.getElementById('pmvx-tag-ctx')?.remove();
-        window.removeEventListener('keydown', tagMenuKey, true);
-    }
-    function tagMenuKey(e) { if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); closeTagMenu(); } }
-    function openTagMenu(tag, x, y) {
-        closeTagMenu();
-        const state = tagFilterState(tag);
-        const m = document.createElement('div');
-        m.id = 'pmvx-tag-ctx';
-        m.style.cssText = 'position:fixed;z-index:2147483647;min-width:190px;padding:5px;border-radius:10px;background:#141414;border:1px solid #2A2A2A;box-shadow:0 10px 30px rgba(0,0,0,.55);font:13px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;color:#E5E7EB;user-select:none;';
-        const head = document.createElement('div');
-        head.style.cssText = 'padding:5px 9px 6px;font-size:11px;color:#9CA3AF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px;';
-        head.textContent = '#' + tag + (state === 'include' ? ' · required' : state === 'exclude' ? ' · excluded' : '');
-        m.appendChild(head);
-        const item = (icon, color, label, next) => {
-            const on = state === next;
-            const b = document.createElement('button');
-            b.type = 'button';
-            b.style.cssText = `display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px;border:0;border-radius:7px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;`;
-            b.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:5px;font-weight:700;background:rgba(${color},.18);border:1px solid rgba(${color},.5);color:rgb(${color});">${icon}</span><span style="flex:1"></span><span style="color:rgb(249,115,22);font-weight:700;">${on ? '✓' : ''}</span>`;
-            b.children[1].textContent = label;
-            b.onmouseenter = () => { b.style.background = 'rgba(255,255,255,.07)'; };
-            b.onmouseleave = () => { b.style.background = 'transparent'; };
-            b.onclick = e => {
-                e.preventDefault();
-                e.stopPropagation();
-                closeTagMenu();
-                if (on) return;
-                const res = setTagInFilter(tag, next);
-                toast(res === 'include' ? '+ #' + tag + ' required in filter' : res === 'exclude' ? '− #' + tag + ' excluded in filter' : '#' + tag + ' removed from filter',
-                    res === 'exclude' ? 'red' : res === 'include' ? 'green' : null);
-                try { scheduleBadges(); } catch {}
-            };
-            m.appendChild(b);
-        };
-        item('+', '249,115,22', 'Require in filter', 'include');
-        item('−', '239,68,68', 'Exclude in filter', 'exclude');
-        if (state) item('✕', '156,163,175', 'Remove from filter', null);
-        (document.fullscreenElement || document.body).appendChild(m);
-        const r = m.getBoundingClientRect();
-        m.style.left = Math.max(6, Math.min(x, innerWidth - r.width - 6)) + 'px';
-        m.style.top = Math.max(6, Math.min(y, innerHeight - r.height - 6)) + 'px';
-        window.addEventListener('keydown', tagMenuKey, true);
-        tagMenuOpenedAt = Date.now();
-    }
-    document.addEventListener('contextmenu', e => {
-        if (e.shiftKey) return;
-        const tag = tagFromElement(e.target);
-        if (!tag) { closeTagMenu(); return; }
-        e.preventDefault();
-        e.stopPropagation();
-        openTagMenu(tag, e.clientX, e.clientY);
-    }, true);
-    document.addEventListener('pointerdown', e => {
-        if (!e.target.closest?.('#pmvx-tag-ctx')) closeTagMenu();
-    }, true);
-    // A scroll right after opening is the page settling (or the browser bringing the tag into view).
-    window.addEventListener('scroll', () => { if (Date.now() - tagMenuOpenedAt > 250) closeTagMenu(); }, { passive: true, capture: true });
-    window.addEventListener('blur', closeTagMenu);
+    // For the tag menu (tags, stars, music artists under the player): state and set.
+    PMVX.tagFilter = { state: t => tagFilterState(t), set: (t, next) => setTagInFilter(t, next) };
+
+    // No right-click tag menu any more: the tag menu (left click on a chip under the player) does this.
 
     // The tag is also written to the playlist-page filter's fixed default terms (always required /
     // excluded), straight into its storage; an event makes it refilter if active. Any earlier token
@@ -9370,6 +9476,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             ...(meta?.tags || []),
             ...(cached?.tags || []),
             ...(cached?.starsTags || []),
+            ...(cached?.music || []),
         ].map(t => String(t).toLowerCase()))];
         const haystacks = [title, uploader, ...tags];
 
@@ -10898,6 +11005,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 .pmv-cardbtn[data-kind="open"]:hover{color:#fff;background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.4);}
 .pmv-cardbtn[data-kind="queue"], .pmv-cardbtn[data-kind="playlists"]{color:rgb(134,239,172);background:rgba(34,197,94,.1);border-color:rgba(34,197,94,.3);}
 .pmv-cardbtn[data-kind="queue"]:hover, .pmv-cardbtn[data-kind="playlists"]:hover{color:rgb(187,247,208);background:rgba(34,197,94,.2);border-color:rgba(34,197,94,.5);}
+.pmv-cardbtn[data-kind="queue"]{position:relative;}
+.pmv-cardbtn[data-kind="queue"][data-on="1"]{color:rgb(100,255,0);background:rgba(34,197,94,.24);border-color:rgba(100,255,0,.6);}
+.pmv-cardbtn[data-kind="queue"][data-on="1"]::after{content:attr(data-qpos);position:absolute;top:-7px;right:-7px;min-width:15px;height:15px;padding:0 3px;box-sizing:border-box;
+  border-radius:8px;background:rgb(100,255,0);color:#000;font-size:10px;font-weight:700;line-height:15px;text-align:center;pointer-events:none;}
 .pmv-cardbtn[data-kind="fav"]{color:rgba(${FAV_RGB},.75);background:rgba(${FAV_RGB},.06);border-color:rgba(${FAV_RGB},.25);}
 .pmv-cardbtn[data-kind="fav"]:hover{color:rgb(${FAV_RGB});background:rgba(${FAV_RGB},.14);border-color:rgba(${FAV_RGB},.45);}
 .pmv-cardbtn[data-kind="fav"][data-on="1"]{color:rgb(${FAV_RGB});background:rgba(236,72,153,.28);border-color:rgba(236,72,153,.6);}
@@ -11164,12 +11275,15 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             if (!targetRow.querySelector('[data-pmv-addqueue]')) {
                 const aqBtn = cardBtn('queue', 'Add to Up next', CARD_ICON.upNext);
                 aqBtn.dataset.pmvAddqueue = '1';
+                aqBtn.dataset.qid = videoId;
                 aqBtn.addEventListener('click', e => {
                     e.preventDefault();
                     e.stopPropagation();
+                    if (queuedPosition(videoId)) { removeFromQueue(videoId); toast('\u2212 Removed from Up next', null, { under: upNextToastAnchor() }); return; }
                     addVideoToQueue(videoId, card);
                 });
                 targetRow.appendChild(aqBtn);
+                syncQueueCardBtn(aqBtn);
             }
 
             // "+": add to a playlist (the right-click menu), after the Up next button.
@@ -11468,12 +11582,15 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         const aqBtn = cardBtn('queue', 'Add to Up next', CARD_ICON.upNext);
         aqBtn.dataset.pmvRecAddqueue = '1';
         aqBtn.dataset.rec = '1';
+        aqBtn.dataset.qid = slugId;
         // Added immediately under the card's slug id; the real API id is
         // resolved in the background and swapped in (needed only for dedupe and
         // playlist chips).
         aqBtn.addEventListener('click', e => {
             e.preventDefault();
             e.stopPropagation();
+            const queuedId = [State.slugToApiId.get(slugId), slugId].find(id => id && queuedPosition(id));
+            if (queuedId) { removeFromQueue(queuedId); toast('\u2212 Removed from Up next', null, { under: upNextToastAnchor() }); return; }
             const known = State.slugToApiId.get(slugId);
             addVideoToQueue(known || slugId, card);
             if (known) return;
@@ -11495,6 +11612,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             State.slugToApiId.set(slugId, v._id);
             return v._id;
         };
+        queueMicrotask(() => syncQueueCardBtn(aqBtn));
         const plBtn = playlistPickButton(resolveId);
         plBtn.dataset.rec = '1';
         const favBtn = favCardButtonEl(() => knownApiIdForCard(card, slugId), resolveId);
@@ -14146,7 +14264,8 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         if (isSavedSearches) pmvResJson(res).then(rememberSavedList).catch(() => {});
         try {
             const rawUrl = rawUrl0;
-            if (/\/api\/videos(\?|$)/.test(rawUrl)) {
+            // _pmvx=: the script's own side lists (star popout), not the page's grid.
+            if (/\/api\/videos(\?|$)/.test(rawUrl) && !/[?&]_pmvx=/.test(rawUrl)) {
                 lastApiUrl = rawUrl;
                 const u = new URL(rawUrl, location.origin);
                 const p = parseInt(u.searchParams.get('page') || '1');
@@ -14638,6 +14757,1298 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     loadCache();
     if (isFilterPage()) setTimeout(injectButtons, 1200);
 
+})();
+
+(function () {
+    'use strict';
+
+    // ---------------------------------------------------------------------
+    // Header search
+    // ---------------------------------------------------------------------
+    // The site's search popout ("Search everything...") gets a panel right below it: where to search
+    // (everything, title, tags, stars, creator, music), suggestions from the site's own autocomplete,
+    // include/exclude chips, filters and recent searches. A search goes to /search with the parameters
+    // that page reads itself (q, tags, stars, creator, musicArtist); the rest (sort, length, rating,
+    // quality, ratio, upload date, exclusions, title-only) stays in the page URL and is added to the
+    // page's API calls by the fetch wrapper below. /api/videos/search (used when there is text) ignores
+    // rating, quality, ratio and date, so those are applied to its results here.
+    // Plain text in "Everything" with no chips or filters is left to the site.
+
+    const SCOPE_KEY  = 'pmvx_search_scope_v1';
+    const FILTER_KEY = 'pmvx_search_filters_v1';
+    const FOPEN_KEY  = 'pmvx_search_filters_open_v1';
+    const RECENT_KEY = 'pmvx_search_recent_v1';
+    const RECENT_MAX = 8;
+    const DUR_MAX = 30; // minutes; the slider's top end means "no maximum"
+
+    const SCOPES = [
+        { id: 'all',     label: 'Everything', ph: 'Search everything...' },
+        { id: 'title',   label: 'Title',      ph: 'Search titles only...' },
+        { id: 'tag',     label: 'Tags',       ph: 'Find a tag...' },
+        { id: 'star',    label: 'Stars',      ph: 'Find a star...' },
+        { id: 'creator', label: 'Creator',    ph: 'Find a creator...' },
+        { id: 'music',   label: 'Music',      ph: 'Find an artist...' },
+    ];
+    const enc = encodeURIComponent;
+    // inc/exc: the API (and /search URL) parameters; single: one value only.
+    const KINDS = {
+        tag:     { label: 'Tag',     sym: '#', inc: 'tags',        exc: 'excludeTags',
+                   ac: q => `/api/tags/autocomplete?q=${enc(q)}&type=general&limit=8` },
+        star:    { label: 'Star',    sym: '✦', inc: 'stars',       exc: 'excludeStars',
+                   ac: q => `/api/tags/autocomplete?q=${enc(q)}&type=stars&limit=8` },
+        creator: { label: 'Creator', sym: '@', inc: 'creator',     exc: 'excludeCreators', single: true,
+                   ac: q => `/api/creators/autocomplete?q=${enc(q)}&limit=8` },
+        music:   { label: 'Artist',  sym: '♪', inc: 'musicArtist', exc: null, single: true,
+                   ac: q => `/api/music/artists/autocomplete?q=${enc(q)}&limit=8` },
+    };
+    const SORTS = [
+        { v: '',                t: 'Relevance',    s: 'Best match first' },
+        { v: '-uploadDate',     t: 'Newest',       s: 'Most recent uploads' },
+        { v: 'uploadDate',      t: 'Oldest',       s: 'Oldest uploads' },
+        { v: '-bayesianRating', t: 'Most popular', s: 'Highest rating' },
+        { v: '-likes',          t: 'Most liked',   s: 'Most likes' },
+    ];
+    const RATINGS = [{ v: 0, t: 'Any' }, { v: 60, t: '60%+' }, { v: 70, t: '70%+' }, { v: 80, t: '80%+' }, { v: 90, t: '90%+' }];
+    const QUALITIES = [{ v: 0, t: 'Any' }, { v: 720, t: '720p+' }, { v: 1080, t: '1080p+' }, { v: 2160, t: '4K' }];
+    const ASPECTS = [{ v: '', t: 'Any' }, { v: '16:9', t: '16:9' }, { v: '9:16', t: 'Vertical' }, { v: '4:3', t: '4:3' }, { v: '1:1', t: '1:1' }];
+    const DATES = [{ v: 0, t: 'Any time' }, { v: 1, t: 'Today' }, { v: 7, t: 'This week' }, { v: 30, t: 'This month' }, { v: 365, t: 'This year' }];
+    const DUR_PRESETS = [
+        { a: 0, b: DUR_MAX, label: 'Any' }, { a: 0, b: 4, label: 'Under 4 min' },
+        { a: 4, b: 10, label: '4–10 min' }, { a: 10, b: DUR_MAX, label: '10 min+' }, { a: 20, b: DUR_MAX, label: '20 min+' },
+    ];
+    const F_DEFAULT = { sort: '', durMin: 0, durMax: DUR_MAX, rating: 0, quality: 0, aspect: '', days: 0 };
+
+    const load = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch { return d; } };
+    const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+
+    let scope = SCOPES.some(s => s.id === load(SCOPE_KEY, 'all')) ? load(SCOPE_KEY, 'all') : 'all';
+    const F = Object.assign({}, F_DEFAULT, load(FILTER_KEY, {}));
+    let filtersOpen = !!load(FOPEN_KEY, false);
+    let terms = [];       // [{ kind, name, neg }]
+    let sugg = [];        // [{ kind, name, count }]
+    let hi = -1;          // highlighted suggestion
+    let lastSearchFetch = 0;
+
+    const isDefaultFilters = f => Object.keys(F_DEFAULT).every(k => f[k] === F_DEFAULT[k]);
+
+    // ---------------------------------------------------------------------
+    // Query <-> URL, and the /search page's API calls
+    // ---------------------------------------------------------------------
+    function buildParams(st) {
+        const p = new URLSearchParams();
+        if (st.text) p.set('q', st.text);
+        if (st.text && st.scope === 'title') p.set('in', 'title');
+        for (const [kind, k] of Object.entries(KINDS)) {
+            const inc = st.terms.filter(t => t.kind === kind && !t.neg).map(t => t.name);
+            const exc = st.terms.filter(t => t.kind === kind && t.neg).map(t => t.name);
+            if (inc.length) p.set(k.inc, k.single ? inc[inc.length - 1] : inc.join(','));
+            if (exc.length && k.exc) p.set(k.exc, exc.join(','));
+        }
+        const f = st.f;
+        if (f.sort) p.set('sort', f.sort);
+        if (f.durMin > 0) p.set('durationMin', String(f.durMin * 60));
+        if (f.durMax < DUR_MAX) p.set('durationMax', String(f.durMax * 60));
+        if (f.rating > 0) p.set('minRating', String(f.rating));
+        if (f.quality > 0) p.set('minHeight', String(f.quality));
+        if (f.aspect) p.set('aspect', f.aspect);
+        if (f.days > 0) {
+            const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - (f.days - 1));
+            p.set('uploadDateFrom', d.toISOString());
+        }
+        return p;
+    }
+
+    // Page-URL parameters the /search page does not read itself; copied into its API calls when missing
+    // there (so the page's own filters, once set, win).
+    const EXTRA_KEYS = ['sort', 'durationMin', 'durationMax', 'minRating', 'minHeight', 'aspect', 'uploadDateFrom',
+                        'excludeTags', 'excludeStars', 'excludeCreators'];
+    function pageExtras() {
+        if ((location.pathname.replace(/\/$/, '') || '/') !== '/search') return null;
+        const sp = new URLSearchParams(location.search);
+        const ex = {};
+        let any = false;
+        [...EXTRA_KEYS, 'in'].forEach(k => { const v = sp.get(k); if (v) { ex[k] = v; any = true; } });
+        if (!any) return null;
+        ex.q = sp.get('q') || '';
+        return ex;
+    }
+    const fold = s => String(s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    function aspectOk(v, want) {
+        const w = Number(v.width), h = Number(v.height);
+        if (want === '9:16' && v.isVertical) return true;
+        if (!(w > 0 && h > 0)) return true; // unknown: keep
+        const r = w / h;
+        switch (want) {
+            case '16:9': return r >= 1.6 && r <= 1.9;
+            case '9:16': return r <= 0.7;
+            case '4:3':  return r >= 1.25 && r < 1.45;
+            case '1:1':  return r >= 0.9 && r <= 1.1;
+            case '21:9': return r > 2.1;
+            default: return true;
+        }
+    }
+    function keepVideo(v, ex) {
+        if (!v || typeof v !== 'object') return true;
+        if (ex.in === 'title' && ex.q) {
+            const title = fold(v.title);
+            const words = fold(PMVX.plainQuotes(ex.q)).replace(/"/g, ' ').split(/\s+/).filter(Boolean);
+            if (!words.every(w => title.includes(w))) return false;
+        }
+        const minR = Number(ex.minRating);
+        if (minR > 0 && typeof v.bayesianRating === 'number' && v.bayesianRating < minR) return false;
+        const minH = Number(ex.minHeight);
+        if (minH > 0 && Number(v.height) > 0 && Number(v.height) < minH) return false;
+        if (ex.aspect && !aspectOk(v, ex.aspect)) return false;
+        if (ex.uploadDateFrom && v.uploadDate) {
+            const from = Date.parse(ex.uploadDateFrom), at = Date.parse(v.uploadDate);
+            if (from && at && at < from) return false;
+        }
+        return true;
+    }
+
+    const _fetch = window.fetch;
+    const SEARCH_API = /\/api\/videos(\/search)?(\?|$)/;
+    window.fetch = async function (...args) {
+        let ex = null, isText = false;
+        try {
+            const a0 = args[0];
+            const raw = typeof a0 === 'string' ? a0 : a0 instanceof Request ? a0.url : a0 instanceof URL ? a0.href : '';
+            if (raw && SEARCH_API.test(raw) && (location.pathname.replace(/\/$/, '') === '/search')) {
+                const u = new URL(raw, location.origin);
+                if (u.origin === location.origin && u.searchParams.has('page')) {
+                    lastSearchFetch = Date.now();
+                    ex = pageExtras();
+                    isText = /\/api\/videos\/search$/.test(u.pathname);
+                    let changed = false;
+                    if (ex) EXTRA_KEYS.forEach(k => { if (ex[k] && !u.searchParams.has(k)) { u.searchParams.set(k, ex[k]); changed = true; } });
+                    if (changed) {
+                        const s = u.pathname + u.search;
+                        args[0] = a0 instanceof Request ? new Request(s, a0) : s;
+                    }
+                }
+            }
+        } catch {}
+        const res = await _fetch.apply(this, args);
+        if (!ex || !isText || !res.ok) return res;
+        if (!(ex.in === 'title' || ex.minRating || ex.minHeight || ex.aspect || ex.uploadDateFrom)) return res;
+        try {
+            const json = await res.clone().json();
+            const list = Array.isArray(json?.data) ? json.data : null;
+            if (!list) return res;
+            const kept = list.filter(v => keepVideo(v, ex));
+            if (kept.length === list.length) return res;
+            json.data = kept;
+            const headers = new Headers(res.headers);
+            headers.delete('content-length'); headers.delete('content-encoding');
+            return new Response(JSON.stringify(json), { status: res.status, statusText: res.statusText, headers });
+        } catch { return res; }
+    };
+
+    // ---------------------------------------------------------------------
+    // The site's popout
+    // ---------------------------------------------------------------------
+    let container = null, mo = null, wasOpen = false;
+    function findContainer() {
+        if (container?.isConnected) return container;
+        container = document.querySelector('.search-container');
+        try { mo?.disconnect(); } catch {}
+        mo = null;
+        if (container) {
+            mo = new MutationObserver(syncOpen);
+            mo.observe(container, { attributes: true, attributeFilter: ['class'] });
+        }
+        return container;
+    }
+    const nativeInput = () => findContainer()?.querySelector('input[type="text"]') || null;
+    const isOpen = () => !!findContainer()?.classList.contains('opacity-100');
+    const box = () => findContainer()?.firstElementChild || container;
+
+    function setNativeValue(v) {
+        const inp = nativeInput();
+        if (!inp) return;
+        inp.value = v;
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    function closeNative() {
+        const btns = findContainer()?.querySelectorAll('button');
+        const x = btns && btns[btns.length - 1];
+        if (x && !x.matches('[aria-label="Search"]')) x.click();
+    }
+
+    // ---------------------------------------------------------------------
+    // Panel
+    // ---------------------------------------------------------------------
+    const SVG_STAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/></svg>';
+    const SVG_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+    const SVG_BAN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>';
+    const SVG_FILTER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5H3m9 14H3M14 3v4m2 10v4m5-9h-9m9 7h-5m5-14h-7m-6 5v4m0-2H3"/></svg>';
+    const SVG_CHEV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+    const SVG_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+    const SVG_CLOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>';
+    const SVG_MUSIC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="18" r="4"/><path d="M12 18V2l7 4"/></svg>';
+    const SVG_USER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></svg>';
+    const SVG_HASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg>';
+    const KIND_ICON = { tag: SVG_HASH, star: SVG_STAR, creator: SVG_USER, music: SVG_MUSIC };
+
+    function injectStyle() {
+        if (document.getElementById('pmvsx-style')) return;
+        const st = document.createElement('style');
+        st.id = 'pmvsx-style';
+        st.textContent = `
+#pmvsx{position:fixed;z-index:70;display:none;flex-direction:column;background:#1A1A1A;border:1px solid #2A2A2A;border-radius:8px;
+  box-shadow:0 12px 32px rgba(0,0,0,0.55);overflow:hidden;font-family:inherit;color:rgb(209,213,219);}
+#pmvsx[data-open="1"]{display:flex;}
+#pmvsx *{box-sizing:border-box;}
+#pmvsx svg{width:12px;height:12px;flex-shrink:0;}
+.pmvsx-body{flex:1;min-height:0;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px;}
+.pmvsx-row{display:flex;flex-wrap:wrap;gap:4px;align-items:center;}
+.pmvsx-lab{font-size:10px;font-weight:600;color:rgb(156,163,175);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;gap:6px;margin-bottom:5px;}
+.pmvsx-lab .r{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:400;color:rgba(255,255,255,0.35);font-variant-numeric:tabular-nums;}
+.pmvsx-lab button{background:none;border:none;padding:0;cursor:pointer;color:rgba(255,255,255,0.4);font-size:10px;font-family:inherit;text-transform:none;letter-spacing:0;font-weight:400;}
+.pmvsx-lab button:hover{color:#fff;}
+.pmvsx-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:4px;border:none;cursor:pointer;background:#272727;
+  color:rgb(209,213,219);font-size:11px;font-weight:500;line-height:1.2;font-family:inherit;white-space:nowrap;transition:background .15s,color .15s;}
+.pmvsx-chip:hover{background:#323232;}
+.pmvsx-chip.active{background:rgb(249,115,22);color:#fff;}
+.pmvsx-term{display:inline-flex;align-items:center;gap:4px;padding:2px 4px 2px 6px;border-radius:4px;border:1px solid transparent;cursor:pointer;
+  font-size:11px;line-height:16px;font-family:inherit;max-width:100%;}
+.pmvsx-term .txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pmvsx-term .x{display:inline-flex;opacity:.6;padding:2px;border-radius:3px;}
+.pmvsx-term .x:hover{opacity:1;background:rgba(255,255,255,0.12);}
+.pmvsx-term.pos{background:rgba(245,158,11,0.16);color:rgb(252,211,77);}
+.pmvsx-term.pos.star{background:rgba(234,179,8,.14);border-color:rgba(234,179,8,.45);color:rgb(253,224,71);}
+.pmvsx-term.neg{background:rgba(239,68,68,0.18);color:rgb(252,165,165);} .pmvsx-term.neg .txt{text-decoration:line-through;}
+.pmvsx-list{display:flex;flex-direction:column;margin:0 -12px;}
+.pmvsx-item{display:flex;align-items:center;gap:10px;padding:7px 12px;cursor:pointer;font-size:12px;color:#fff;}
+.pmvsx-item:hover,.pmvsx-item[data-hi="1"]{background:rgba(249,115,22,0.10);}
+.pmvsx-item .ic{display:inline-flex;color:rgb(156,163,175);}
+.pmvsx-item .ic.star{color:rgb(250,204,21);}
+.pmvsx-item .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pmvsx-item .nm b{color:rgb(251,146,60);font-weight:600;}
+.pmvsx-item .su{color:rgb(107,114,128);font-size:10px;white-space:nowrap;font-variant-numeric:tabular-nums;}
+.pmvsx-item .act{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:4px;border:none;background:transparent;
+  color:rgb(107,114,128);cursor:pointer;padding:0;}
+.pmvsx-item .act:hover{background:rgba(239,68,68,0.18);color:rgb(252,165,165);}
+.pmvsx-item .act.rm:hover{background:rgba(255,255,255,0.1);color:#fff;}
+.pmvsx-empty{font-size:11px;color:rgb(107,114,128);padding:2px 0;}
+.pmvsx-ftoggle{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border-radius:4px;border:none;cursor:pointer;background:#272727;
+  color:rgb(209,213,219);font-size:11px;font-weight:500;font-family:inherit;}
+.pmvsx-ftoggle:hover{background:#323232;}
+.pmvsx-ftoggle[data-active="1"]{background:rgb(249,115,22);color:#fff;}
+.pmvsx-ftoggle .chev{display:inline-flex;transition:transform .15s;} .pmvsx-ftoggle[data-open="1"] .chev{transform:rotate(180deg);}
+.pmvsx-pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:9999px;background:rgba(249,115,22,0.12);color:rgb(251,146,60);
+  font-size:10px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;}
+.pmvsx-fbody{display:none;flex-direction:column;gap:10px;padding:10px;border-radius:8px;background:#111;border:1px solid #1F1F1F;}
+.pmvsx-fbody[data-open="1"]{display:flex;}
+.pmvsx-sel{position:relative;display:inline-flex;}
+.pmvsx-selbtn{display:inline-flex;align-items:center;gap:8px;min-width:170px;padding:6px 10px;border-radius:6px;cursor:pointer;text-align:left;
+  background:#0F0F0F;border:1px solid #2A2A2A;color:#fff;font-size:12px;font-family:inherit;}
+.pmvsx-selbtn:hover{border-color:#3A3A3A;} .pmvsx-selbtn[data-open="1"]{border-color:rgb(249,115,22);}
+.pmvsx-selbtn .t{flex:1;} .pmvsx-selbtn .chev{display:inline-flex;color:rgb(156,163,175);transition:transform .15s;}
+.pmvsx-selbtn[data-open="1"] .chev{transform:rotate(180deg);}
+.pmvsx-dd{position:fixed;z-index:71;min-width:220px;border-radius:10px;background:#141414;border:1px solid rgba(249,115,22,0.45);
+  box-shadow:0 12px 32px rgba(0,0,0,0.6);overflow:hidden;}
+.pmvsx-dd .o{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;border-bottom:1px solid #1F1F1F;}
+.pmvsx-dd .o:last-child{border-bottom:none;}
+.pmvsx-dd .o:hover{background:rgba(255,255,255,0.04);} .pmvsx-dd .o[data-sel="1"]{background:rgba(249,115,22,0.12);}
+.pmvsx-dd .tt{flex:1;min-width:0;} .pmvsx-dd .ti{display:block;color:#fff;font-size:12px;font-weight:500;}
+.pmvsx-dd .su{display:block;color:rgb(156,163,175);font-size:10px;margin-top:1px;}
+.pmvsx-dd .ck{display:inline-flex;color:rgb(249,115,22);visibility:hidden;} .pmvsx-dd .o[data-sel="1"] .ck{visibility:visible;}
+.pmvsx-dd .ck svg{width:14px;height:14px;}
+.pmvsx-pillrow{display:flex;justify-content:center;}
+.pmvsx-pill.range{font-size:11px;}
+.pmvsx-slider{position:relative;height:26px;}
+.pmvsx-slider .track{position:absolute;top:11px;left:0;right:0;height:4px;border-radius:2px;background:rgba(255,255,255,0.1);}
+.pmvsx-slider .fill{position:absolute;top:11px;height:4px;border-radius:2px;background:linear-gradient(90deg,rgb(249,115,22),rgb(251,146,60));}
+.pmvsx-slider input[type=range]{position:absolute;top:11px;left:0;width:100%;height:4px;margin:0;padding:0;-webkit-appearance:none;appearance:none;background:transparent;pointer-events:none;outline:none;}
+.pmvsx-slider input[type=range]::-webkit-slider-runnable-track{background:transparent;height:4px;}
+.pmvsx-slider input[type=range]::-moz-range-track{background:transparent;height:4px;border:none;}
+.pmvsx-slider input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;pointer-events:auto;width:14px;height:14px;margin-top:-5px;border-radius:50%;background:#fff;border:3px solid rgb(249,115,22);box-shadow:0 2px 6px rgba(0,0,0,0.4);cursor:pointer;}
+.pmvsx-slider input[type=range]::-moz-range-thumb{pointer-events:auto;width:8px;height:8px;border-radius:50%;background:#fff;border:3px solid rgb(249,115,22);box-shadow:0 2px 6px rgba(0,0,0,0.4);cursor:pointer;}
+.pmvsx-ends{display:flex;justify-content:space-between;color:rgba(255,255,255,0.35);font-size:10px;margin:-4px 0 4px;}
+.pmvsx-foot{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid #2A2A2A;background:#1A1A1A;flex-shrink:0;}
+.pmvsx-hint{flex:1;min-width:0;font-size:10px;color:rgba(255,255,255,0.35);line-height:1.4;}
+.pmvsx-hint kbd{font-family:inherit;font-size:10px;padding:0 4px;border-radius:3px;background:#272727;color:rgb(209,213,219);}
+.pmvsx-go{padding:6px 12px;border-radius:4px;border:none;cursor:pointer;background:rgb(249,115,22);color:#fff;font-size:11px;font-weight:600;font-family:inherit;}
+.pmvsx-go:hover{background:rgb(234,88,12);}
+.pmvsx-go:disabled{opacity:.4;cursor:default;background:rgb(249,115,22);}
+`;
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+    const ico = (svg, cls) => { const s = mk('span', cls || 'ic'); s.innerHTML = svg; s.style.display = 'inline-flex'; return s; };
+    const fmtCount = n => { n = Number(n) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k' : String(n); };
+    const fmtMin = (m, top) => top && m >= DUR_MAX ? `${DUR_MAX}+ min` : `${m} min`;
+
+    let panel = null, el = {};
+    function buildPanel() {
+        if (panel?.isConnected) return panel;
+        injectStyle();
+        panel = mk('div'); panel.id = 'pmvsx';
+        panel.setAttribute('data-pmvx-search', '1');
+        // The site closes (and clears) its search on any click outside its own box: keep ours inside it.
+        panel.addEventListener('click', e => { e.stopPropagation(); if (dd && !dd.contains(e.target) && !e.target.closest('.pmvsx-selbtn')) closeDd(); });
+        // Keep the caret in the site's input while clicking chips and rows.
+        panel.addEventListener('mousedown', e => { if (!e.target.closest('input')) e.preventDefault(); });
+
+        const body = mk('div', 'pmvsx-body');
+        // Where to search
+        const secScope = mk('div');
+        const scopeLab = mk('div', 'pmvsx-lab', 'Search in');
+        el.scopeHint = mk('span', 'r');
+        scopeLab.appendChild(el.scopeHint);
+        el.scopes = mk('div', 'pmvsx-row');
+        secScope.append(scopeLab, el.scopes);
+        // Chips
+        el.terms = mk('div', 'pmvsx-row');
+        // Suggestions / recent
+        el.list = mk('div');
+        // Filters
+        const secF = mk('div');
+        const fRow = mk('div', 'pmvsx-row');
+        el.ftoggle = mk('button', 'pmvsx-ftoggle'); el.ftoggle.type = 'button';
+        el.ftoggle.append(ico(SVG_FILTER, ''), mk('span', null, 'Filters'), ico(SVG_CHEV, 'chev'));
+        el.ftoggle.onclick = () => { filtersOpen = !filtersOpen; save(FOPEN_KEY, filtersOpen); renderFilters(); place(); };
+        el.fsum = mk('span', 'pmvsx-row');
+        el.freset = mk('button', 'pmvsx-chip', 'Reset'); el.freset.type = 'button';
+        el.freset.style.marginLeft = 'auto';
+        el.freset.onclick = () => { Object.assign(F, F_DEFAULT); save(FILTER_KEY, F); renderFilters(); };
+        fRow.append(el.ftoggle, el.fsum, el.freset);
+        el.fbody = mk('div', 'pmvsx-fbody');
+        el.fbody.style.marginTop = '8px';
+        buildFilterBody(el.fbody);
+        secF.append(fRow, el.fbody);
+
+        body.append(secScope, el.terms, el.list, secF);
+        const foot = mk('div', 'pmvsx-foot');
+        el.hint = mk('div', 'pmvsx-hint');
+        el.hint.innerHTML = '<kbd>↵</kbd> search · <kbd>Tab</kbd> where · <kbd>↑</kbd><kbd>↓</kbd> pick · <kbd>#</kbd>tag <kbd>*</kbd>star <kbd>@</kbd>creator, <kbd>-</kbd> to exclude · click a chip to exclude it';
+        el.go = mk('button', 'pmvsx-go', 'Search'); el.go.type = 'button';
+        el.go.onclick = () => { submit(true); };
+        foot.append(el.hint, el.go);
+        panel.append(body, foot);
+        document.body.appendChild(panel);
+        return panel;
+    }
+
+    // Filter body: sort dropdown, length slider, chip rows.
+    let dd = null;
+    function closeDd() { if (dd) { dd.remove(); dd = null; el.sortBtn?.setAttribute('data-open', '0'); } }
+    function chipRow(items, get, set) {
+        const row = mk('div', 'pmvsx-row');
+        const btns = items.map(it => {
+            const b = mk('button', 'pmvsx-chip', it.t); b.type = 'button';
+            b.onclick = () => { set(it.v); save(FILTER_KEY, F); renderFilters(); };
+            row.appendChild(b);
+            return b;
+        });
+        return { el: row, render: () => btns.forEach((b, i) => b.classList.toggle('active', items[i].v === get())) };
+    }
+    const fRenders = [];
+    function section(parent, label, node) {
+        const s = mk('div');
+        const lab = mk('div', 'pmvsx-lab', label);
+        s.append(lab, node);
+        parent.appendChild(s);
+        return lab;
+    }
+    function buildFilterBody(fb) {
+        // Sort
+        const sel = mk('div', 'pmvsx-sel');
+        el.sortBtn = mk('button', 'pmvsx-selbtn'); el.sortBtn.type = 'button';
+        const st = mk('span', 't');
+        el.sortBtn.append(st, ico(SVG_CHEV, 'chev'));
+        el.sortBtn.onclick = () => {
+            if (dd) { closeDd(); return; }
+            dd = mk('div', 'pmvsx-dd');
+            SORTS.forEach(o => {
+                const row = mk('div', 'o'); row.dataset.sel = o.v === F.sort ? '1' : '0';
+                const tt = mk('div', 'tt'); tt.append(mk('span', 'ti', o.t), mk('span', 'su', o.s));
+                row.append(tt, ico(SVG_CHECK, 'ck'));
+                row.onclick = () => { F.sort = o.v; save(FILTER_KEY, F); closeDd(); renderFilters(); };
+                dd.appendChild(row);
+            });
+            panel.appendChild(dd); // inside the panel, so the site does not see an outside click
+            const r = el.sortBtn.getBoundingClientRect();
+            dd.style.left = Math.max(8, Math.min(r.left, innerWidth - 228)) + 'px';
+            const h = dd.getBoundingClientRect().height;
+            dd.style.top = (r.bottom + 4 + h > innerHeight - 8 && r.top - 4 - h > 8 ? r.top - 4 - h : r.bottom + 4) + 'px';
+            el.sortBtn.dataset.open = '1';
+        };
+        sel.appendChild(el.sortBtn);
+        section(fb, 'Sort by', sel);
+        fRenders.push(() => { st.textContent = (SORTS.find(o => o.v === F.sort) || SORTS[0]).t; });
+
+        // Length: dual slider with presets
+        const wrap = mk('div');
+        const pillRow = mk('div', 'pmvsx-pillrow'); const pill = mk('span', 'pmvsx-pill range'); pillRow.appendChild(pill);
+        const slider = mk('div', 'pmvsx-slider'); const fill = mk('div', 'fill');
+        const rA = mk('input'); rA.type = 'range'; rA.min = '0'; rA.max = String(DUR_MAX); rA.step = '1';
+        const rB = mk('input'); rB.type = 'range'; rB.min = '0'; rB.max = String(DUR_MAX); rB.step = '1';
+        slider.append(mk('div', 'track'), fill, rA, rB);
+        const ends = mk('div', 'pmvsx-ends'); ends.append(mk('span', null, '0 min'), mk('span', null, `${DUR_MAX}+ min`));
+        const presets = mk('div', 'pmvsx-row');
+        const pBtns = DUR_PRESETS.map(p => {
+            const b = mk('button', 'pmvsx-chip', p.label); b.type = 'button';
+            b.onclick = () => { F.durMin = p.a; F.durMax = p.b; save(FILTER_KEY, F); renderFilters(); };
+            presets.appendChild(b); return b;
+        });
+        const paint = (a, b) => {
+            pill.textContent = a === 0 && b >= DUR_MAX ? 'Any length' : `${fmtMin(a)} – ${fmtMin(b, true)}`;
+            fill.style.left = (a / DUR_MAX * 100) + '%';
+            fill.style.width = (Math.max(0, b - a) / DUR_MAX * 100) + '%';
+            pBtns.forEach((c, i) => c.classList.toggle('active', DUR_PRESETS[i].a === a && DUR_PRESETS[i].b === b));
+        };
+        const onInput = which => () => {
+            let a = parseInt(rA.value, 10), b = parseInt(rB.value, 10);
+            if (a > b) { if (which === 'a') { b = a; rB.value = String(b); } else { a = b; rA.value = String(a); } }
+            F.durMin = a; F.durMax = b; paint(a, b);
+        };
+        rA.addEventListener('input', onInput('a')); rB.addEventListener('input', onInput('b'));
+        const done = () => { save(FILTER_KEY, F); renderFilters(); nativeInput()?.focus(); };
+        rA.addEventListener('change', done); rB.addEventListener('change', done);
+        wrap.append(pillRow, slider, ends, presets);
+        section(fb, 'Length', wrap);
+        fRenders.push(() => { rA.value = String(F.durMin); rB.value = String(F.durMax); paint(F.durMin, F.durMax); });
+
+        const rating = chipRow(RATINGS, () => F.rating, v => { F.rating = v; });
+        section(fb, 'Rating', rating.el); fRenders.push(rating.render);
+        const quality = chipRow(QUALITIES, () => F.quality, v => { F.quality = v; });
+        section(fb, 'Quality', quality.el); fRenders.push(quality.render);
+        const aspect = chipRow(ASPECTS, () => F.aspect, v => { F.aspect = v; });
+        section(fb, 'Aspect ratio', aspect.el); fRenders.push(aspect.render);
+        const date = chipRow(DATES, () => F.days, v => { F.days = v; });
+        section(fb, 'Uploaded', date.el); fRenders.push(date.render);
+    }
+
+    function filterSummary(f) {
+        const out = [];
+        if (f.sort) out.push((SORTS.find(o => o.v === f.sort) || {}).t);
+        if (f.durMin > 0 || f.durMax < DUR_MAX) out.push(f.durMax >= DUR_MAX ? `${f.durMin}+ min` : f.durMin === 0 ? `< ${f.durMax} min` : `${f.durMin}–${f.durMax} min`);
+        if (f.rating) out.push(`${f.rating}%+`);
+        if (f.quality) out.push((QUALITIES.find(o => o.v === f.quality) || {}).t);
+        if (f.aspect) out.push((ASPECTS.find(o => o.v === f.aspect) || {}).t);
+        if (f.days) out.push((DATES.find(o => o.v === f.days) || {}).t);
+        return out.filter(Boolean);
+    }
+    function renderFilters() {
+        if (!panel) return;
+        fRenders.forEach(fn => fn());
+        const sum = filterSummary(F);
+        el.fsum.replaceChildren(...sum.map(s => mk('span', 'pmvsx-pill', s)));
+        el.ftoggle.dataset.active = sum.length ? '1' : '0';
+        el.ftoggle.dataset.open = filtersOpen ? '1' : '0';
+        el.fbody.dataset.open = filtersOpen ? '1' : '0';
+        el.freset.style.display = sum.length ? '' : 'none';
+        renderGo();
+    }
+
+    function renderScopes() {
+        el.scopes.replaceChildren(...SCOPES.map(s => {
+            const b = mk('button', 'pmvsx-chip' + (s.id === scope ? ' active' : ''), s.label); b.type = 'button';
+            b.onclick = () => setScope(s.id);
+            return b;
+        }));
+        el.scopeHint.textContent = scope === 'title' ? 'only titles, not tags or descriptions'
+            : scope === 'all' ? "the site's own search" : 'pick a suggestion or press ↵';
+        const inp = nativeInput();
+        if (inp) inp.placeholder = (SCOPES.find(s => s.id === scope) || SCOPES[0]).ph;
+    }
+    function setScope(id) {
+        scope = id; save(SCOPE_KEY, scope);
+        renderScopes(); refreshSuggestions(); renderGo();
+        nativeInput()?.focus();
+    }
+
+    function termEl(t, i) {
+        const k = KINDS[t.kind];
+        const c = mk('span', 'pmvsx-term ' + (t.neg ? 'neg' : 'pos') + (t.kind === 'star' ? ' star' : ''));
+        if (t.neg) c.appendChild(ico(SVG_BAN, ''));
+        c.appendChild(t.kind === 'star' ? ico(SVG_STAR, '') : mk('span', null, k.sym));
+        c.appendChild(mk('span', 'txt', t.name));
+        const x = ico(SVG_X, 'x'); x.title = 'Remove';
+        x.onclick = e => { e.stopPropagation(); terms.splice(i, 1); renderTerms(); };
+        c.appendChild(x);
+        c.title = `${k.label}: ${t.neg ? 'excluded' : 'required'}` + (k.exc ? ' — click to ' + (t.neg ? 'require' : 'exclude') : '');
+        c.onclick = () => { if (!k.exc) return; t.neg = !t.neg; renderTerms(); };
+        return c;
+    }
+    function renderTerms() {
+        el.terms.replaceChildren(...terms.map(termEl));
+        el.terms.style.display = terms.length ? '' : 'none';
+        renderList(); renderGo();
+        place();
+    }
+    function addTerm(list, kind, name, neg) {
+        name = String(name || '').trim();
+        if (!name || !KINDS[kind]) return;
+        if (neg && !KINDS[kind].exc) neg = false;
+        const low = name.toLowerCase();
+        for (let i = list.length - 1; i >= 0; i--) {
+            const t = list[i];
+            if (t.kind !== kind) continue;
+            if (t.name.toLowerCase() === low || (KINDS[kind].single && !neg && !t.neg)) list.splice(i, 1);
+        }
+        list.push({ kind, name, neg: !!neg });
+    }
+
+    // Input prefixes: #tag, *star, @creator; a leading "-" excludes.
+    function parseInput(raw) {
+        let t = String(raw || '').trim(), neg = false, kind = null;
+        if (/^-[#*@]/.test(t)) { neg = true; t = t.slice(1); }
+        if (t[0] === '#') kind = 'tag'; else if (t[0] === '*') kind = 'star'; else if (t[0] === '@') kind = 'creator';
+        if (kind) t = t.slice(1).trim();
+        else if (KINDS[scope]) kind = scope;
+        return { text: t, kind, neg };
+    }
+
+    // Suggestions from the site's autocomplete (cached, debounced, last request wins).
+    const acCache = new Map();
+    async function acFetch(url) {
+        if (acCache.has(url)) return acCache.get(url);
+        const p = _fetch(url, { credentials: 'include' }).then(r => r.ok ? r.json() : null).then(j => Array.isArray(j?.data) ? j.data : []).catch(() => []);
+        acCache.set(url, p);
+        if (acCache.size > 120) acCache.delete(acCache.keys().next().value);
+        return p;
+    }
+    const nameOf = it => typeof it === 'string' ? it : String(it?.name ?? it?.artist ?? '').trim();
+    let acTimer = 0, acSeq = 0;
+    function refreshSuggestions() {
+        clearTimeout(acTimer);
+        const p = parseInput(nativeInput()?.value || '');
+        if (p.text.length < 2 || (!p.kind && scope === 'title')) { sugg = []; hi = -1; renderList(); return; }
+        const seq = ++acSeq;
+        acTimer = setTimeout(async () => {
+            let out = [];
+            if (p.kind) {
+                const data = await acFetch(KINDS[p.kind].ac(p.text));
+                out = data.map(it => ({ kind: p.kind, name: nameOf(it), count: it?.usageCount }));
+            } else {
+                // Everything: tags and stars come from one call, told apart by type.
+                const [tags, creators] = await Promise.all([
+                    acFetch(`/api/tags/autocomplete?q=${enc(p.text)}&limit=8`),
+                    acFetch(KINDS.creator.ac(p.text)),
+                ]);
+                const ts = tags.map(it => ({ kind: it?.type === 'stars' ? 'star' : 'tag', name: nameOf(it), count: it?.usageCount }));
+                out = [...ts.filter(s => s.kind === 'tag').slice(0, 4), ...ts.filter(s => s.kind === 'star').slice(0, 3),
+                       ...creators.slice(0, 3).map(it => ({ kind: 'creator', name: nameOf(it), count: it?.usageCount }))];
+            }
+            if (seq !== acSeq) return;
+            const have = new Set(terms.map(t => t.kind + '\n' + t.name.toLowerCase()));
+            sugg = out.filter(s => s.name && !have.has(s.kind + '\n' + s.name.toLowerCase())).slice(0, 10);
+            hi = -1;
+            renderList();
+        }, 160);
+    }
+
+    function highlight(name, q) {
+        const span = mk('span', 'nm');
+        const i = fold(name).indexOf(fold(q));
+        if (!q || i < 0) { span.textContent = name; return span; }
+        span.append(document.createTextNode(name.slice(0, i)), mk('b', null, name.slice(i, i + q.length)), document.createTextNode(name.slice(i + q.length)));
+        return span;
+    }
+    function pickSuggestion(s, neg) {
+        addTerm(terms, s.kind, s.name, neg ?? parseInput(nativeInput()?.value || '').neg);
+        setNativeValue('');
+        sugg = []; hi = -1;
+        renderTerms();
+        nativeInput()?.focus();
+    }
+    function renderList() {
+        if (!panel) return;
+        const raw = nativeInput()?.value || '';
+        const p = parseInput(raw);
+        const nodes = [];
+        if (sugg.length) {
+            const lab = mk('div', 'pmvsx-lab', 'Suggestions');
+            const list = mk('div', 'pmvsx-list');
+            sugg.forEach((s, i) => {
+                const k = KINDS[s.kind];
+                const row = mk('div', 'pmvsx-item'); row.dataset.hi = i === hi ? '1' : '0';
+                row.append(ico(KIND_ICON[s.kind], 'ic' + (s.kind === 'star' ? ' star' : '')), highlight(s.name, p.text),
+                           mk('span', 'su', k.label + (s.count ? ' · ' + fmtCount(s.count) : '')));
+                if (k.exc) {
+                    const ex = mk('button', 'act'); ex.type = 'button'; ex.innerHTML = SVG_BAN; ex.title = 'Exclude';
+                    ex.onclick = e => { e.stopPropagation(); pickSuggestion(s, true); };
+                    row.appendChild(ex);
+                }
+                row.title = `Add ${k.label.toLowerCase()} “${s.name}”` + (k.exc ? ' (⊘ excludes)' : '');
+                row.onclick = () => pickSuggestion(s);
+                row.onmouseenter = () => { if (hi !== i) { hi = i; list.querySelectorAll('.pmvsx-item').forEach((r, j) => r.dataset.hi = j === i ? '1' : '0'); } };
+                list.appendChild(row);
+            });
+            nodes.push(lab, list);
+        } else if (!raw.trim() && !terms.length) {
+            const rec = load(RECENT_KEY, []);
+            if (Array.isArray(rec) && rec.length) {
+                const lab = mk('div', 'pmvsx-lab', 'Recent');
+                const clr = mk('button', null, 'Clear'); clr.type = 'button'; clr.style.marginLeft = 'auto';
+                clr.onclick = () => { save(RECENT_KEY, []); renderList(); place(); };
+                lab.appendChild(clr);
+                const list = mk('div', 'pmvsx-list');
+                rec.forEach((st, i) => {
+                    const row = mk('div', 'pmvsx-item');
+                    row.append(ico(SVG_CLOCK, 'ic'), mk('span', 'nm', describe(st)));
+                    const rm = mk('button', 'act rm'); rm.type = 'button'; rm.innerHTML = SVG_X; rm.title = 'Remove from recent';
+                    rm.onclick = e => { e.stopPropagation(); const r = load(RECENT_KEY, []); r.splice(i, 1); save(RECENT_KEY, r); renderList(); place(); };
+                    row.appendChild(rm);
+                    row.title = 'Search again';
+                    row.onclick = () => { pushRecent(st); go(st); };
+                    list.appendChild(row);
+                });
+                nodes.push(lab, list);
+            }
+        } else if (p.kind && p.text.length >= 2) {
+            nodes.push(mk('div', 'pmvsx-empty', `↵ adds ${KINDS[p.kind].label.toLowerCase()} “${p.text}”${p.neg ? ' as excluded' : ''} and searches`));
+        }
+        el.list.replaceChildren(...nodes);
+        el.list.style.display = nodes.length ? '' : 'none';
+    }
+
+    function describe(st) {
+        const parts = [];
+        if (st.text) parts.push(`“${st.text}”` + (st.scope === 'title' ? ' in titles' : ''));
+        (st.terms || []).forEach(t => parts.push((t.neg ? '⊘ ' : '') + KINDS[t.kind].sym + t.name));
+        parts.push(...filterSummary(Object.assign({}, F_DEFAULT, st.f)));
+        return parts.join(' · ') || '(empty)';
+    }
+    function pushRecent(st) {
+        const key = describe(st);
+        const rec = (load(RECENT_KEY, []) || []).filter(r => r && describe(r) !== key);
+        rec.unshift({ text: st.text, scope: st.scope, terms: st.terms, f: st.f });
+        save(RECENT_KEY, rec.slice(0, RECENT_MAX));
+    }
+
+    // What a search would be right now: chips plus the input (as a chip when it is a tag/star/... ).
+    function snapshot() {
+        const p = parseInput(nativeInput()?.value || '');
+        const list = terms.map(t => ({ ...t }));
+        let text = '';
+        if (p.text) { if (p.kind) addTerm(list, p.kind, p.text, p.neg); else text = p.text; }
+        return { text, scope: p.kind ? 'all' : scope, terms: list, f: { ...F } };
+    }
+    // Plain text in Everything without chips or filters: the site's own search.
+    const isPlain = st => !st.terms.length && st.scope !== 'title' && isDefaultFilters(st.f);
+    function renderGo() {
+        if (!el.go) return;
+        const st = snapshot();
+        el.go.disabled = !st.text && !st.terms.length;
+    }
+
+    function go(st) {
+        const qs = buildParams(st).toString();
+        const url = '/search' + (qs ? '?' + qs : '');
+        closeNative();
+        hide();
+        if ((location.pathname.replace(/\/$/, '') || '/') === '/search') { location.assign(url); return; }
+        const router = document.querySelector('#__nuxt')?.__vue_app__?.config?.globalProperties?.$router;
+        if (!router) { location.assign(url); return; }
+        const t0 = Date.now();
+        router.push(url).catch(() => location.assign(url));
+        // A kept-alive /search page does not search again on a new URL: reload if it stayed quiet.
+        setTimeout(() => {
+            if ((location.pathname.replace(/\/$/, '') || '/') === '/search' && lastSearchFetch < t0) location.reload();
+        }, 2500);
+    }
+    // Returns true when handled here (the site's own search must not run).
+    function submit(force) {
+        const st = snapshot();
+        if (!st.text && !st.terms.length) return !!force;
+        pushRecent(st);
+        if (isPlain(st) && !force) return false;
+        go(st);
+        return true;
+    }
+
+    // ---------------------------------------------------------------------
+    // Open / close / placement
+    // ---------------------------------------------------------------------
+    let followUntil = 0;
+    function place() {
+        if (!panel || panel.dataset.open !== '1') return;
+        const b = box();
+        if (!b) return;
+        const r = b.getBoundingClientRect();
+        if (!r.width) return;
+        const w = Math.max(r.width, Math.min(420, innerWidth - 16));
+        const left = Math.max(8, Math.min(r.left, innerWidth - 8 - w));
+        const top = r.bottom + 6;
+        panel.style.left = left + 'px';
+        panel.style.top = top + 'px';
+        panel.style.width = w + 'px';
+        panel.style.maxHeight = Math.max(160, innerHeight - top - 12) + 'px';
+    }
+    function follow() {
+        place();
+        if (Date.now() < followUntil && panel?.dataset.open === '1') requestAnimationFrame(follow);
+    }
+    function show() {
+        buildPanel();
+        panel.dataset.open = '1';
+        renderScopes(); renderTerms(); renderFilters(); refreshSuggestions();
+        followUntil = Date.now() + 600; // the site's box slides in over 400 ms
+        follow();
+    }
+    function hide() {
+        closeDd();
+        if (panel) panel.dataset.open = '0';
+        terms = []; sugg = []; hi = -1; clearTimeout(acTimer); acSeq++;
+    }
+    function syncOpen() {
+        const open = isOpen();
+        if (open === wasOpen) return;
+        wasOpen = open;
+        if (open) show(); else hide();
+    }
+
+    // Keys in the site's input (capture: before the site's own Enter/Escape handlers).
+    window.addEventListener('keydown', e => {
+        const inp = nativeInput();
+        if (!inp || e.target !== inp || !isOpen() || e.isComposing) return;
+        const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            if (!sugg.length) return;
+            stop();
+            hi = e.key === 'ArrowDown' ? (hi + 1) % sugg.length : (hi <= 0 ? sugg.length - 1 : hi - 1);
+            renderList();
+            panel?.querySelector('.pmvsx-item[data-hi="1"]')?.scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Enter') {
+            if (hi >= 0 && sugg[hi]) { stop(); pickSuggestion(sugg[hi], e.shiftKey || undefined); return; }
+            if (submit(false)) stop();
+        } else if (e.key === 'Tab' && !e.altKey && !e.ctrlKey && !e.metaKey) {
+            stop();
+            const i = SCOPES.findIndex(s => s.id === scope);
+            setScope(SCOPES[(i + (e.shiftKey ? SCOPES.length - 1 : 1)) % SCOPES.length].id);
+        } else if (e.key === 'Backspace' && !inp.value && terms.length) {
+            stop(); terms.pop(); renderTerms();
+        } else if (e.key === 'Escape' && (dd || hi >= 0)) {
+            stop(); closeDd(); hi = -1; renderList();
+        }
+    }, true);
+    // The site's magnifier button.
+    window.addEventListener('click', e => {
+        const btn = e.target?.closest?.('button[aria-label="Search"]');
+        if (!btn || !findContainer()?.contains(btn) || !isOpen()) return;
+        if (submit(false)) { e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
+    document.addEventListener('input', e => {
+        if (e.target !== nativeInput() || !isOpen()) return;
+        refreshSuggestions(); renderList(); renderGo();
+    }, true);
+    window.addEventListener('resize', () => { closeDd(); place(); });
+
+    // The header can be re-rendered by Vue: re-find the box (cheap) and pick up a missed open/close.
+    findContainer();
+    syncOpen();
+    setInterval(() => { findContainer(); syncOpen(); }, 1000);
+    document.addEventListener('click', e => { if (e.target?.closest?.('.search-trigger')) setTimeout(() => { findContainer(); syncOpen(); }, 0); }, true);
+})();
+
+(function () {
+    'use strict';
+
+    // ---------------------------------------------------------------------
+    // Tag menu
+    // ---------------------------------------------------------------------
+    // On a video page a click on a tag, a star (model) or a music chip under the player opens a menu
+    // instead of leaving the page: require or exclude it in the site-wide filter, go on to where the
+    // chip normally leads (search results, or the star's profile), and that tag's / star's / song's
+    // videos in one column of cards in the site's own style, with sort and more on scroll.
+    // Ctrl/Cmd/Shift/middle click keep the site's own link.
+    // Videos: stars from /api/models/<slug> (the profile page's call, which knows aliases), falling
+    // back to /api/videos?stars= (exact tag); tags and music from /api/videos. The "_pmvx" marker keeps
+    // these calls out of the browse module's pagination.
+
+    const SORT_KEY = 'pmvx_star_sort_v2';
+    const PAGE = 16;
+    // The profile page's sort options; `alt` is the same order on /api/videos.
+    const SORTS = [
+        { v: '-releaseDate',    alt: '-uploadDate',     t: 'Newest' },
+        { v: 'releaseDate',     alt: 'uploadDate',      t: 'Oldest' },
+        { v: '-views',          alt: '-views',          t: 'Most Viewed' },
+        { v: '-bayesianRating', alt: '-bayesianRating', t: 'Highest Rated' },
+    ];
+    const enc = encodeURIComponent;
+    let sort = (() => { try { const v = localStorage.getItem(SORT_KEY); return SORTS.some(s => s.v === v) ? v : '-bayesianRating'; } catch { return '-bayesianRating'; } })();
+
+    const SVG_STAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/></svg>';
+    const SVG_HASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg>';
+    const SVG_DISC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M6 12c0-1.7.7-3.2 1.8-4.2"/><circle cx="12" cy="12" r="2"/><path d="M18 12c0 1.7-.7 3.2-1.8 4.2"/></svg>';
+    const SVG_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+    const SVG_ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>';
+    const SVG_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>';
+    const SVG_BAN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>';
+    const SVG_QUEUE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h13M3 12h9M3 18h9M17 11v8M13 15h8"/></svg>';
+    const SVG_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+    const SVG_EYE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>';
+    const SVG_CAL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>';
+    const SVG_THUMB = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>';
+    const SVG_CHECKBADGE = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3-.2.9 2.9 2.5 1.7-1 2.8 1 2.8-2.5 1.7-.9 2.9-3-.2L12 22l-2.4-1.8-3 .2-.9-2.9-2.5-1.7 1-2.8-1-2.8 2.5-1.7.9-2.9 3 .2z"/><path d="m8.5 12 2.5 2.5 4.5-5" fill="none" stroke="#111" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+    const qparam = (a, k) => { try { return new URL(a.getAttribute('href') || '', location.origin).searchParams.get(k) || ''; } catch { return ''; } };
+    const textOf = a => ((a.querySelector('.truncate')?.textContent || a.textContent || '').replace(/\s+/g, ' ').trim());
+
+    // Chip kinds under the player. read(a) -> { name, term, title, ... } or null.
+    const KINDS = {
+        tag: {
+            sel: 'a[href^="/search?tags="]', icon: SVG_HASH, what: 'tag', go: 'Search results',
+            read: a => { const t = (qparam(a, 'tags').split(',')[0] || textOf(a).replace(/^#/, '')).trim(); return t ? { name: t, title: '#' + t, term: t } : null; },
+        },
+        star: {
+            sel: 'a[href^="/model/"]', icon: SVG_STAR, what: 'star', go: 'Full profile',
+            read: a => {
+                const n = textOf(a);
+                const slug = decodeURIComponent((a.getAttribute('href') || '').replace(/^\/model\//, '').split(/[?#]/)[0]);
+                return n ? { name: n, title: n, term: n, slug: slug || n } : null;
+            },
+        },
+        music: {
+            sel: 'a[href^="/search?musicArtist="]', icon: SVG_DISC, what: 'artist', go: 'Search results',
+            read: a => {
+                const artist = qparam(a, 'musicArtist').trim(), song = qparam(a, 'musicSong').trim();
+                return artist ? { name: artist, title: song ? `${artist} – ${song}` : artist, term: artist, artist, song } : null;
+            },
+        },
+    };
+    const ANY_SEL = Object.values(KINDS).map(k => k.sel).join(', ');
+    const kindOf = a => Object.keys(KINDS).find(k => a.matches(KINDS[k].sel)) || null;
+
+    const isVideoPage = () => /^\/video\//.test(location.pathname);
+    const currentVideoId = () => PMVX.state?.currentVideoId || location.pathname.match(/([a-f0-9]{24})\/?$/i)?.[1] || null;
+
+    function injectStyle() {
+        if (document.getElementById('pmvst-style')) return;
+        const st = document.createElement('style');
+        st.id = 'pmvst-style';
+        st.textContent = `
+#pmvst{position:fixed;z-index:80;display:flex;flex-direction:column;width:min(360px,calc(100vw - 16px));background:#1A1A1A;border:1px solid #2A2A2A;
+  border-radius:12px;box-shadow:0 20px 40px rgba(0,0,0,0.6);overflow:hidden;font-family:inherit;color:rgb(209,213,219);
+  --acc:249,115,22;--acc-fg:253,186,116;}
+#pmvst[data-kind="star"]{--acc:234,179,8;--acc-fg:253,224,71;}
+#pmvst[data-kind="music"]{--acc:34,197,94;--acc-fg:134,239,172;}
+#pmvst *{box-sizing:border-box;}
+#pmvst svg{flex-shrink:0;}
+.pmvst-head{display:flex;align-items:center;gap:10px;padding:12px 12px 10px;}
+.pmvst-av{width:40px;height:40px;border-radius:9999px;flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center;
+  background:rgba(var(--acc),0.2);border:1px solid rgba(var(--acc),0.45);color:rgb(var(--acc-fg));}
+#pmvst[data-kind="tag"] .pmvst-av{border-radius:10px;}
+.pmvst-av img{width:100%;height:100%;object-fit:cover;display:block;}
+.pmvst-av svg{width:18px;height:18px;}
+.pmvst-who{flex:1;min-width:0;}
+.pmvst-name{display:flex;align-items:center;gap:5px;color:#fff;font-size:15px;font-weight:700;line-height:1.25;}
+.pmvst-name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pmvst-name svg{width:14px;height:14px;color:rgb(250,204,21);}
+.pmvst-sub{font-size:12px;color:rgb(156,163,175);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums;}
+.pmvst-close{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border:none;border-radius:8px;background:transparent;color:rgb(156,163,175);cursor:pointer;flex-shrink:0;}
+.pmvst-close:hover{background:#2A2A2A;color:#fff;} .pmvst-close svg{width:16px;height:16px;}
+.pmvst-acts{display:flex;flex-direction:column;gap:8px;padding:0 12px 12px;border-bottom:1px solid #2A2A2A;}
+.pmvst-row{display:flex;align-items:center;gap:6px;}
+.pmvst-lab{font-size:10px;font-weight:600;color:rgb(107,114,128);text-transform:uppercase;letter-spacing:.05em;width:44px;flex-shrink:0;}
+.pmvst-fbtn{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:7px 8px;border-radius:8px;border:1px solid #2A2A2A;
+  background:#141414;color:rgb(209,213,219);font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s,color .15s;}
+.pmvst-fbtn svg{width:13px;height:13px;}
+.pmvst-fbtn:hover{border-color:#3A3A3A;color:#fff;}
+.pmvst-fbtn.inc[data-on="1"]{background:rgba(245,158,11,0.18);border-color:rgba(245,158,11,0.6);color:rgb(252,211,77);}
+.pmvst-fbtn.exc[data-on="1"]{background:rgba(239,68,68,0.18);border-color:rgba(239,68,68,0.6);color:rgb(252,165,165);}
+.pmvst-fbtn.exc[data-on="1"] .t{text-decoration:line-through;}
+.pmvst-go{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:7px 10px;border-radius:8px;border:none;background:rgb(249,115,22);
+  color:#fff;font-size:12px;font-weight:600;text-decoration:none;white-space:nowrap;transition:background .15s;}
+.pmvst-go:hover{background:rgb(234,88,12);} .pmvst-go svg{width:13px;height:13px;}
+.pmvst-sort{flex:1;min-width:0;padding:6px 8px;background:#141414;border:1px solid #1E1E1E;border-radius:8px;color:#fff;font-size:12px;font-family:inherit;cursor:pointer;outline:none;}
+.pmvst-sort:hover{border-color:#2A2A2A;} .pmvst-sort:focus{border-color:rgb(249,115,22);}
+.pmvst-seg{display:inline-flex;border-radius:8px;overflow:hidden;border:1px solid #1E1E1E;flex-shrink:0;}
+.pmvst-seg button{padding:6px 9px;border:none;background:#141414;color:rgb(156,163,175);font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;}
+.pmvst-seg button:hover{color:#fff;} .pmvst-seg button[data-on="1"]{background:rgba(var(--acc),0.2);color:rgb(var(--acc-fg));}
+.pmvst-body{flex:1;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:12px;scrollbar-width:thin;scrollbar-color:#3A3A3A transparent;}
+.pmvst-card{display:block;border-radius:12px;overflow:hidden;background:linear-gradient(135deg,#1F1F1F,#171717);border:1px solid #2A2A2A;color:inherit;text-decoration:none;
+  transition:border-color .2s,box-shadow .2s;flex-shrink:0;}
+.pmvst-card:hover{border-color:rgba(249,115,22,0.5);box-shadow:0 10px 24px rgba(0,0,0,0.45);}
+.pmvst-thumb{position:relative;aspect-ratio:16/9;background:#0F0F0F;overflow:hidden;}
+.pmvst-thumb img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .3s,opacity .2s;}
+.pmvst-card:hover .pmvst-thumb img{transform:scale(1.04);}
+.pmvst-card[data-seen="1"] .pmvst-thumb img{opacity:.45;}
+.pmvst-badge{position:absolute;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,0.8);color:#fff;font-size:11px;font-weight:600;line-height:16px;font-variant-numeric:tabular-nums;}
+.pmvst-dur{right:8px;bottom:8px;}
+.pmvst-seen{left:8px;bottom:8px;color:rgb(209,213,219);}
+.pmvst-pl{left:8px;top:8px;max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:rgba(249,115,22,0.92);}
+.pmvst-q{position:absolute;right:8px;top:8px;display:inline-flex;align-items:center;justify-content:center;gap:3px;height:28px;min-width:28px;padding:0 6px;
+  border-radius:6px;border:none;cursor:pointer;background:rgba(0,0,0,0.8);color:#fff;opacity:0;transition:opacity .15s,background .15s;font-size:11px;font-weight:700;font-family:inherit;}
+.pmvst-card:hover .pmvst-q,.pmvst-q[data-on="1"]{opacity:1;}
+.pmvst-q:hover{background:rgb(249,115,22);} .pmvst-q[data-on="1"]{background:rgb(34,197,94);}
+.pmvst-q svg{width:14px;height:14px;}
+.pmvst-info{padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px;}
+.pmvst-trow{display:flex;align-items:flex-start;gap:8px;}
+.pmvst-title{flex:1;min-width:0;font-size:14px;font-weight:600;color:#fff;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;transition:color .15s;}
+.pmvst-card:hover .pmvst-title{color:rgb(251,146,60);}
+.pmvst-rate{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:6px;font-size:11px;font-weight:700;flex-shrink:0;font-variant-numeric:tabular-nums;
+  background:rgba(34,197,94,0.15);color:rgb(74,222,128);border:1px solid rgba(34,197,94,0.3);}
+.pmvst-rate.mid{background:rgba(234,179,8,0.15);color:rgb(250,204,21);border-color:rgba(234,179,8,0.3);}
+.pmvst-rate.low{background:rgba(239,68,68,0.15);color:rgb(248,113,113);border-color:rgba(239,68,68,0.3);}
+.pmvst-rate svg{width:11px;height:11px;}
+.pmvst-up{display:flex;align-items:center;gap:6px;font-size:12px;color:rgb(156,163,175);min-width:0;}
+.pmvst-up .a{width:20px;height:20px;border-radius:9999px;flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,rgb(59,130,246),rgb(147,51,234));color:#fff;font-size:10px;font-weight:700;}
+.pmvst-up .a img{width:100%;height:100%;object-fit:cover;}
+.pmvst-up span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pmvst-foot{display:flex;align-items:center;gap:12px;font-size:12px;color:rgb(107,114,128);font-variant-numeric:tabular-nums;}
+.pmvst-foot span{display:inline-flex;align-items:center;gap:4px;} .pmvst-foot svg{width:12px;height:12px;}
+.pmvst-msg{padding:28px 8px;text-align:center;font-size:13px;color:rgb(107,114,128);}
+.pmvst-spin{width:22px;height:22px;margin:8px auto;border-radius:9999px;border:2px solid #2A2A2A;border-top-color:rgb(249,115,22);animation:pmvst-spin .8s linear infinite;flex-shrink:0;}
+@keyframes pmvst-spin{to{transform:rotate(360deg);}}
+`;
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+    const ico = svg => { const s = mk('span'); s.innerHTML = svg; s.style.display = 'inline-flex'; return s; };
+    const fmtCount = n => { n = Number(n) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K' : String(n); };
+    const fmtSecs = s => { s = Math.round(Number(s) || 0); if (!s) return ''; const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = s % 60; return (h ? `${h}:${String(m).padStart(2, '0')}` : `${m}`) + ':' + String(r).padStart(2, '0'); };
+    const fmtDur = v => (typeof v.duration === 'string' && v.duration) ? v.duration : fmtSecs(v.durationSeconds ?? (typeof v.duration === 'number' ? v.duration : 0));
+    const ago = iso => {
+        const t = Date.parse(iso); if (!t) return '';
+        const d = Math.max(0, (Date.now() - t) / 864e5);
+        return d < 1 ? 'today' : d < 30 ? `${Math.floor(d)}d ago` : d < 365 ? `${Math.floor(d / 30)}mo ago` : `${Math.floor(d / 365)}y ago`;
+    };
+    const thumbOf = v => v.thumbnailSizes?.md?.url || v.thumbnailSizes?.lg?.url || v.thumbnailSizes?.sm?.url || v.thumbnailUrl || v.rawThumbnailUrl || '';
+    const uploaderOf = v => v.uploaderUsername || (typeof v.uploader === 'string' ? v.uploader : v.uploader?.username) || v.user?.username || '';
+    function playlistNames(id) {
+        try {
+            const set = PMVX.state?.reverse?.get(id);
+            if (!set?.size) return [];
+            return [...set].map(pid => PMVX.state.playlists?.get(pid)?.name).filter(Boolean);
+        } catch { return []; }
+    }
+
+    // ---------------------------------------------------------------------
+    // Data
+    // ---------------------------------------------------------------------
+    async function getJson(url) {
+        const res = await window.fetch(url, { credentials: 'include' });
+        if (!res.ok) throw new Error('http ' + res.status);
+        return res.json();
+    }
+    async function fromVideos(params, page) {
+        const alt = (SORTS.find(s => s.v === sort) || SORTS[0]).alt;
+        const j = await getJson(`/api/videos?${params}&sort=${enc(alt)}&limit=${PAGE}&page=${page}&_pmvx=menu`);
+        const list = [j?.data, j?.videos, j?.data?.videos].find(a => Array.isArray(a) && a.length) || [];
+        const pg = j?.pagination || j?.data?.pagination || {};
+        return { list, total: pg.total ?? pg.totalVideos, more: list.length > 0 && pg.hasNext !== false && !(pg.totalPages && page >= pg.totalPages) };
+    }
+    // One page for the open menu: { list, total, more, star }. A star's source is fixed by page 1.
+    async function fetchPage(c, page) {
+        const it = c.item;
+        if (c.kind === 'tag') return fromVideos(`tags=${enc(it.name)}`, page);
+        if (c.kind === 'music') return fromVideos(`musicArtist=${enc(it.artist)}` + (c.musicMode === 'song' && it.song ? `&musicSong=${enc(it.song)}` : ''), page);
+        if (c.src !== 'stars') {
+            try {
+                const j = await getJson(`/api/models/${enc(it.slug)}?page=${page}&limit=${PAGE}&sort=${enc(sort)}`);
+                const list = Array.isArray(j?.videos) ? j.videos : null;
+                if (j?.success !== false && list && (list.length || page > 1)) {
+                    c.src = 'model';
+                    const pg = j.pagination || {};
+                    const pages = pg.pages ?? pg.totalPages;
+                    return { list, total: pg.total, more: list.length > 0 && (pages ? page < pages : list.length >= PAGE), star: j.star || null };
+                }
+            } catch {}
+            if (page > 1) return { list: [], total: null, more: false };
+            c.src = 'stars';
+        }
+        return fromVideos(`stars=${enc(it.name)}`, page);
+    }
+
+    // ---------------------------------------------------------------------
+    // Menu
+    // ---------------------------------------------------------------------
+    let pop = null, anchor = null, cur = null, el = {};
+
+    function close() {
+        if (!pop) return;
+        pop.remove(); pop = null; anchor = null; el = {};
+        if (cur) cur.seq++;
+        cur = null;
+    }
+
+    function place() {
+        if (!pop) return;
+        const w = pop.offsetWidth;
+        const r = anchor?.isConnected ? anchor.getBoundingClientRect() : null;
+        const HEADER = 64;
+        let top, maxH;
+        if (r && r.width) {
+            const below = innerHeight - r.bottom - 14, above = r.top - 14 - HEADER;
+            if (below >= 420 || below >= above) { top = r.bottom + 6; maxH = below; }
+            else { maxH = Math.min(above, 700); top = r.top - 6 - Math.min(pop.scrollHeight, maxH); }
+            pop.style.left = Math.max(8, Math.min(r.left, innerWidth - 8 - w)) + 'px';
+        } else {
+            top = HEADER + 16; maxH = innerHeight - top - 16;
+            pop.style.left = Math.max(8, (innerWidth - w) / 2) + 'px';
+        }
+        pop.style.maxHeight = Math.max(260, Math.min(maxH, 700)) + 'px';
+        pop.style.top = Math.max(HEADER + 6, top) + 'px';
+    }
+
+    function filterState() { try { return PMVX.tagFilter?.state(cur.item.term) || null; } catch { return null; } }
+    function setFilter(next) {
+        if (!PMVX.tagFilter || !cur) return;
+        const label = cur.kind === 'tag' ? '#' + cur.item.name : cur.item.name;
+        const res = PMVX.tagFilter.set(cur.item.term, next);
+        PMVX.toast?.(res === 'include' ? `+ ${label} required in filter` : res === 'exclude' ? `− ${label} excluded in filter` : `${label} removed from filter`,
+            res === 'exclude' ? 'red' : res === 'include' ? 'green' : null);
+        renderFilter();
+    }
+    function renderFilter() {
+        if (!el.inc) return;
+        const st = filterState();
+        el.inc.dataset.on = st === 'include' ? '1' : '';
+        el.exc.dataset.on = st === 'exclude' ? '1' : '';
+        const what = KINDS[cur.kind].what;
+        el.inc.title = st === 'include' ? 'Required in the filter — click to remove' : `Show only videos with this ${what} (site-wide filter)`;
+        el.exc.title = st === 'exclude' ? 'Excluded in the filter — click to remove' : `Hide videos with this ${what} (site-wide filter)`;
+    }
+
+    function open(a, kind, item) {
+        close();
+        injectStyle();
+        anchor = a;
+        const K = KINDS[kind];
+        cur = { kind, item, href: a.getAttribute('href'), musicMode: item.song ? 'song' : 'artist', src: null, page: 0, total: null, star: null,
+                seen: new Set(), shown: 0, seq: 0, loading: false, more: true, error: false };
+        pop = mk('div'); pop.id = 'pmvst'; pop.dataset.kind = kind;
+        pop.setAttribute('data-pmvx-tag-menu', '1');
+
+        const head = mk('div', 'pmvst-head');
+        el.av = mk('div', 'pmvst-av'); el.av.appendChild(ico(K.icon));
+        const who = mk('div', 'pmvst-who');
+        el.name = mk('div', 'pmvst-name'); el.name.appendChild(mk('span', null, kind === 'music' ? (item.song || item.artist) : item.title));
+        el.sub = mk('div', 'pmvst-sub', 'Loading…');
+        who.append(el.name, el.sub);
+        const x = mk('button', 'pmvst-close'); x.type = 'button'; x.title = 'Close (Esc)'; x.appendChild(ico(SVG_X));
+        x.onclick = close;
+        head.append(el.av, who, x);
+
+        const acts = mk('div', 'pmvst-acts');
+        // Filter: require / exclude (click again to remove); music filters on the artist.
+        if (PMVX.tagFilter) {
+            const row = mk('div', 'pmvst-row');
+            row.appendChild(mk('span', 'pmvst-lab', 'Filter'));
+            const sfx = kind === 'music' ? ' artist' : '';
+            el.inc = mk('button', 'pmvst-fbtn inc'); el.inc.type = 'button'; el.inc.append(ico(SVG_PLUS), mk('span', 't', 'Require' + sfx));
+            el.exc = mk('button', 'pmvst-fbtn exc'); el.exc.type = 'button'; el.exc.append(ico(SVG_BAN), mk('span', 't', 'Exclude' + sfx));
+            el.inc.onclick = () => setFilter(filterState() === 'include' ? null : 'include');
+            el.exc.onclick = () => setFilter(filterState() === 'exclude' ? null : 'exclude');
+            row.append(el.inc, el.exc);
+            acts.appendChild(row);
+        }
+        // Where the chip normally leads.
+        const row2 = mk('div', 'pmvst-row');
+        row2.appendChild(mk('span', 'pmvst-lab', 'Open'));
+        const go = mk('a', 'pmvst-go'); go.href = cur.href || '#';
+        go.append(mk('span', null, K.go), ico(SVG_ARROW));
+        go.title = kind === 'star' ? `${item.name}'s profile page` : 'The site\'s search results, as a normal click on the chip';
+        go.onclick = e => {
+            if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+            e.preventDefault();
+            const h = go.getAttribute('href'); close();
+            if (!PMVX.navigate?.(h)) location.href = h;
+        };
+        row2.appendChild(go);
+        acts.appendChild(row2);
+        // Sort, and for music: this song or everything by the artist.
+        const row3 = mk('div', 'pmvst-row');
+        row3.appendChild(mk('span', 'pmvst-lab', 'Videos'));
+        const sel = mk('select', 'pmvst-sort'); sel.title = 'Sort';
+        SORTS.forEach(s => { const o = mk('option', null, s.t); o.value = s.v; sel.appendChild(o); });
+        sel.value = sort;
+        sel.onchange = () => { sort = sel.value; try { localStorage.setItem(SORT_KEY, sort); } catch {} reload(); };
+        row3.appendChild(sel);
+        if (kind === 'music' && item.song) {
+            const seg = mk('div', 'pmvst-seg');
+            const mb = (mode, label) => {
+                const b = mk('button', null, label); b.type = 'button';
+                b.dataset.on = cur.musicMode === mode ? '1' : '';
+                b.onclick = () => { if (cur.musicMode === mode) return; cur.musicMode = mode; seg.querySelectorAll('button').forEach(x2 => x2.dataset.on = x2 === b ? '1' : ''); reload(); };
+                return b;
+            };
+            seg.append(mb('song', 'Song'), mb('artist', 'Artist'));
+            row3.appendChild(seg);
+        }
+        acts.appendChild(row3);
+
+        el.body = mk('div', 'pmvst-body');
+        el.body.addEventListener('scroll', () => {
+            const b = el.body;
+            if (b && b.scrollTop + b.clientHeight > b.scrollHeight - 400) load();
+        }, { passive: true });
+        pop.append(head, acts, el.body);
+        document.body.appendChild(pop);
+        renderFilter();
+        place();
+        load();
+    }
+
+    function reload() {
+        if (!cur) return;
+        cur = { ...cur, src: null, page: 0, total: null, seen: new Set(), shown: 0, seq: cur.seq + 1, loading: false, more: true, error: false };
+        el.body.replaceChildren();
+        el.body.scrollTop = 0;
+        load();
+    }
+
+    function renderHead() {
+        if (!cur || !el.sub) return;
+        const s = cur.star;
+        if (s?.name) el.name.firstChild.textContent = s.name;
+        if (s?.isVerified && !el.name.querySelector('svg')) { const v = ico(SVG_CHECKBADGE); v.title = 'Verified'; el.name.appendChild(v); }
+        if (s?.avatarUrl && !el.av.querySelector('img')) { const img = mk('img'); img.alt = ''; img.src = s.avatarUrl; el.av.replaceChildren(img); }
+        const parts = [];
+        if (cur.kind === 'music' && cur.item.song) parts.push(cur.item.artist);
+        if (cur.total != null) parts.push(`${fmtCount(cur.total)} video${cur.total === 1 ? '' : 's'}`);
+        const aliases = (Array.isArray(s?.aliases) ? s.aliases : []).filter(Boolean);
+        if (aliases.length) parts.push('aka ' + aliases.join(', '));
+        el.sub.textContent = parts.join(' · ') || (cur.loading ? 'Loading…' : '');
+        el.sub.title = el.sub.textContent;
+    }
+
+    function renderStatus() {
+        if (!el.body) return;
+        el.body.querySelectorAll('.pmvst-msg, .pmvst-spin').forEach(n => n.remove());
+        if (cur.loading) el.body.appendChild(mk('div', 'pmvst-spin'));
+        else if (cur.error && !cur.shown) el.body.appendChild(mk('div', 'pmvst-msg', 'Could not load videos.'));
+        else if (!cur.more && !cur.shown) el.body.appendChild(mk('div', 'pmvst-msg', 'No other videos yet.'));
+    }
+
+    function card(v) {
+        const id = v._id;
+        const href = `/video/${id}`;
+        const a = mk('a', 'pmvst-card'); a.href = href;
+        const seen = typeof PMVX.isWatched === 'function' && PMVX.isWatched(id);
+        if (seen) a.dataset.seen = '1';
+        const th = mk('div', 'pmvst-thumb');
+        const img = mk('img'); img.loading = 'lazy'; img.alt = ''; img.src = thumbOf(v);
+        th.appendChild(img);
+        const dur = fmtDur(v); if (dur) th.appendChild(mk('span', 'pmvst-badge pmvst-dur', dur));
+        if (seen) th.appendChild(mk('span', 'pmvst-badge pmvst-seen', 'Watched'));
+        const pls = playlistNames(id);
+        if (pls.length) { const b = mk('span', 'pmvst-badge pmvst-pl', pls.length === 1 ? pls[0] : `${pls.length} playlists`); b.title = 'In: ' + pls.join(', '); th.appendChild(b); }
+        if (PMVX.upNext) {
+            const q = mk('button', 'pmvst-q'); q.type = 'button';
+            const sync = () => {
+                const pos = PMVX.upNext.position(id);
+                q.dataset.on = pos ? '1' : '';
+                q.replaceChildren(ico(pos ? SVG_CHECK : SVG_QUEUE));
+                if (pos) q.appendChild(mk('span', null, String(pos)));
+                q.title = pos ? `In Up next (#${pos}) — click to remove` : 'Add to Up next';
+            };
+            q.onclick = e => {
+                e.preventDefault(); e.stopPropagation();
+                if (PMVX.upNext.position(id)) PMVX.upNext.remove(id);
+                else PMVX.upNext.add(id, href, { title: v.title || '', thumbnailUrl: thumbOf(v), duration: fmtDur(v), uploaderDisplay: uploaderOf(v), bayesianRating: v.bayesianRating || 0 });
+                sync();
+            };
+            sync();
+            th.appendChild(q);
+        }
+
+        const info = mk('div', 'pmvst-info');
+        const trow = mk('div', 'pmvst-trow');
+        trow.appendChild(mk('div', 'pmvst-title', v.title || ''));
+        if (v.bayesianRating > 0) {
+            const r = Math.round(v.bayesianRating);
+            const rb = mk('span', 'pmvst-rate' + (r >= 70 ? '' : r >= 50 ? ' mid' : ' low'));
+            rb.append(ico(SVG_THUMB), mk('span', null, r + '%'));
+            trow.appendChild(rb);
+        }
+        info.appendChild(trow);
+        const upName = uploaderOf(v);
+        if (upName) {
+            const up = mk('div', 'pmvst-up');
+            const av = mk('span', 'a');
+            if (v.uploaderAvatarUrl) { const i = mk('img'); i.alt = ''; i.loading = 'lazy'; i.src = v.uploaderAvatarUrl; av.appendChild(i); }
+            else av.textContent = upName.charAt(0).toUpperCase();
+            up.append(av, mk('span', null, upName));
+            info.appendChild(up);
+        }
+        const foot = mk('div', 'pmvst-foot');
+        if (v.views) { const s = mk('span'); s.append(ico(SVG_EYE), document.createTextNode(fmtCount(v.views))); foot.appendChild(s); }
+        const when = ago(v.releaseDate || v.uploadDate);
+        if (when) { const s = mk('span'); s.append(ico(SVG_CAL), document.createTextNode(when)); foot.appendChild(s); }
+        if (foot.childNodes.length) info.appendChild(foot);
+        a.append(th, info);
+        a.title = v.title || '';
+        a.onclick = e => {
+            if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+            e.preventDefault();
+            close();
+            if (!PMVX.navigate?.(href)) location.href = href;
+        };
+        return a;
+    }
+
+    async function load() {
+        if (!cur || cur.loading || !cur.more) return;
+        const c = cur, seq = c.seq;
+        c.loading = true; c.error = false;
+        renderStatus(); renderHead();
+        try {
+            const r = await fetchPage(c, c.page + 1);
+            if (cur !== c || c.seq !== seq) return;
+            c.page++;
+            if (r.star) c.star = r.star;
+            if (r.total != null) c.total = r.total;
+            c.more = r.more;
+            const here = currentVideoId();
+            r.list.forEach(v => {
+                if (!v?._id || v._id === here || c.seen.has(v._id)) return;
+                c.seen.add(v._id);
+                el.body.appendChild(card(v));
+                c.shown++;
+            });
+        } catch {
+            if (cur !== c || c.seq !== seq) return;
+            c.error = true; c.more = false;
+        }
+        c.loading = false;
+        renderHead(); renderStatus();
+        place();
+        // Keep going until the list fills the menu (the current video may have been the only one).
+        if (c.more && el.body && el.body.scrollHeight <= el.body.clientHeight + 100) load();
+    }
+
+    // ---------------------------------------------------------------------
+    // Wiring
+    // ---------------------------------------------------------------------
+    window.addEventListener('click', e => {
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || !isVideoPage()) return;
+        const a = e.target?.closest?.(ANY_SEL);
+        if (!a || a.closest('#pmvst')) return;
+        const kind = kindOf(a);
+        const item = kind && KINDS[kind].read(a);
+        if (!item) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (pop && anchor === a) { close(); return; }
+        open(a, kind, item);
+    }, true);
+    document.addEventListener('pointerdown', e => {
+        if (!pop || pop.contains(e.target) || e.target?.closest?.(ANY_SEL)) return;
+        // Toasts and the queue panel stay usable without closing the menu.
+        if (e.target?.closest?.('#pmv-toast, #pmv-queue-floating')) return;
+        close();
+    }, true);
+    window.addEventListener('keydown', e => { if (pop && e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(); } }, true);
+    window.addEventListener('resize', () => place());
+    window.addEventListener('scroll', e => { if (pop && !pop.contains(e.target)) place(); }, { passive: true, capture: true });
+    // Another filter change (filter panel, another tab) shows in the open menu.
+    window.addEventListener('storage', () => renderFilter());
+    // Close on navigation, or when its chip is gone.
+    let lastPath = location.pathname;
+    setInterval(() => {
+        if (location.pathname !== lastPath) { lastPath = location.pathname; close(); }
+        else if (pop && anchor && !anchor.isConnected) close();
+        else if (pop) renderFilter();
+    }, 500);
 })();
 
 });

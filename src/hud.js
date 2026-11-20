@@ -346,6 +346,8 @@
             State.videoMeta.set(v._id, {
                 tags: (v.tags || v.top5Tags || []).map(t => t.toLowerCase()),
                 starsTags: (v.starsTags || v.stars || []).map(s => (typeof s === 'string' ? s : (s?.name || '')).toLowerCase()).filter(Boolean),
+                // Music artists, so a filter term can require or exclude an artist (tag menu).
+                music: (Array.isArray(v.music) ? v.music : []).map(m => String(m?.artist || '').toLowerCase().trim()).filter(Boolean),
                 bayesianRating: v.bayesianRating || 0,
                 width: v.width || 0,
                 height: v.height || 0,
@@ -2222,7 +2224,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     let queueCursor = -1;
     // History is capped.
     // Played items kept in Up next; one is shown, "Show more" reveals older ones in steps.
-    const QUEUE_HISTORY_MAX = 50;
+    const QUEUE_HISTORY_MAX = 200;
     const QUEUE_HISTORY_SHOWN = 1;
     const QUEUE_HISTORY_STEP = 10;
     let queueHistoryShown = QUEUE_HISTORY_SHOWN;
@@ -2470,6 +2472,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     function stopCurrentPlayback() { sweepDetachedMediaFor(); }
 
+    PMVX.navigate = href => navigateInPage(href);
     function navigateInPage(href) {
         if (!href) return false;
         try {
@@ -2745,7 +2748,15 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (dismissedCurrentId && dismissedCurrentId !== id) dismissedCurrentId = null;
 
         const idx = smartQueueItems.findIndex(it => it.id === id);
-        if (idx !== -1) { queueCursor = idx; }
+        if (idx !== -1 && idx !== queueCursor && idx !== queueCursor + 1) {
+            // A queued video opened out of turn (a card, a row further down, Back to one already played)
+            // cuts in line: it moves right behind the current one and plays now. What was still to come
+            // keeps its order and follows it, instead of everything in between counting as played.
+            const [item] = smartQueueItems.splice(idx, 1);
+            if (idx < queueCursor) queueCursor--;
+            queueCursor++;
+            smartQueueItems.splice(queueCursor, 0, item);
+        } else if (idx !== -1) { queueCursor = idx; }
         else if (smartQueueActive && id !== dismissedCurrentId) {
             const at = Math.min(queueCursor + 1, smartQueueItems.length);
             smartQueueItems.splice(at, 0, {
@@ -2778,7 +2789,28 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return upcomingCount();
     }
 
-    function addVideoToQueue(videoId, card) {
+    // Position of a video among the videos still to come in Up next (1 = next), or 0.
+    function queuedPosition(id) {
+        if (!id) return 0;
+        const idx = smartQueueItems.findIndex(it => it.id === id);
+        return idx > queueCursor ? idx - queueCursor : 0;
+    }
+    // The Up next button on a card shows whether the video is queued, and where.
+    // Recommended rows carry the slug id; the API id is tried first.
+    function syncQueueCardBtn(btn) {
+        const raw = btn.dataset.qid;
+        const pos = queuedPosition(State.slugToApiId.get(raw)) || queuedPosition(raw);
+        const on = pos > 0;
+        if ((btn.dataset.on === '1') === on && (!on || btn.dataset.qpos === String(pos))) return;
+        btn.dataset.on = on ? '1' : '';
+        if (on) btn.dataset.qpos = String(pos); else delete btn.dataset.qpos;
+        btn.title = on ? `In Up next (#${pos}) \u2014 click to remove` : 'Add to Up next';
+    }
+    function syncQueueCardBtns() {
+        document.querySelectorAll('[data-pmv-addqueue], [data-pmv-rec-addqueue]').forEach(syncQueueCardBtn);
+    }
+
+    function addVideoToQueue(videoId, card, hrefOverride, metaOverride) {
         if (!videoId) { toast('No video'); return; }
         smartQueueActive = true;
         manuallyAddedIds.add(videoId);
@@ -2794,9 +2826,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             smartQueueItems.splice(was, 1);
             queueCursor--;                           // keep pointing at the same item
         }
-        const href = cardHref(card) || (card ? null : location.pathname + location.search);
+        const href = hrefOverride || cardHref(card) || (card ? null : location.pathname + location.search);
         // Appended at the end to preserve click order.
-        smartQueueItems.push({ id: videoId, href, meta: resolveQueueMeta(videoId, card) });
+        smartQueueItems.push({ id: videoId, href, meta: metaOverride || resolveQueueMeta(videoId, card) });
         toast(`+ Added to Up next (${upcomingCount()})`, 'green', { under: upNextToastAnchor() });
         renderQueueSidebar();
     }
@@ -2807,6 +2839,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return [...document.querySelectorAll('[data-pmv-queue-btn]')].find(b => b.getClientRects().length) || null;
     }
     function addCurrentVideoToQueue() { addVideoToQueue(getCurrentVideoId()); }
+    // For panels with their own video lists (the star popout): the id and link are known, no card.
+    PMVX.upNext = {
+        add: (id, href, meta) => addVideoToQueue(id, null, href, meta),
+        remove: id => { removeFromQueue(id); toast('\u2212 Removed from Up next', null, { under: upNextToastAnchor() }); },
+        position: id => queuedPosition(id),
+    };
     // A row added before its API _id was known is keyed by slug id; move it over in place once known.
     function adoptResolvedQueueId(tempId, realId) {
         if (tempId === realId) return;
@@ -2942,7 +2980,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             : '';
         const rows = smartQueueItems.length
             ? moreBtn + smartQueueItems.map((item, i) => i < firstShown ? '' : sidebarRowHtml(item, item.id === currentId, i, manuallyAddedIds.has(item.id), queueCursor >= 0 && i < queueCursor)).join('')
-            : '<div class="text-xs text-gray-500 p-2">Nothing queued yet.</div>';
+            : '<div class="text-xs text-gray-500 p-2">Nothing queued yet.' + (prevQueueCount() ? ' <button id="pmv-sq-restore-prev2" type="button" style="cursor:pointer;color:rgb(134,239,172);background:none;border:none;font:inherit;text-decoration:underline;">\u21ba Restore the previous queue</button>' : '') + '</div>';
 
         return `
             <div class="mb-2 flex items-center justify-between gap-2">
@@ -2954,6 +2992,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 <div class="flex items-center gap-1.5 flex-wrap">
                     <button id="pmv-sq-settings" type="button" title="Settings" class="${queueSettingsOpen ? Q_CHIP_ON : Q_CHIP_OFF}" style="cursor:pointer;">Settings</button>
                     <button id="pmv-sq-collapse" type="button" title="${queueCollapsed ? 'Expand' : 'Collapse'}" class="${Q_CHIP_OFF}" style="cursor:pointer;">${queueCollapsed ? '\u2304' : '\u2303'}</button>
+                    ${prevQueueCount() ? `<button id="pmv-sq-restore-prev" type="button" title="Restore the previous queue (${prevQueueCount()} kept; all of them in Settings)" class="${Q_CHIP_OFF}" style="cursor:pointer;">\u21ba</button>` : ''}
                     <button id="pmv-sq-clear" type="button" title="Clear Up next" class="${Q_CHIP_OFF}" style="cursor:pointer;">\u2715</button>
                 </div>
             </div>
@@ -2970,18 +3009,32 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (more) more.onclick = e => { e.preventDefault(); e.stopPropagation(); queueHistoryShown += QUEUE_HISTORY_STEP; rerender(); };
         const less = panel.querySelector('#pmv-sq-less');
         if (less) less.onclick = e => { e.preventDefault(); e.stopPropagation(); queueHistoryShown = QUEUE_HISTORY_SHOWN; rerender(); };
+        ['#pmv-sq-restore-prev', '#pmv-sq-restore-prev2'].forEach(sel => {
+            const rb = panel.querySelector(sel);
+            if (rb) rb.onclick = e => { e.preventDefault(); e.stopPropagation(); restoreQueueSnapshot(loadQueueUndo()); };
+        });
+        // Both clears ask for a second click, then offer Undo (the old queue also goes into Previous queues).
         const clearPlayed = panel.querySelector('#pmv-sq-clear-played');
         if (clearPlayed) clearPlayed.onclick = e => {
             e.preventDefault();
             e.stopPropagation();
             const n = Math.max(0, queueCursor);
             if (!n) return;
+            if (!confirmClick(clearPlayed, `Clear ${n} played?`)) return;
+            const snap = snapshotQueue(`Cleared ${n} played \u2022 ${smartQueueItems.length} videos`);
             smartQueueItems.splice(0, n).forEach(it => manuallyAddedIds.delete(it.id));
             queueCursor -= n;
             queueHistoryShown = QUEUE_HISTORY_SHOWN;
             rerender();
+            showQueueUndo(`Cleared ${n} played`, snap);
         };
-        panel.querySelector('#pmv-sq-clear').onclick = () => {
+        const clearAll = panel.querySelector('#pmv-sq-clear');
+        clearAll.onclick = e => {
+            e?.preventDefault?.();
+            e?.stopPropagation?.();
+            if (!smartQueueItems.length) return;
+            if (!confirmClick(clearAll, 'Clear all?')) return;
+            const snap = snapshotQueue(`Cleared \u2022 ${smartQueueItems.length} videos`);
             smartQueueItems = [];
             manuallyAddedIds = new Set();
             smartQueueActive = false;
@@ -2989,6 +3042,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             queueCursor = -1;
             dismissedCurrentId = null;
             rerender();
+            showQueueUndo('Up next cleared', snap);
         };
 
         const rowsEl = panel.querySelector('#pmv-sq-rows');
@@ -3014,6 +3068,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         syncQueueCursor();
         healQueueMeta();
         saveQueueState();
+        try { syncQueueCardBtns(); } catch {}
         updateQueueButton();
         renderQueueFloating();
 
@@ -3295,8 +3350,122 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                         <button id="sq-save" type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" title="Save Up next from the current video on; kept until you delete it">Save</button>
                     </div>
                     <div id="sq-saved-list">${savedQueuesHtml()}</div>
+                    <div class="text-gray-300" style="margin:10px 0 6px;font-weight:600;">Previous queues</div>
+                    <div id="sq-prev-list">${prevQueuesHtml()}</div>
                 </div>
             </div>`;
+    }
+
+    // A click that arms the button first ("Clear all?"); the second click within 3 s goes through.
+    function confirmClick(btn, label) {
+        if (btn.dataset.armed === '1') { clearTimeout(btn._pmvArm); delete btn.dataset.armed; return true; }
+        btn.dataset.armed = '1';
+        btn._pmvLabel = btn.textContent;
+        btn.textContent = label;
+        btn.style.color = 'rgb(252,165,165)';
+        btn.style.borderColor = 'rgba(239,68,68,.5)';
+        btn._pmvArm = setTimeout(() => {
+            if (!btn.isConnected) return;
+            delete btn.dataset.armed;
+            btn.textContent = btn._pmvLabel;
+            btn.style.color = ''; btn.style.borderColor = '';
+        }, 3000);
+        return false;
+    }
+
+    // Previous queues: Up next as it was before a clear or a replace, newest first. Kept in
+    // localStorage (at most QUEUE_PREV_MAX, for QUEUE_PREV_MAX_AGE_MS), so a cleared queue can come
+    // back later too, not only through the Undo right after.
+    const QUEUE_PREV_KEY = 'pmv_queue_prev_v1';
+    const QUEUE_PREV_MAX = 10;
+    const QUEUE_PREV_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+    try {
+        const old = JSON.parse(localStorage.getItem('pmv_queue_undo_v1') || 'null');
+        if (old?.items?.length) {
+            const a = JSON.parse(localStorage.getItem('pmv_queue_prev_v1') || '[]');
+            localStorage.setItem('pmv_queue_prev_v1', JSON.stringify([old, ...(Array.isArray(a) ? a : [])]));
+        }
+        localStorage.removeItem('pmv_queue_undo_v1');
+    } catch {}
+    function loadPrevQueues() {
+        try {
+            const a = JSON.parse(localStorage.getItem(QUEUE_PREV_KEY) || '[]');
+            const now = Date.now();
+            return (Array.isArray(a) ? a : []).filter(q => q && Array.isArray(q.items) && q.items.length && now - (q.at || 0) < QUEUE_PREV_MAX_AGE_MS);
+        } catch { return []; }
+    }
+    function storePrevQueues(list) {
+        try { localStorage.setItem(QUEUE_PREV_KEY, JSON.stringify(list.slice(0, QUEUE_PREV_MAX))); } catch {}
+    }
+    const queueSig = items => items.map(it => it.id).join(',');
+    function snapshotQueue(label) {
+        const snap = {
+            label, at: Date.now(), cursor: queueCursor, active: smartQueueActive, manual: [...manuallyAddedIds],
+            items: smartQueueItems.map(it => ({ id: it.id, href: it.href, meta: it.meta ? { ...it.meta } : {} })),
+        };
+        if (!snap.items.length) return snap;
+        // The same queue twice in a row is kept once (the newest copy).
+        const list = loadPrevQueues().filter(q => queueSig(q.items) !== queueSig(snap.items));
+        list.unshift(snap);
+        storePrevQueues(list);
+        return snap;
+    }
+    function loadQueueUndo() { return loadPrevQueues()[0] || null; }
+    function prevQueueCount() { return loadPrevQueues().length; }
+    // Restores a previous queue; the queue it replaces (if any) goes into the list, so this is undoable too.
+    function restoreQueueSnapshot(snap) {
+        if (!snap) return;
+        const rest = loadPrevQueues().filter(q => !(q.at === snap.at && queueSig(q.items) === queueSig(snap.items)));
+        storePrevQueues(rest);
+        // The queue being replaced goes into the list, unless it is only part of the restored one (an undo).
+        const restoredIds = new Set(snap.items.map(it => it.id));
+        if (smartQueueItems.length && !smartQueueItems.every(it => restoredIds.has(it.id))) snapshotQueue(`Replaced by a restore \u2022 ${smartQueueItems.length} videos`);
+        smartQueueItems = snap.items.map(it => ({ ...it, meta: it.meta ? { ...it.meta } : {} }));
+        manuallyAddedIds = new Set(snap.manual || []);
+        smartQueueActive = snap.active !== false;
+        queueCursor = Math.min(snap.cursor ?? -1, smartQueueItems.length - 1);
+        dismissedCurrentId = null;
+        document.getElementById('pmv-undo-toast')?.remove();
+        renderQueueSidebar();
+        toast(`↺ Up next restored (${upcomingCount()} to come)`, 'green', { under: upNextToastAnchor() });
+    }
+    function prevQueuesHtml() {
+        const list = loadPrevQueues();
+        if (!list.length) return '<div class="text-gray-500">Nothing yet. Cleared or replaced queues are kept here for 14 days.</div>';
+        return list.map((q, i) => {
+            const d = new Date(q.at);
+            const when = d.toDateString() === new Date().toDateString()
+                ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+                : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+            const first = q.items[Math.max(0, (q.cursor ?? -1) + 1)]?.meta?.title || q.items[0]?.meta?.title || '';
+            return `<div class="flex items-center gap-2" style="margin-bottom:4px;">
+                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;" title="${escHtml(first)}">${escHtml(q.label || q.items.length + ' videos')}</span>
+                <span class="text-gray-500" style="white-space:nowrap;">${escHtml(when)}</span>
+                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-prev="${i}" title="Put this queue back (the current one is kept in this list)">Restore</button>
+            </div>`;
+        }).join('');
+    }
+
+    // A message with an Undo button, under Up next in the header; gone after 10 s.
+    function showQueueUndo(msg, snap) {
+        document.getElementById('pmv-undo-toast')?.remove();
+        const el = document.createElement('div');
+        el.id = 'pmv-undo-toast';
+        el.style.cssText = 'position:fixed;bottom:30px;right:30px;z-index:1000003;display:flex;align-items:center;gap:12px;padding:8px 8px 8px 14px;' +
+            'border-radius:10px;background:rgba(0,0,0,.9);border:1px solid rgba(255,255,255,.15);color:#fff;font-size:14px;box-shadow:0 8px 24px rgba(0,0,0,.5);';
+        const t = document.createElement('span');
+        t.textContent = msg;
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = 'Undo';
+        b.style.cssText = 'padding:5px 12px;border-radius:7px;border:none;cursor:pointer;font:inherit;font-weight:600;color:#000;background:rgb(100,255,0);';
+        b.onclick = e => { e.preventDefault(); e.stopPropagation(); restoreQueueSnapshot(snap); };
+        el.append(t, b);
+        const anchor = upNextToastAnchor();
+        const r = anchor && !document.fullscreenElement && anchor.isConnected ? anchor.getBoundingClientRect() : null;
+        if (r && r.width) { el.style.bottom = 'auto'; el.style.top = Math.round(r.bottom + 8) + 'px'; el.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px'; }
+        (document.fullscreenElement || document.body).appendChild(el);
+        setTimeout(() => el.remove(), 10000);
     }
 
     // Saved queues: named copies of Up next in localStorage, kept until deleted (the automatic backup
@@ -3357,6 +3526,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 const existing = smartQueueItems.find(it => it.id === id);
                 return { id, href: existing?.href || knownHrefForId(id), meta: resolveQueueMeta(id) };
             });
+            if (smartQueueItems.length) snapshotQueue(`Before "Fill from your playlists" \u2022 ${smartQueueItems.length} videos`);
             smartQueueItems = [...added, ...generated];
             smartQueueActive = true;
 
@@ -3368,6 +3538,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     ? 'Nothing cached yet \u2014 browse around or refresh playlists.'
                     : 'Nothing matched these filters.';
             }
+        };
+
+        const prevList = q('#sq-prev-list');
+        if (prevList) prevList.onclick = e => {
+            const b = e.target.closest('[data-sq-prev]');
+            if (!b) return;
+            e.preventDefault(); e.stopPropagation();
+            restoreQueueSnapshot(loadPrevQueues()[+b.dataset.sqPrev]);
         };
 
         // Saved queues.
@@ -3416,6 +3594,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Load'; } }, 3000);
                     return;
                 }
+                if (smartQueueItems.length) snapshotQueue(`Replaced by "${saved.name}" \u2022 ${smartQueueItems.length} videos`);
                 smartQueueItems = items;
                 queueCursor = -1;
                 dismissedCurrentId = null;
@@ -3881,6 +4060,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     // color: 'green' | 'red' | null (neutral)
     // `under`: an element the toast sits directly below (right-aligned), instead of the bottom corner.
+    PMVX.toast = (...a) => toast(...a);
     function toast(msg, color, { under = null } = {}) {
         document.getElementById('pmv-toast')?.remove();
         // Fixed system messages default to green.
@@ -5350,84 +5530,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return next;
     }
 
-    // Right-click on a tag anywhere on the site (cards, under the player, Recommended, the HUD):
-    // a small menu to require (+) or exclude (−) it in the filter, or take it out again.
-    // Shift + right-click keeps the browser's own menu.
-    function tagFromElement(el) {
-        const node = el?.closest?.('a, button, span');
-        if (!node || node.closest('#pmvx-tag-ctx')) return null;
-        const href = node.tagName === 'A' ? node.getAttribute('href') || '' : '';
-        if (/[?&]tags=/.test(href)) {
-            try { return new URL(href, location.origin).searchParams.get('tags')?.split(',')[0]?.trim() || null; } catch {}
-        }
-        if (node.dataset.pmvTagChip) return node.dataset.pmvTagChip;
-        const text = node.textContent.trim();
-        if (!/^#\S/.test(text) || text.length > 60 || node.children.length > 2) return null;
-        // The site's tag chip style (orange gradient); "#" alone is not enough (titles, hashtags in text).
-        if (!/text-orange-300|from-orange-500/.test(node.className || '')) return null;
-        return text.slice(1).trim() || null;
-    }
-    let tagMenuOpenedAt = 0;
-    function closeTagMenu() {
-        document.getElementById('pmvx-tag-ctx')?.remove();
-        window.removeEventListener('keydown', tagMenuKey, true);
-    }
-    function tagMenuKey(e) { if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); closeTagMenu(); } }
-    function openTagMenu(tag, x, y) {
-        closeTagMenu();
-        const state = tagFilterState(tag);
-        const m = document.createElement('div');
-        m.id = 'pmvx-tag-ctx';
-        m.style.cssText = 'position:fixed;z-index:2147483647;min-width:190px;padding:5px;border-radius:10px;background:#141414;border:1px solid #2A2A2A;box-shadow:0 10px 30px rgba(0,0,0,.55);font:13px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;color:#E5E7EB;user-select:none;';
-        const head = document.createElement('div');
-        head.style.cssText = 'padding:5px 9px 6px;font-size:11px;color:#9CA3AF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px;';
-        head.textContent = '#' + tag + (state === 'include' ? ' · required' : state === 'exclude' ? ' · excluded' : '');
-        m.appendChild(head);
-        const item = (icon, color, label, next) => {
-            const on = state === next;
-            const b = document.createElement('button');
-            b.type = 'button';
-            b.style.cssText = `display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px;border:0;border-radius:7px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;`;
-            b.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:5px;font-weight:700;background:rgba(${color},.18);border:1px solid rgba(${color},.5);color:rgb(${color});">${icon}</span><span style="flex:1"></span><span style="color:rgb(249,115,22);font-weight:700;">${on ? '✓' : ''}</span>`;
-            b.children[1].textContent = label;
-            b.onmouseenter = () => { b.style.background = 'rgba(255,255,255,.07)'; };
-            b.onmouseleave = () => { b.style.background = 'transparent'; };
-            b.onclick = e => {
-                e.preventDefault();
-                e.stopPropagation();
-                closeTagMenu();
-                if (on) return;
-                const res = setTagInFilter(tag, next);
-                toast(res === 'include' ? '+ #' + tag + ' required in filter' : res === 'exclude' ? '− #' + tag + ' excluded in filter' : '#' + tag + ' removed from filter',
-                    res === 'exclude' ? 'red' : res === 'include' ? 'green' : null);
-                try { scheduleBadges(); } catch {}
-            };
-            m.appendChild(b);
-        };
-        item('+', '249,115,22', 'Require in filter', 'include');
-        item('−', '239,68,68', 'Exclude in filter', 'exclude');
-        if (state) item('✕', '156,163,175', 'Remove from filter', null);
-        (document.fullscreenElement || document.body).appendChild(m);
-        const r = m.getBoundingClientRect();
-        m.style.left = Math.max(6, Math.min(x, innerWidth - r.width - 6)) + 'px';
-        m.style.top = Math.max(6, Math.min(y, innerHeight - r.height - 6)) + 'px';
-        window.addEventListener('keydown', tagMenuKey, true);
-        tagMenuOpenedAt = Date.now();
-    }
-    document.addEventListener('contextmenu', e => {
-        if (e.shiftKey) return;
-        const tag = tagFromElement(e.target);
-        if (!tag) { closeTagMenu(); return; }
-        e.preventDefault();
-        e.stopPropagation();
-        openTagMenu(tag, e.clientX, e.clientY);
-    }, true);
-    document.addEventListener('pointerdown', e => {
-        if (!e.target.closest?.('#pmvx-tag-ctx')) closeTagMenu();
-    }, true);
-    // A scroll right after opening is the page settling (or the browser bringing the tag into view).
-    window.addEventListener('scroll', () => { if (Date.now() - tagMenuOpenedAt > 250) closeTagMenu(); }, { passive: true, capture: true });
-    window.addEventListener('blur', closeTagMenu);
+    // For the tag menu (tags, stars, music artists under the player): state and set.
+    PMVX.tagFilter = { state: t => tagFilterState(t), set: (t, next) => setTagInFilter(t, next) };
+
+    // No right-click tag menu any more: the tag menu (left click on a chip under the player) does this.
 
     // The tag is also written to the playlist-page filter's fixed default terms (always required /
     // excluded), straight into its storage; an event makes it refilter if active. Any earlier token
@@ -5550,6 +5656,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             ...(meta?.tags || []),
             ...(cached?.tags || []),
             ...(cached?.starsTags || []),
+            ...(cached?.music || []),
         ].map(t => String(t).toLowerCase()))];
         const haystacks = [title, uploader, ...tags];
 
@@ -7078,6 +7185,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 .pmv-cardbtn[data-kind="open"]:hover{color:#fff;background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.4);}
 .pmv-cardbtn[data-kind="queue"], .pmv-cardbtn[data-kind="playlists"]{color:rgb(134,239,172);background:rgba(34,197,94,.1);border-color:rgba(34,197,94,.3);}
 .pmv-cardbtn[data-kind="queue"]:hover, .pmv-cardbtn[data-kind="playlists"]:hover{color:rgb(187,247,208);background:rgba(34,197,94,.2);border-color:rgba(34,197,94,.5);}
+.pmv-cardbtn[data-kind="queue"]{position:relative;}
+.pmv-cardbtn[data-kind="queue"][data-on="1"]{color:rgb(100,255,0);background:rgba(34,197,94,.24);border-color:rgba(100,255,0,.6);}
+.pmv-cardbtn[data-kind="queue"][data-on="1"]::after{content:attr(data-qpos);position:absolute;top:-7px;right:-7px;min-width:15px;height:15px;padding:0 3px;box-sizing:border-box;
+  border-radius:8px;background:rgb(100,255,0);color:#000;font-size:10px;font-weight:700;line-height:15px;text-align:center;pointer-events:none;}
 .pmv-cardbtn[data-kind="fav"]{color:rgba(${FAV_RGB},.75);background:rgba(${FAV_RGB},.06);border-color:rgba(${FAV_RGB},.25);}
 .pmv-cardbtn[data-kind="fav"]:hover{color:rgb(${FAV_RGB});background:rgba(${FAV_RGB},.14);border-color:rgba(${FAV_RGB},.45);}
 .pmv-cardbtn[data-kind="fav"][data-on="1"]{color:rgb(${FAV_RGB});background:rgba(236,72,153,.28);border-color:rgba(236,72,153,.6);}
@@ -7344,12 +7455,15 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             if (!targetRow.querySelector('[data-pmv-addqueue]')) {
                 const aqBtn = cardBtn('queue', 'Add to Up next', CARD_ICON.upNext);
                 aqBtn.dataset.pmvAddqueue = '1';
+                aqBtn.dataset.qid = videoId;
                 aqBtn.addEventListener('click', e => {
                     e.preventDefault();
                     e.stopPropagation();
+                    if (queuedPosition(videoId)) { removeFromQueue(videoId); toast('\u2212 Removed from Up next', null, { under: upNextToastAnchor() }); return; }
                     addVideoToQueue(videoId, card);
                 });
                 targetRow.appendChild(aqBtn);
+                syncQueueCardBtn(aqBtn);
             }
 
             // "+": add to a playlist (the right-click menu), after the Up next button.
@@ -7648,12 +7762,15 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         const aqBtn = cardBtn('queue', 'Add to Up next', CARD_ICON.upNext);
         aqBtn.dataset.pmvRecAddqueue = '1';
         aqBtn.dataset.rec = '1';
+        aqBtn.dataset.qid = slugId;
         // Added immediately under the card's slug id; the real API id is
         // resolved in the background and swapped in (needed only for dedupe and
         // playlist chips).
         aqBtn.addEventListener('click', e => {
             e.preventDefault();
             e.stopPropagation();
+            const queuedId = [State.slugToApiId.get(slugId), slugId].find(id => id && queuedPosition(id));
+            if (queuedId) { removeFromQueue(queuedId); toast('\u2212 Removed from Up next', null, { under: upNextToastAnchor() }); return; }
             const known = State.slugToApiId.get(slugId);
             addVideoToQueue(known || slugId, card);
             if (known) return;
@@ -7675,6 +7792,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             State.slugToApiId.set(slugId, v._id);
             return v._id;
         };
+        queueMicrotask(() => syncQueueCardBtn(aqBtn));
         const plBtn = playlistPickButton(resolveId);
         plBtn.dataset.rec = '1';
         const favBtn = favCardButtonEl(() => knownApiIdForCard(card, slugId), resolveId);

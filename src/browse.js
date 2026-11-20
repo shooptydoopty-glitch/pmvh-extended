@@ -131,7 +131,8 @@
         if (isSavedSearches) pmvResJson(res).then(rememberSavedList).catch(() => {});
         try {
             const rawUrl = rawUrl0;
-            if (/\/api\/videos(\?|$)/.test(rawUrl)) {
+            // _pmvx=: the script's own side lists (star popout), not the page's grid.
+            if (/\/api\/videos(\?|$)/.test(rawUrl) && !/[?&]_pmvx=/.test(rawUrl)) {
                 lastApiUrl = rawUrl;
                 const u = new URL(rawUrl, location.origin);
                 const p = parseInt(u.searchParams.get('page') || '1');

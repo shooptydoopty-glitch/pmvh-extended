@@ -9,6 +9,8 @@ The images in this folder were taken in headless Chromium (Playwright) at 1440×
 - Thumbnails, avatars and player frames are blurred heavily with injected CSS, and video streams were not loaded. Sponsored cards and content-warning labels were removed from the page.
 - The player shots use a safe video on a checked frame, left unblurred, as are its own timeline thumbnails in the HUD; the fullscreen HUD shot shows that video filling the screen.
 - Video titles, tags, song titles and uploader names were replaced with neutral demo text in the page before each screenshot, and the account's own playlist names in the API responses (display only).
+- Search suggestions, chips and the cards in the quick menu got the same demo names and blurred thumbnails.
+- Playlist hotkeys in the shots are letters (Q, W, E, S), not digits: digits seek within the video.
 - Ads were hidden and every image was checked by hand before committing.
 
 ## Annotation style

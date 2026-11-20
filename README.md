@@ -97,7 +97,7 @@ Line up videos from any card or with a hotkey. The queue lives next to *Recommen
 
 <img src="docs/screenshots/05-up-next.png" alt="Up next queue next to the player" width="440">
 
-*① The Up next queue sits above Recommended; rows show your playlists, and why your filter would hide a video. ② Clear the videos you already played.*
+*① The Up next queue sits above Recommended; rows show your playlists, and why your filter would hide a video. ② Clear the videos you already played (it asks once more first). ③ Bring back an earlier queue — cleared or replaced queues are kept for 14 days.*
 
 <details>
 <summary>More</summary>
@@ -136,11 +136,28 @@ Your saved searches sit right next to *More Filters*, and on the homepage the si
 - Terms, content flags, rating, length, playlists, watched status and one of your saved searches; an on/off switch keeps your settings.
 - Content flags are the site's own (Nudity, Gay, Trans, Extreme, Voice-over, Remix, Promo, Seizure warning) plus Funscript, Vertical and Music. Flags a list does not include are looked up in batches of 100 and remembered; a video whose flag is still unknown is never hidden.
 - Put a term in quotes, or click it, to match only the whole word: `"ch"` no longer hits *challenge*.
-- Right-click any tag (on cards, under the player, in the HUD) to require or exclude it in the filter.
+- Click a tag, star or song under the player to require or exclude it in the filter (the quick menu).
 - In / not in playlist is ignored on a playlist's own page and on your favourites, where it would hide everything.
 - Pagination helpers: larger pages, one continuous grid, paged mode while filtering, keep loading until enough results remain, skip near-empty pages.
 
 </details>
+
+### Search with more control
+
+The site's search box in the header gets a panel right below it. Choose where to search — everything, titles only, tags, stars, creators or music — and pick from the site's own suggestions as you type. Every pick becomes a chip: click it to exclude instead of require. Sort, length, rating, quality, aspect ratio and upload date sit in a fold-out *Filters* row, and your recent searches are one click away.
+
+- <kbd>Tab</kbd> switches where to search, <kbd>↑</kbd>/<kbd>↓</kbd> and <kbd>Enter</kbd> pick a suggestion, <kbd>Backspace</kbd> in an empty box removes the last chip.
+- Shortcuts while typing: `#tag`, `*star`, `@creator`; a leading `-` excludes (`-#tag`).
+- Results open on the site's own search page, so its own filters keep working on top.
+
+**Quick menu.** On a video page, clicking a tag, star or song under the player opens a small menu instead of leaving the page: require or exclude it in the filter, go on to the search results (or the star's profile) as usual, and browse its videos right there — in the site's own card style, with playlist badges, watched marks, an Up next button on each and more as you scroll. <kbd>Ctrl</kbd>/<kbd>⌘</kbd>-click still follows the link.
+
+<table>
+<tr>
+<td width="60%" valign="top"><img src="docs/screenshots/22-header-search.png" alt="Search panel under the site's search box"><br><sub>① Where to search. ② Picks become chips: amber is required, red is excluded; click to switch. ③ Suggestions from the site, with how often they are used; ⊘ excludes. ④ Filters, summed up next to the button.</sub></td>
+<td width="40%" valign="top"><img src="docs/screenshots/23-quick-menu.png" alt="Quick menu for a tag under the player"><br><sub>① A tag, star or song under the player. ② Require or exclude it in the filter. ③ Where the chip normally leads. ④ Sort its videos (and for a song: this song or the whole artist). ⑤ Its videos, with Up next on hover.</sub></td>
+</tr>
+</table>
 
 ### Playlist pages that keep up
 
