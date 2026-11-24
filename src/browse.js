@@ -11,7 +11,7 @@
 
     function isFilterPage() {
         const p = location.pathname.replace(/\/$/, '') || '/';
-        return PANEL_PAGES.some(pp => p === pp || p.startsWith(pp + '?'))
+        return PANEL_PAGES.includes(p)
             || PANEL_PREFIX_PAGES.some(pp => p.startsWith(pp));
     }
 
@@ -99,8 +99,6 @@
     // --- Fetch interceptor ---
 
     const thumbToId = new Map();
-    let lastApiUrl  = null;
-    let lastApiPage = 1;
 
     // PMVX.resJson is shared (first module defines it): one JSON parse per response.
     const pmvResJson = PMVX.resJson || (PMVX.resJson = res => {
@@ -127,10 +125,6 @@
             const rawUrl = rawUrl0;
             // _pmvx=: the script's own side lists (star popout), not the page's grid.
             if (/\/api\/videos(\?|$)/.test(rawUrl) && !/[?&]_pmvx=/.test(rawUrl)) {
-                lastApiUrl = rawUrl;
-                const u = new URL(rawUrl, location.origin);
-                const p = parseInt(u.searchParams.get('page') || '1');
-                if (p >= lastApiPage) lastApiPage = p;
                 pmvResJson(res).then(json => {
                     indexVideos(json?.data?.videos || json?.videos || json?.data || []);
                 }).catch(() => {});
@@ -172,15 +166,8 @@
             const m = clean.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
                       clean.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
                       clean.match(/\/([a-f0-9]{24})\/thumbnail\//);
-            if (m) {
-                const hexId = m[1];
-                const s = huds?.reverse || reverseMap;
-                if (s?.has(hexId)) return hexId;
-                return hexId;
-            }
+            if (m) return m[1];
         }
-        const a = card.querySelector('a[href*="/videos/"]');
-        if (a) { const m = a.href.match(/\/videos\/([a-f0-9]{24})/); if (m) return m[1]; }
         return null;
     }
 
@@ -189,14 +176,6 @@
         document.querySelectorAll('[data-video-id]').forEach(c => {
             if (!seen.has(c)) { seen.add(c); all.push(c); }
         });
-        if (all.length === 0) {
-            document.querySelectorAll('a[href*="/videos/"]').forEach(a => {
-                const card = a.closest('[class*="card"]') ||
-                             a.closest('[class*="video-item"]') ||
-                             a.parentElement?.parentElement || a.parentElement;
-                if (card && !seen.has(card)) { seen.add(card); all.push(card); }
-            });
-        }
         return all;
     }
 
@@ -291,8 +270,7 @@
         for (const m of muts) {
             for (const n of m.addedNodes) {
                 if (n.nodeType === 1 && (n.dataset?.videoId ||
-                    n.querySelector?.('[data-video-id]') ||
-                    n.querySelector?.('a[href*="/videos/"]'))) {
+                    n.querySelector?.('[data-video-id]'))) {
                     hasNew = true; break;
                 }
             }
@@ -415,6 +393,7 @@
                 chips.appendChild(c);
             });
         };
+        window.removeEventListener('pmv:cache-ready', NF_renderChips); // the previous inject's chips
         NF_renderChips = renderChips;
         renderChips();
         window.addEventListener('pmv:cache-ready', renderChips);
@@ -558,15 +537,15 @@
     }).observe(document.body, { childList: true, subtree: true });
 
     // SPA navigation: reset and re-inject.
-    let lastUrl = location.href;
+    // Path only: a query change (page, sort) must not switch the Content-chip back to Any.
+    let lastPath = location.pathname;
     function onNav() {
-        if (location.href === lastUrl) return;
-        lastUrl = location.href;
+        if (location.pathname === lastPath) return;
+        lastPath = location.pathname;
         injected = false;
         playlistFilterMode = 'any';
         pendingMode = 'any';
         pendingIds = selectedPlaylistIds.slice();
-        lastApiPage  = 1;
         setTimeout(injectButtons, 800);
     }
     PMVX.onRoute(onNav);

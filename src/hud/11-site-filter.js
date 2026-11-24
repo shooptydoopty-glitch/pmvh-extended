@@ -1181,8 +1181,9 @@
             status(filterConfig.active ? `${filterHiddenCount} hidden on this page` : 'Saved — the filter is off');
         };
         clearBtn.onclick = () => {
-            filterConfig = { ...FILTER_DEFAULTS };
-            saveFilterConfig(); applyFilterToCards(); reopen();
+            // Keep what the site had before we changed it, so syncSitePrefs can give it back.
+            filterConfig = { ...FILTER_DEFAULTS, siteInfiniteWas: filterConfig.siteInfiniteWas, sitePageSizeWas: filterConfig.sitePageSizeWas };
+            saveFilterConfig(); syncSitePrefs(); applyFilterToCards(); reopen();
         };
         importBtn.onclick = () => {
             const nf = loadNfFilter();
@@ -1198,7 +1199,7 @@
                 flags: { ...nf.flags },
             };
             filterConfig = { ...d, active: filterConfig.active };
-            saveFilterConfig(); reopen();
+            saveFilterConfig(); applyFilterToCards(); reopen();
         };
         refreshPending();
         // External changes (a tag clicked in the HUD) redraw the open panel.

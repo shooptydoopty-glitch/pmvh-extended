@@ -453,7 +453,7 @@
 
         const key = `${location.pathname}${location.search}#${paging.page}`;
         if (skipState.key !== key) skipState = { key, seen: 0, done: skipState.done };
-        if (visible >= below) { skipState.seen = 0; return; }
+        if (visible >= below) { skipState.seen = skipState.done = 0; return; } // the max counts thin pages in a row
 
         // Playlist membership and ratings resolve late: skip only if still thin on a second look.
         if (++skipState.seen < 2) { setTimeout(skipThinPage, 1500); return; }

@@ -45,6 +45,7 @@
         if (!NF.input?.isConnected) { clearInterval(NF.pollTimer); NF.pollTimer = null; return; }
         // Self-heal: reattach the observer if Vue replaced the queue container.
         watchVideoList();
+        watchActiveRow();
 
         const v = NF.input.value;
         if (v !== NF.lastNativeValue) {
@@ -81,6 +82,7 @@
     // --- Auto-skip ---
 
     let activeRowObserver = null;
+    let activeRowContainer = null;
     let skipChainCount = 0;
     const SKIP_CHAIN_MAX = 30;
     const SKIP_CHAIN_WINDOW_MS = 5000;
@@ -88,7 +90,7 @@
 
     function rowShouldBeHidden(row) {
         if (!hasAnyActiveFilter()) return false;
-        const tokens = parseTokens(NF.lastOwnValue);
+        const tokens = parseTokens(getEffectiveFilterValue(NF.lastOwnValue));
         return !rowPassesFilter(row, tokens);
     }
 
@@ -159,10 +161,11 @@
     }
 
     function watchActiveRow() {
-        if (activeRowObserver) return;
-
         const container = queueRows()[0]?.parentElement;
-        if (!container) return;
+        // Reattach when Vue or a playlist navigation replaced the queue container.
+        if (!container || (activeRowObserver && container === activeRowContainer)) return;
+        activeRowObserver?.disconnect();
+        activeRowContainer = container;
 
         let lastActiveRow = container.querySelector('.border-orange-500');
 
@@ -173,7 +176,7 @@
 
             if (!hasAnyActiveFilter()) return;
             if (!rowShouldBeHidden(active)) {
-                const tokens = parseTokens(NF.lastOwnValue);
+                const tokens = parseTokens(getEffectiveFilterValue(NF.lastOwnValue));
                 requestAnimationFrame(() => overrideUpNext(tokens));
                 return;
             }
@@ -202,7 +205,7 @@
             const newTitle = getUpNextTitle(upNextBtn);
             if (newTitle === lastUpNextTitle) return;
             lastUpNextTitle = newTitle;
-            const tokens = parseTokens(NF.lastOwnValue);
+            const tokens = parseTokens(getEffectiveFilterValue(NF.lastOwnValue));
             requestAnimationFrame(() => overrideUpNext(tokens));
         };
         upNextObserver = new MutationObserver(muts => {
@@ -382,7 +385,9 @@
     }
 
     // SPA navigation watcher; at document-start it waits for the body.
+    let domObserverStarted = false;
     function startObserver() {
+        if (domObserverStarted) return; // safeBoot runs again on every playlist navigation
         if (!document.body) {
             document.addEventListener('DOMContentLoaded', startObserver, { once: true });
             return;
@@ -397,6 +402,7 @@
             if (NF.ownInput?.isConnected && !document.getElementById('pmvnf-qfoot')) { try { injectQueueFooter(); } catch {} }
         });
         domObserver.observe(document.body, { childList: true, subtree: true });
+        domObserverStarted = true;
     }
 
     function boot() {

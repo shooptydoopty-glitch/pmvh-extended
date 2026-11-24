@@ -15,6 +15,9 @@
             terms: { neg: [], pos: [] },
             overlap: [],        // own playlist ids for overlap
             mineRange: { min: null, max: null }, // fractions; typed !mine overrides
+            countRange: { min: null, max: null }, // videos in the playlist
+            newRange: { min: null, max: null },   // videos not in my playlists
+            sort: 'site',       // 'site' | 'score'
             open: false,
             toggle: null,
             mode: 'hide',       // 'hide' | 'sink'
@@ -51,6 +54,9 @@
             if (s && typeof s.open === 'boolean') PB.open = s.open;
             if (s && typeof s.enabled === 'boolean') PB.enabled = s.enabled;
             if (s && typeof s.autoScan === 'boolean') PB.autoScan = s.autoScan;
+            const count = v => (v == null || v === '' || !Number.isFinite(+v)) ? null : Math.max(0, Math.round(+v)); // not parseBound: no fractions
+            ['countRange', 'newRange'].forEach(k => { if (s?.[k]) PB[k] = { min: count(s[k].min), max: count(s[k].max) }; });
+            if (s?.sort === 'score') PB.sort = 'score';
             } catch {}
             PB.desc = matchDescEnabled();
             try {
@@ -72,7 +78,7 @@
         }
         function saveSettings() {
             setMatchDesc(PB.desc);
-            try { localStorage.setItem(KEY_SETTINGS, JSON.stringify({ terms: PB.terms, mode: PB.mode, overlap: PB.overlap, mineRange: PB.mineRange, open: PB.open, enabled: PB.enabled, autoScan: PB.autoScan })); } catch {}
+            try { localStorage.setItem(KEY_SETTINGS, JSON.stringify({ terms: PB.terms, mode: PB.mode, overlap: PB.overlap, mineRange: PB.mineRange, countRange: PB.countRange, newRange: PB.newRange, sort: PB.sort, open: PB.open, enabled: PB.enabled, autoScan: PB.autoScan })); } catch {}
         }
         function loadCache() {
             try {
@@ -144,7 +150,12 @@
         // Off = no filter: all cards shown, no tag fetches; overlap badges stay.
         const hasTagFilter = () => PB.enabled && (PB.tokens.neg.length > 0 || PB.tokens.pos.length > 0);
         const activeMineRange = () => PB.tokens.mine || ((PB.mineRange.min != null || PB.mineRange.max != null) ? PB.mineRange : null);
-        const hasFilter = () => PB.enabled && (hasTagFilter() || !!activeMineRange());
+        const hasRange = r => r.min != null || r.max != null;
+        const outside = (v, r) => v != null && ((r.min != null && v < r.min) || (r.max != null && v > r.max));
+        const rangeText = r => r.min != null && r.max != null ? `${r.min}\u2013${r.max}` : r.min != null ? `${r.min}+` : `\u2264${r.max}`;
+        // Videos not in my playlists (the ticked ones, else all of them); null when unknown.
+        const newOf = id => { if (!hasRange(PB.newRange)) return null; const o = overlapOf(id, true); return o ? o.total - o.n : null; };
+        const hasFilter = () => PB.enabled && (hasTagFilter() || !!activeMineRange() || hasRange(PB.countRange) || hasRange(PB.newRange));
 
         // --- Fetch interceptor ---
         // Records video counts from list pages; wrapped once, chains with other fetch wrappers.
@@ -443,7 +454,7 @@
             return r;
         }
         // Every filter a playlist fails on its own (evaluate() stops at the first): 'neg:<term>', 'pos:<term>', 'mine'.
-        function failKeys(id) {
+        function failKeys(id, count) {
             const entry = PB.tags.get(id);
             const desc = descOf(id);
             const out = [];
@@ -452,6 +463,8 @@
                 const o = overlapOf(id);
                 if (o && ((mineRange.min != null && o.frac < mineRange.min) || (mineRange.max != null && o.frac > mineRange.max))) out.push('mine');
             }
+            if (outside(count, PB.countRange)) out.push('count');
+            if (outside(newOf(id), PB.newRange)) out.push('new');
             for (const { term, max } of PB.tokens.neg) {
                 if (desc && PMVX.termMatch(desc, term)) { out.push('neg:' + term); continue; }
                 if (!entry) continue;
@@ -500,6 +513,9 @@
                     }
                 }
             }
+            if (outside(count, PB.countRange)) return { state: 'fail', hits: [`${count} videos, outside ${rangeText(PB.countRange)}`] };
+            const nw = newOf(id);
+            if (outside(nw, PB.newRange)) return { state: 'fail', hits: [`${nw} videos not in my playlists, outside ${rangeText(PB.newRange)}`] };
             for (const { term, max } of PB.tokens.neg) {
                 // A description hit covers the whole playlist: no threshold.
                 if (desc && PMVX.termMatch(desc, term)) { hits.push('description: ' + term); continue; }
@@ -613,6 +629,9 @@
                     if (card.getAttribute('data-pmvpb-score') !== String(sc.score)) card.setAttribute('data-pmvpb-score', String(sc.score));
                     if (card.getAttribute('data-pmvpb-grade') !== sc.grade) card.setAttribute('data-pmvpb-grade', sc.grade);
                 } else { card.removeAttribute('data-pmvpb-score'); card.removeAttribute('data-pmvpb-grade'); }
+                // Highest score first, unscored after; CSS order only, the site's list stays as it is.
+                const ord = PB.sort !== 'score' ? '' : String(sc ? 100 - sc.score : 101);
+                if (card.style.order !== ord) card.style.order = ord;
                 const ov = overlapOf(id);
                 let ovTitle = '';
                 if (ov) {
@@ -642,7 +661,7 @@
                     setTitle('');
                     return;
                 }
-                const keys = failKeys(id);
+                const keys = failKeys(id, count);
                 evaluated++;
                 keys.forEach(k => removedBy.set(k, (removedBy.get(k) || 0) + 1));
                 if (keys.length === 1) removedOnly.set(keys[0], (removedOnly.get(keys[0]) || 0) + 1);
@@ -690,11 +709,13 @@
             } else if (names.length) {
                 pill('pl', names.length === 1 ? names[0] : `${names.length} playlists`);
             }
+            if (hasRange(PB.countRange)) pill('pl', rangeText(PB.countRange) + ' videos');
+            if (hasRange(PB.newRange)) pill('pl', rangeText(PB.newRange) + ' new');
             PB.lastTotal = total; PB.lastHidden = hidden;
             // Result next to "N playlists total" via data-* + ::after, which survives Vue re-renders.
             const rc = document.querySelector('.playlists-dashboard .results-count');
             if (rc) {
-                const any = PB.terms.neg.length || PB.terms.pos.length || r.min != null || r.max != null;
+                const any = PB.terms.neg.length || PB.terms.pos.length || r.min != null || r.max != null || hasRange(PB.countRange) || hasRange(PB.newRange);
                 const note = !PB.enabled ? (any ? 'filter off' : '')
                     : (hasFilter() && total ? `${hidden} of ${total} ${PB.mode === 'hide' ? 'hidden' : 'moved down'}` : '');
                 if (note) { if (rc.getAttribute('data-pmvpb-note') !== note) rc.setAttribute('data-pmvpb-note', note); }
@@ -728,7 +749,7 @@
             st.id = STYLE_ID;
             st.textContent = `
                 .playlists-grid > a[data-pmvpb-hide="1"] { display: none !important; }
-                .playlists-grid > a[data-pmvpb-sink="1"] { order: 9999; opacity: 0.35; filter: grayscale(0.6); }
+                .playlists-grid > a[data-pmvpb-sink="1"] { order: 9999 !important; opacity: 0.35; filter: grayscale(0.6); }
                 .playlists-grid > a[data-pmvpb-pending="1"] { outline: 1px dashed rgba(255,255,255,0.10); outline-offset: -1px; }
                 .playlists-grid > a[data-pmvpb-cached="1"], .playlists-grid > a[data-pmvpb-overlap] { position: relative; }
                 .playlists-grid > a { position: relative; }
@@ -878,7 +899,6 @@
         const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
         const chip = (text, title, onClick) => { const b = el('button', 'pmvpb-chip', text); b.type = 'button'; if (title) b.title = title; b.onclick = onClick; return b; };
         let renderMineChips = () => {};
-        let renderRange = () => {};
 
         function buildBar() {
             const header = document.querySelector('.playlists-dashboard .dashboard-header');
@@ -1050,11 +1070,13 @@
             const descChip = chip('Description', '', () => { PB.desc = !PB.desc; renderModeChips(); saveSettings(); applyFilter(); });
             const scanChip = chip('⟳ Scan page', 'Fetch the tags of the playlists on this page. Playlists over 300 videos are sampled (first, last and a few pages in between, about 300 videos) to keep it quick. Cached data is reused until a playlist\u2019s video count changes by more than 10%; click ✓ on a card to fetch that playlist in full.', scanVisible);
             const autoChip = chip('Auto-scan', '', () => { PB.autoScan = !PB.autoScan; renderModeChips(); saveSettings(); applyFilter(); });
+            const sortChip = chip('Sort by score', 'Highest Score-pill first; needs Headerfilter terms and scanned playlists', () => { PB.sort = PB.sort === 'score' ? 'site' : 'score'; renderModeChips(); saveSettings(); applyFilter(); });
             const renderModeChips = () => {
                 hideChip.classList.toggle('active', PB.mode === 'hide');
                 sinkChip.classList.toggle('active', PB.mode === 'sink');
                 descChip.classList.toggle('active', !!PB.desc);
                 autoChip.classList.toggle('active', !!PB.autoScan);
+                sortChip.classList.toggle('active', PB.sort === 'score');
                 autoChip.title = PB.autoScan
                     ? 'Tags are fetched automatically for every playlist shown (one request each) — click to scan only on request'
                     : 'Tags are fetched only when you press Scan page — click to fetch them automatically';
@@ -1063,7 +1085,7 @@
                     : 'Video tags and performers only — click to also match the playlist description';
             };
             renderModeChips();
-            chips1.append(hideChip, sinkChip, descChip, scanChip, autoChip);
+            chips1.append(hideChip, sinkChip, sortChip, descChip, scanChip, autoChip);
             s1.appendChild(chips1);
             const counter = el('div', 'pmvpb-counter');
             s1.appendChild(counter);
@@ -1102,65 +1124,82 @@
             };
             renderMineChips();
 
-            const s3 = el('section');
-            const h3 = el('h3'); h3.innerHTML = ICONS.range + ' Overlap range';
-            s3.appendChild(h3);
-            s3.appendChild(el('label', 'pmvpb-label', 'Share of videos that are also in the selected playlists'));
-            const pillRow = el('div', 'pmvpb-pillrow');
-            const pill = el('div', 'pmvpb-pill');
-            const pMin = el('span', null, '0%'); const pSep = el('span', 'sep', '-'); const pMax = el('span', null, 'Any');
-            pill.append(pMin, pSep, pMax); pillRow.appendChild(pill);
-            const rangeCnt = el('span', 'pmvpb-rangecnt');
-            rangeCnt.dataset.pmvpbKey = 'mine';
-            pillRow.appendChild(rangeCnt);
-            const slider = el('div', 'pmvpb-slider');
-            const track = el('div', 'pmvpb-track'); const fill = el('div', 'pmvpb-range');
-            const rMin = el('input'); rMin.type = 'range'; rMin.min = '0'; rMin.max = '100'; rMin.step = '1';
-            const rMax = el('input'); rMax.type = 'range'; rMax.min = '0'; rMax.max = '100'; rMax.step = '1';
-            slider.append(track, fill, rMin, rMax);
-            const labels = el('div', 'pmvpb-sliderlabels'); labels.append(el('span', null, '0%'), el('span', null, '100%'));
-            const presets = el('div', 'pmvpb-chips');
-            const PRESETS = [
-                { t: 'Any', min: null, max: null, title: 'No range filter' },
-                { t: '0%', min: null, max: 0, title: 'Only playlists with no overlap at all' },
-                { t: '<10%', min: null, max: 0.1, title: 'At most 10% overlap' },
-                { t: '50%+', min: 0.5, max: null, title: 'At least half overlaps' },
-                { t: '90%+', min: 0.9, max: null, title: 'Almost everything overlaps' },
-            ];
-            const presetBtns = PRESETS.map(p => {
-                const c = chip(p.t, p.title, () => { PB.mineRange = { min: p.min, max: p.max }; saveSettings(); renderRange(); applyFilter(); });
-                presets.appendChild(c); return c;
+            // Range section: dual slider over `steps` (first = no minimum, last = Any), pill and presets.
+            const rangeSection = ({ title, label, key, range, steps, fmt, presets }) => {
+                const sec = el('section');
+                const h = el('h3'); h.innerHTML = ICONS.range + ' ' + title;
+                sec.append(h, el('label', 'pmvpb-label', label));
+                const pillRow = el('div', 'pmvpb-pillrow'), pill = el('div', 'pmvpb-pill');
+                const pMin = el('span'), pMax = el('span');
+                pill.append(pMin, el('span', 'sep', '-'), pMax);
+                const cnt = el('span', 'pmvpb-rangecnt'); cnt.dataset.pmvpbKey = key;
+                pillRow.append(pill, cnt);
+                const last = steps.length - 1;
+                const mk = () => { const r = el('input'); r.type = 'range'; r.min = '0'; r.max = String(last); r.step = '1'; return r; };
+                const rMin = mk(), rMax = mk(), fill = el('div', 'pmvpb-range');
+                const slider = el('div', 'pmvpb-slider'); slider.append(el('div', 'pmvpb-track'), fill, rMin, rMax);
+                const labels = el('div', 'pmvpb-sliderlabels'); labels.append(el('span', null, fmt(steps[0])), el('span', null, fmt(steps[last])));
+                const idx = v => { const i = steps.findIndex(x => x >= v - 1e-9); return i < 0 ? last : i; };
+                const paint = (a, b) => {
+                    pMin.textContent = fmt(steps[a]); pMax.textContent = b >= last ? 'Any' : fmt(steps[b]);
+                    fill.style.left = (100 * a / last) + '%'; fill.style.width = (100 * (b - a) / last) + '%';
+                };
+                const presetRow = el('div', 'pmvpb-chips');
+                const set = r => { PB[range] = r; saveSettings(); render(); applyFilter(); };
+                const btns = presets.map(p => presetRow.appendChild(chip(p.t, p.title, () => set({ min: p.min ?? null, max: p.max ?? null }))));
+                const render = () => {
+                    const r = PB[range];
+                    const a = r.min != null ? idx(r.min) : 0, b = r.max != null ? idx(r.max) : last;
+                    rMin.value = String(a); rMax.value = String(b); paint(a, b);
+                    btns.forEach((c, i) => c.classList.toggle('active', (presets[i].min ?? null) === r.min && (presets[i].max ?? null) === r.max));
+                };
+                const drag = which => () => {
+                    let a = +rMin.value, b = +rMax.value;
+                    if (a > b) { if (which === 'min') rMax.value = String(b = a); else rMin.value = String(a = b); }
+                    paint(a, b);
+                };
+                const release = () => set({ min: +rMin.value > 0 ? steps[+rMin.value] : null, max: +rMax.value < last ? steps[+rMax.value] : null });
+                rMin.addEventListener('input', drag('min')); rMax.addEventListener('input', drag('max'));
+                rMin.addEventListener('change', release); rMax.addEventListener('change', release);
+                render();
+                sec.append(pillRow, slider, labels, presetRow);
+                return sec;
+            };
+            const COUNT_STEPS = [0, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000];
+            const countFmt = v => v >= 5000 ? '5000+' : String(v);
+            const s3 = rangeSection({
+                title: 'Overlap range', label: 'Share of videos that are also in the selected playlists', key: 'mine', range: 'mineRange',
+                steps: Array.from({ length: 101 }, (_, i) => i / 100), fmt: v => Math.round(v * 100) + '%',
+                presets: [
+                    { t: 'Any', title: 'No range filter' },
+                    { t: '0%', max: 0, title: 'Only playlists with no overlap at all' },
+                    { t: '<10%', max: 0.1, title: 'At most 10% overlap' },
+                    { t: '50%+', min: 0.5, title: 'At least half overlaps' },
+                    { t: '90%+', min: 0.9, title: 'Almost everything overlaps' },
+                ],
             });
-            const paint = (a, b) => {
-                pMin.textContent = a + '%'; pMax.textContent = b >= 100 ? 'Any' : b + '%';
-                fill.style.left = a + '%'; fill.style.width = (b - a) + '%';
-            };
-            renderRange = () => {
-                const a = PB.mineRange.min != null ? Math.round(PB.mineRange.min * 100) : 0;
-                const b = PB.mineRange.max != null ? Math.round(PB.mineRange.max * 100) : 100;
-                rMin.value = String(a); rMax.value = String(b);
-                paint(a, b);
-                presetBtns.forEach((c, i) => {
-                    const p = PRESETS[i];
-                    c.classList.toggle('active', (p.min ?? null) === (PB.mineRange.min ?? null) && (p.max ?? null) === (PB.mineRange.max ?? null));
-                });
-            };
-            const onDrag = (which) => () => {
-                let a = parseInt(rMin.value, 10), b = parseInt(rMax.value, 10);
-                if (a > b) { if (which === 'min') { b = a; rMax.value = String(b); } else { a = b; rMin.value = String(a); } }
-                paint(a, b);
-            };
-            const onRelease = () => {
-                const a = parseInt(rMin.value, 10), b = parseInt(rMax.value, 10);
-                PB.mineRange = { min: a > 0 ? a / 100 : null, max: b < 100 ? b / 100 : null };
-                saveSettings(); renderRange(); applyFilter();
-            };
-            rMin.addEventListener('input', onDrag('min')); rMax.addEventListener('input', onDrag('max'));
-            rMin.addEventListener('change', onRelease); rMax.addEventListener('change', onRelease);
-            renderRange();
-            s3.append(pillRow, slider, labels, presets);
+            const s4 = rangeSection({
+                title: 'Videos', label: 'Number of videos in the playlist', key: 'count', range: 'countRange', steps: COUNT_STEPS, fmt: countFmt,
+                presets: [
+                    { t: 'Any', title: 'No limit' },
+                    { t: '\u226450', max: 50, title: 'Small playlists' },
+                    { t: '50\u2013300', min: 50, max: 300, title: 'Medium playlists' },
+                    { t: '300+', min: 300, title: 'Large playlists' },
+                    { t: '1000+', min: 1000, title: 'Very large playlists' },
+                ],
+            });
+            const s5 = rangeSection({
+                title: 'New videos', label: 'Videos not in my playlists (the selected ones, else all of them)', key: 'new', range: 'newRange', steps: COUNT_STEPS, fmt: countFmt,
+                presets: [
+                    { t: 'Any', title: 'No limit' },
+                    { t: '0', max: 0, title: 'Nothing new: every video is already in my playlists' },
+                    { t: '\u226410', max: 10, title: 'Almost nothing new' },
+                    { t: '50+', min: 50, title: 'At least 50 new videos' },
+                    { t: '200+', min: 200, title: 'At least 200 new videos' },
+                ],
+            });
 
-            grid.append(s1, s2, s3);
+            grid.append(s1, s2, s3, s4, s5);
             header.insertAdjacentElement('afterend', bar);
             PB.bar = bar; PB.input = inp; PB.counter = counter;
             placeCaret();

@@ -235,10 +235,10 @@
             include: 'Required in filter — click: exclude',
             exclude: 'Excluded in filter — click: remove from filter',
         };
-        const makeTagSwitch = (el, tag, neutralStyle, render) => {
+        const makeTagSwitch = (el, tag, neutralStyle, render, kind) => {
             el.dataset.pmvTagChip = tag;
             const paint = () => {
-                const state = tagFilterState(tag);
+                const state = tagFilterState(tag, kind);
                 el.style.cssText = TAG_STYLE_BASE + neutralStyle + (TAG_STATE_STYLE[state] || '');
                 el.title = TAG_STATE_TITLE[state];
                 render(state);
@@ -246,7 +246,7 @@
             paint();
             el.addEventListener('click', e => {
                 e.stopPropagation();
-                cycleTagInFilter(tag);
+                cycleTagInFilter(tag, kind);
                 paint();
             });
         };
@@ -265,7 +265,7 @@
             const nameSpan = document.createElement('span');
             el.appendChild(nameSpan);
             makeTagSwitch(el, star, 'display:inline-flex;align-items:center;gap:4px;background:rgba(234,179,8,.14);border:1px solid rgba(234,179,8,.45);color:rgb(253,224,71);',
-                state => { nameSpan.textContent = (state === 'exclude' ? '⊘ ' : '') + star; });
+                state => { nameSpan.textContent = (state === 'exclude' ? '⊘ ' : '') + star; }, 'stars');
             tags.appendChild(el);
         });
 

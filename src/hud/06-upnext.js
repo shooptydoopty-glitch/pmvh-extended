@@ -939,10 +939,13 @@
                 row.style.opacity = '';
                 const order = [...rowsEl.querySelectorAll('[data-queue-id]')].map(r => r.dataset.queueId);
                 const byId = new Map(smartQueueItems.map(it => [it.id, it]));
-                smartQueueItems = order.map(id => byId.get(id)).filter(Boolean);
+                const shown = new Set(order);
+                const cursorId = smartQueueItems[queueCursor]?.id;
+                // Collapsed played rows are not in the DOM: keep them in front, else a drag deletes them.
+                smartQueueItems = [...smartQueueItems.filter(it => !shown.has(it.id)), ...order.map(id => byId.get(id)).filter(Boolean)];
                 const currentId = getCurrentVideoId();
                 const moved = smartQueueItems.findIndex(it => it.id === currentId);
-                if (moved !== -1) queueCursor = moved;
+                queueCursor = moved !== -1 ? moved : smartQueueItems.findIndex(it => it.id === cursorId);
                 saveQueueState();
                 draggingId = null;
             });

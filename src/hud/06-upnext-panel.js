@@ -171,14 +171,14 @@
     function savedQueuesHtml() {
         const list = loadSavedQueues();
         if (!list.length) return '<div class="text-gray-500">None yet. Saved queues stay until you delete them.</div>';
-        return list.map((q, i) => {
+        return list.map(q => {
             const when = q.at ? new Date(q.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '';
             return `<div class="flex items-center gap-2" style="margin-bottom:4px;">
                 <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;" title="${escHtml(q.name)}">${escHtml(q.name)}</span>
                 <span class="text-gray-500" style="white-space:nowrap;">${q.items.length} \u2022 ${escHtml(when)}</span>
-                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-load="${i}" title="Replace Up next with this queue">Load</button>
-                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-append="${i}" title="Add these videos to the end of Up next">Add</button>
-                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-del="${i}" title="Delete (click twice)">\u2715</button>
+                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-load="${q.at}" title="Replace Up next with this queue">Load</button>
+                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-append="${q.at}" title="Add these videos to the end of Up next">Add</button>
+                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-del="${q.at}" title="Delete (click twice)">\u2715</button>
             </div>`;
         }).join('');
     }
@@ -206,12 +206,17 @@
             const generated = generateSmartQueue(queueSettings)
                 .filter(c => !manuallyAddedIds.has(c.id))
                 .map(c => ({ id: c.id, href: knownHrefForId(c.id), meta: resolveQueueMeta(c.id) }));
-            const added = [...manuallyAddedIds].map(id => {
+            // Hand-added videos that were already played stay out; the new queue starts unplayed.
+            const played = new Set(smartQueueItems.slice(0, queueCursor + 1).map(it => it.id));
+            const added = [...manuallyAddedIds].filter(id => !played.has(id)).map(id => {
                 const existing = smartQueueItems.find(it => it.id === id);
                 return { id, href: existing?.href || knownHrefForId(id), meta: resolveQueueMeta(id) };
             });
             if (smartQueueItems.length) snapshotQueue(`Before "Fill from your playlists" \u2022 ${smartQueueItems.length} videos`);
             smartQueueItems = [...added, ...generated];
+            queueCursor = -1;
+            dismissedCurrentId = null;
+            queueHistoryShown = QUEUE_HISTORY_SHOWN;
             smartQueueActive = true;
 
             if (smartQueueItems.length) {
@@ -242,6 +247,7 @@
             const input = q('#sq-save-name');
             const name = (input.value || '').trim() || `Queue ${new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
             const list = loadSavedQueues().filter(x => x.name !== name);
+            if (list.length >= SAVED_QUEUES_MAX) { toast(`${SAVED_QUEUES_MAX} saved queues: delete one first`, 'red'); return; }
             list.unshift({ name, at: Date.now(), items });
             if (!storeSavedQueues(list)) { toast('Could not save (storage full)', 'red'); return; }
             input.value = '';
@@ -254,7 +260,9 @@
             e.preventDefault();
             e.stopPropagation();
             const list = loadSavedQueues();
-            const idx = +(b.dataset.sqLoad ?? b.dataset.sqAppend ?? b.dataset.sqDel);
+            // By save time, not position: another tab may have changed the list since it was drawn.
+            const at = b.dataset.sqLoad ?? b.dataset.sqAppend ?? b.dataset.sqDel;
+            const idx = list.findIndex(x => String(x.at) === at);
             const saved = list[idx];
             if (!saved) return;
             if (b.dataset.sqDel !== undefined) {
@@ -304,10 +312,9 @@
     }
 
     // --- Up next refill ---
-    function scoreRecommendedCandidate(id, card) {
+    function scoreRecommendedCandidate(id, card, tagScores) {
         const meta = State.videoMeta.get(id);
         if (meta) {
-            const tagScores = computeTagAffinity();
             const tagScore = (meta.tags || []).reduce((sum, t) => sum + (tagScores.get(t) || 0), 0);
             return tagScore + (meta.bayesianRating || 0) / 20;
         }
@@ -325,6 +332,7 @@
         const useFilter = queueSettings.useNfFilter && filterIsMeaningful();
         const candidates = [];
         let rejected = 0;
+        const tagScores = computeTagAffinity(); // loops over all known videos: once per top-up, not per card
         container.querySelectorAll('.w-40').forEach(thumbDiv => {
             const card = thumbDiv.parentElement;
             if (!card) return;
@@ -334,7 +342,7 @@
             if (existingIds.has(apiId)) return;
             const meta = resolveQueueMeta(apiId, card);
             if (useFilter && !passesFilter(apiId, meta)) { rejected++; return; }
-            candidates.push({ id: apiId, href: cardHref(card), meta, score: scoreRecommendedCandidate(apiId, card) });
+            candidates.push({ id: apiId, href: cardHref(card), meta, score: scoreRecommendedCandidate(apiId, card, tagScores) });
         });
         lastFilteredOut = rejected;
         if (!candidates.length) { renderQueueSidebar(); return; }

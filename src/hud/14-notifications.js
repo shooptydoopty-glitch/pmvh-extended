@@ -136,26 +136,21 @@
 
     function addNotificationBadges() {
         const onPage = /^\/notifications\/?$/.test(location.pathname);
-        if (!onPage) { document.getElementById('pmv-notif-selpl')?.remove(); return; }
+        if (!onPage) { document.getElementById('pmv-notif-selpl')?.remove(); document.getElementById('pmv-notif-read')?.remove(); return; }
         if (!State.ready) return;
 
         const toFetch = [];
+        const doneCards = new Set();
 
         document.querySelectorAll('a[href*="/video/"]').forEach(link => {
             const card = link.closest('div.group');
             if (!card?.querySelector('input[type="checkbox"]')) return;
             wireNotifMarkAsRead(link);
-            const hex = link.getAttribute('href')
-                ?.match(/\/video\/(?:[^?#\/]*_)?([0-9a-f]{24})(?:[?#\/]|$)/i)?.[1]?.toLowerCase();
-            if (!hex) return;
-
-            const title = link.textContent.trim().replace(/^["\u201c]|["\u201d]$/g, '').trim().toLowerCase();
-            const videoId = State.slugToApiId.get(hex)
-                || (State.reverse.has(hex) ? hex : null)
-                || (title && State.titleIndex.get(title))
-                || null;
-            // hex is the real video _id: fallback for the thumbnail/tags fetch when no index hits.
-            const apiId = videoId || hex;
+            // Title and thumbnail both link to the video: one label row per card, after the first link.
+            if (doneCards.has(card)) { if (link.nextElementSibling?.dataset?.pmvNotifBadge !== undefined) link.nextElementSibling.remove(); return; }
+            doneCards.add(card);
+            const apiId = resolveNotifVideoApiId(link);
+            if (!apiId) return;
             const meta = State.videoMeta.get(apiId);
             if (meta) {
                 renderNotifPreview(card, apiId, meta);
@@ -165,7 +160,7 @@
             }
 
             const matching = [];
-            if (videoId) State.playlists.forEach(p => { if (p.ids.has(videoId)) matching.push({ id: p.id, name: p.name }); });
+            State.playlists.forEach(p => { if (p.ids.has(apiId)) matching.push({ id: p.id, name: p.name }); });
             const key = matching.map(m => m.name).join('|');
             // data-* survives Vue re-renders; the select button reads it.
             card.dataset.pmvInpl = matching.length ? '1' : '0';
@@ -174,12 +169,11 @@
                 ? link.nextElementSibling : null;
             if (existing && existing.dataset.pmvNotifBadge === key) return;
             existing?.remove();
-            if (!matching.length) return;
 
             const row = document.createElement('div');
             row.dataset.pmvNotifBadge = key;
             row.dataset.pmvBadge = '1';
-            row.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;';
+            row.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:6px;';
             matching.forEach(({ id: plId, name }) => {
                 const badge = document.createElement('span');
                 badge.dataset.playlistName = name;
@@ -189,6 +183,18 @@
                 badge.textContent = (isRejectList(plId) ? '\u2298 ' : '\u2713 ') + name;
                 row.appendChild(badge);
             });
+            // Same Up next button as on video cards (Kaartknoppen); the global sync keeps its state.
+            const aqBtn = cardBtn('queue', 'Add to Up next', CARD_ICON.upNext);
+            aqBtn.dataset.pmvAddqueue = '1';
+            aqBtn.dataset.qid = apiId;
+            aqBtn.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (queuedPosition(apiId)) { removeFromQueue(apiId); toast('\u2212 Removed from Up next', null, { under: upNextToastAnchor() }); return; }
+                addVideoToQueue(apiId, card, link.getAttribute('href'));
+            });
+            row.appendChild(aqBtn);
+            syncQueueCardBtn(aqBtn);
             link.insertAdjacentElement('afterend', row);
         });
 
@@ -210,13 +216,6 @@
 
     // "Select in playlist": clicks the checkbox of each loaded notification whose video is in a playlist (keeps Vue's
     // v-model in sync); again deselects. Next to the All/Unread pills, re-attached each run (Vue drops it); else fixed on body.
-    function isNotifVideoInPlaylist(apiId) {
-        for (const p of State.playlists.values()) {
-            if (p.ids.has(apiId)) return true;
-        }
-        return false;
-    }
-
     // Resolved from State and the live DOM per call, not data-pmv-inpl (can be stale mid-loop).
     function getNotifInPlaylistBoxes() {
         return [...document.querySelectorAll('div.group')]
@@ -225,7 +224,7 @@
                 const link = card.querySelector('a[href*="/video/"]');
                 if (!checkbox || !link) return null;
                 const apiId = resolveNotifVideoApiId(link);
-                return apiId && isNotifVideoInPlaylist(apiId) ? checkbox : null;
+                return apiId && isVideoInPlaylist(apiId) ? checkbox : null;
             })
             .filter(Boolean);
     }
@@ -271,7 +270,7 @@
             btn.addEventListener('click', () => {
                 const initial = getNotifInPlaylistBoxes();
                 const allChecked = initial.length && initial.every(b => b.checked);
-                clickNotifCheckboxesWhere(isNotifVideoInPlaylist, { target: !allChecked });
+                clickNotifCheckboxesWhere(isVideoInPlaylist, { target: !allChecked });
             });
         }
 
@@ -288,12 +287,50 @@
         btn.disabled = !boxes.length;
         btn.title = allChecked ? 'Deselect notifications whose video is in a playlist' : 'Select notifications whose video is in a playlist';
         btn.textContent = `\u2713 In playlist (${boxes.length})`;
+
+        // Mark the selected unread ones read via the site's own per-card button (its request, its UI update).
+        let readBtn = document.getElementById('pmv-notif-read');
+        if (!readBtn) {
+            readBtn = document.createElement('button');
+            readBtn.id = 'pmv-notif-read';
+            readBtn.type = 'button';
+            readBtn.title = 'Mark the selected notifications as read';
+            readBtn.addEventListener('click', async () => {
+                if (readBtn.dataset.busy) return;
+                readBtn.dataset.busy = '1';
+                // The site's own bulk button (shown with an unread selection) does it in one request.
+                const bulk = [...document.querySelectorAll('button')].find(b => b !== readBtn && !b.disabled && !b.closest('div.group')
+                    && /mark/i.test(b.textContent) && /read/i.test(b.textContent) && !/\ball\b/i.test(b.textContent));
+                if (bulk) bulk.click();
+                else for (const b of selectedNotifReadButtons()) {
+                    if (b.isConnected) b.click();
+                    await new Promise(r => setTimeout(r, 250)); // one at a time: the site rate-limits bursts
+                }
+                delete readBtn.dataset.busy;
+                updateNotifSelectButton();
+            });
+        }
+        if (readBtn.previousElementSibling !== btn) btn.after(readBtn);
+        const unread = selectedNotifReadButtons().length;
+        const readStyle = !unread ? 'display:none;'
+            : 'display:inline-flex;align-items:center;padding:4px 12px;border-radius:9999px;font-size:12px;line-height:1.33;cursor:pointer;white-space:nowrap;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.25);color:rgb(229,231,235);'
+              + (row ? '' : 'position:fixed;right:16px;bottom:56px;z-index:9999;');
+        PMVX.setAttr(readBtn, 'style', readStyle);
+        PMVX.setText(readBtn, `\u2713 Mark read (${unread})`);
+    }
+
+    function selectedNotifReadButtons() {
+        return [...document.querySelectorAll('div.group')]
+            .filter(card => card.querySelector('input[type="checkbox"]')?.checked)
+            .map(card => card.querySelector('button[title="Mark as read"]'))
+            .filter(Boolean);
     }
 
     // Keep the select/deselect label in sync with manual checkbox clicks.
     document.addEventListener('change', e => {
+        // Next frame: on "Select All" Vue ticks the other boxes after this capture-phase listener.
         if (e.target?.matches?.('input[type="checkbox"]') && document.getElementById('pmv-notif-selpl')) {
-            updateNotifSelectButton();
+            requestAnimationFrame(updateNotifSelectButton);
         }
     }, true);
 

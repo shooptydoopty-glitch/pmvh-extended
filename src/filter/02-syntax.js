@@ -7,7 +7,8 @@
 
     // Quoted substrings (optionally with -) are one token; the rest splits on whitespace.
     function tokenizeRaw(raw) {
-        const re = /-?=?"[^"]*"|-?=?'[^']*'|\S+/g;
+        // A quote only closes at a token end, so the apostrophes in '80s or 90's stay inside their word.
+        const re = /-?=?"[^"]*"(?=\s|$)|-?=?'[^']*'(?=\s|$)|\S+/g;
         return PMVX.plainQuotes(raw).trim().match(re) || [];
     }
     // Quoted (smart quotes too) and =term match only whole words (PMVX.termMatch); stored as "=term".
@@ -55,6 +56,11 @@
         });
 
         return result;
+    }
+
+    // Typed chip text -> stored term: "a b" becomes =a b, a stray " (unclosed, or 12" vinyl) is dropped.
+    function chipTerm(raw) {
+        return stripTerm(PMVX.plainQuotes(raw).trim().replace(/^#/, '').toLowerCase()).replace(/"/g, '').trim();
     }
 
     // Normalizes meta.duration to seconds (number or "H:MM:SS" / "M:SS" string).
@@ -206,106 +212,14 @@
             if (huds.thumbnailIndex.has(clean)) return huds.thumbnailIndex.get(clean);
         }
 
-        // 3. URL hex, only if in a playlist (else an asset ID).
-        const { reverse } = getLivePlaylists();
-        if (img?.src) {
-            const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
-                      img.src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
-                      img.src.match(/\/([a-f0-9]{24})\/thumbnail\//);
-            if (m && reverse?.has(m[1])) return m[1];
-        }
-
-        // 4. Unvalidated hex.
-        if (img?.src) {
-            const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
-                      img.src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
-                      img.src.match(/\/([a-f0-9]{24})\/thumbnail\//);
-            if (m) return m[1];
-        }
-
-        return null;
+        // 3. URL hex (maybe an asset id: nothing better is known for the preview).
+        return img?.src ? thumbHex(img.src) : null;
     }
 
     function upNextPassesFilter(btn, tokens) {
         if (!btn) return true;
-        const text = getUpNextTitle(btn).toLowerCase();
-        const upVid = getUpNextVideoId(btn);
-        const upMeta = upVid ? PMVX.state?.videoMeta?.get(upVid) : null;
-        const upHay = [text];
-        if (matchDescEnabled() && upMeta?.description) upHay.push(upMeta.description);
-        for (const term of tokens.textInclude) if (!upHay.some(h => PMVX.termMatch(h, term))) return false;
-        for (const term of tokens.textExclude) if (upHay.some(h => PMVX.termMatch(h, term))) return false;
-
-        if (tokens.playlistFilters.length > 0) {
-            const vid = getUpNextVideoId(btn);
-            const { playlists, reverse } = getLivePlaylists();
-            const memberOf = vid ? (reverse.get(vid) || new Set()) : new Set();
-
-            for (const pf of tokens.playlistFilters) {
-                if (pf.name) {
-                    let matchedId = null;
-                    playlists.forEach((p, id) => {
-                        if (p.name.toLowerCase().includes(pf.name)) matchedId = id;
-                    });
-                    const inThat = matchedId ? memberOf.has(matchedId) : false;
-                    if (pf.mode === 'in'  &&  inThat) return false;
-                    if (pf.mode === 'out' && !inThat) return false;
-                } else {
-                    const inAny = memberOf.size > 0;
-                    if (pf.mode === 'in'  &&  inAny) return false;
-                    if (pf.mode === 'out' && !inAny) return false;
-                }
-            }
-        }
-        const vid2 = getUpNextVideoId(btn);
-        const meta2 = vid2 ? PMVX.state?.videoMeta?.get(vid2) : null;
-
-        if (tokens.seenFilter && vid2 && typeof PMVX.isWatched === 'function') {
-            const isWatched2 = PMVX.isWatched(vid2);
-            if (tokens.seenFilter === 'seen' && !isWatched2) return false;
-            if (tokens.seenFilter === 'unseen' && isWatched2) return false;
-        }
-
-        if ((BTN.ratingMin > 0 || BTN.ratingMax < 100) && meta2 && meta2.bayesianRating > 0) {
-            if (meta2.bayesianRating < BTN.ratingMin || meta2.bayesianRating > BTN.ratingMax) return false;
-        }
-
-        if ((BTN.durationMin > 0 || Number.isFinite(BTN.durationMax)) && meta2) {
-            const dur2 = toDurationSeconds(meta2.duration);
-            if (dur2 > 0 && (dur2 < BTN.durationMin || dur2 > BTN.durationMax)) return false;
-        }
-
-        if (flagsReject(vid2)) return false;
-
-        if (BTN.savedSearch && meta2) {
-            const ss = BTN.savedSearch;
-            if (ss.excludeTags?.length) {
-                for (const t of ss.excludeTags) {
-                    if (meta2.tags.includes(t)) return false;
-                }
-            }
-            if (ss.minRating && meta2.bayesianRating > 0 && meta2.bayesianRating < ss.minRating) return false;
-            if (ss.aspectFilter && meta2.width && meta2.height) {
-                const ratio = meta2.width / meta2.height;
-                const aspectOk = (ss._rawAspect || []).some(a => {
-                    if (a === '16:9') return ratio >= 1.7  && ratio <= 1.8;
-                    if (a === '21:9') return ratio >= 2.3  && ratio <= 2.45;
-                    if (a === '4:3')  return ratio >= 1.3  && ratio <= 1.35;
-                    return false;
-                });
-                if (!aspectOk) return false;
-            }
-        }
-
-        if (BTN.playlistMode !== 'all') {
-            const { reverse } = getLivePlaylists();
-            const memberOf2 = vid2 ? (reverse.get(vid2) || new Set()) : new Set();
-            const inSelected = inSelectedPlaylists(memberOf2);
-            if (inSelected !== null && BTN.playlistMode === 'in'  && !inSelected) return false;
-            if (inSelected !== null && BTN.playlistMode === 'out' &&  inSelected) return false;
-        }
-
-        return true;
+        // Same rules as the rows; the preview has no <h4>, so its title stands in for the row text.
+        return rowPassesFilter({ querySelector: () => null, textContent: getUpNextTitle(btn) }, tokens, getUpNextVideoId(btn));
     }
 
     // --- Applying the filter ---
@@ -313,6 +227,9 @@
     let lastAppliedValue = null;
     let lastAppliedDataVersion = -1;
 
+
+    // One function, not a new arrow per run: the fetch queue keeps callbacks in a Set until it is done.
+    function reapplyFilter() { applyFilter(NF.lastOwnValue, true); }
 
     function applyFilter(ownValue, force = false) {
         const currentDataVersion = PMVX.state?.cacheVersion ?? 0;
@@ -345,15 +262,13 @@
         );
         autoFetchAllIfNeeded(effectiveValue, hasOwnFilter, needsMeta);
 
-        // Flags missing from playlist data: fetched in bulk, then rows re-judged.
-        if (hasOwnFilter && flagKeysActive().length && typeof PMVX.fetchFlags === 'function') {
+        // Flags and full meta (playlist data has only 5 tags, no models) are fetched in bulk, then rows re-judged.
+        const wantFlags = hasOwnFilter && flagKeysActive().length && typeof PMVX.fetchFlags === 'function';
+        const wantMeta = hasOwnFilter && (tokens.textInclude.length || tokens.textExclude.length) && typeof PMVX.fetchFullMeta === 'function';
+        if (wantFlags || wantMeta) {
             const ids = queueRows().map(r => getRowVideoId(r)).filter(Boolean);
-            PMVX.fetchFlags(ids, flagKeysActive(), () => applyFilter(NF.lastOwnValue, true));
-        }
-        // Playlist data has only 5 tags and no models per video: fetch full meta, then re-judge.
-        if (hasOwnFilter && (tokens.textInclude.length || tokens.textExclude.length) && typeof PMVX.fetchFullMeta === 'function') {
-            const ids = queueRows().map(r => getRowVideoId(r)).filter(Boolean);
-            PMVX.fetchFullMeta(ids, () => applyFilter(NF.lastOwnValue, true));
+            if (wantFlags) PMVX.fetchFlags(ids, flagKeysActive(), reapplyFilter);
+            if (wantMeta) PMVX.fetchFullMeta(ids, reapplyFilter);
         }
 
         const rows = queueRows();

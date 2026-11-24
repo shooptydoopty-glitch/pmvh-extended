@@ -106,8 +106,10 @@
             let s = State.reverse.get(videoId);
             if (!s) { s = new Set(); State.reverse.set(videoId, s); }
             s.add(playlistId);
+            State.refreshEdits?.push([playlistId, videoId, true]);
             saveCacheSoon();
             refreshQueuePlaylistChips(videoId);
+            invalidateCardBadges(videoId);
         }
         // Filters keep this video visible until applied again (PMVX.markActed).
         PMVX.markActed(videoId);
@@ -132,8 +134,10 @@
 
         State.playlists.get(playlistId)?.ids.delete(videoId);
         State.reverse.get(videoId)?.delete(playlistId);
+        State.refreshEdits?.push([playlistId, videoId, false]);
         saveCacheSoon();
         refreshQueuePlaylistChips(videoId);
+        invalidateCardBadges(videoId);
         PMVX.markActed(videoId);
         return true;
     }
@@ -190,6 +194,8 @@
         removeProgressBar();
 
         document.querySelectorAll('#pmv-toast, #pmv-progress-bar, #pmv-ctx-menu, #pmv-page-playlists, [data-pmv-badge="1"]').forEach(el => el.remove());
+        // In fullscreen the bar is only built on fullscreenchange, so rebuild it here.
+        if (document.fullscreenElement) createProgressBar();
 
         // Reset markers so badges and page playlist buttons are re-placed.
         document.querySelectorAll('[data-pmv-checked]').forEach(el => delete el.dataset.pmvChecked);

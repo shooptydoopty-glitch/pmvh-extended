@@ -106,6 +106,7 @@
         reverse: new Map(),
         cacheLoadedAt: 0,
         refreshPromise: null,
+        refreshEdits: null, // [playlistId, videoId, added] made while a refresh runs
         ready: false,
 
         currentVideoId: null,
@@ -216,6 +217,10 @@
         saveCacheTimer = setTimeout(() => { saveCacheTimer = null; saveCache(); }, 250);
     }
     window.addEventListener('pagehide', () => { if (saveCacheTimer) saveCache(); });
+    // Another tab saved playlist changes: take them over (not mid-refresh or with an own save pending).
+    window.addEventListener('storage', e => {
+        if (e.key === CACHE_KEY && !State.refreshPromise && !saveCacheTimer && loadCache()) notifyCacheReady();
+    });
 
     function notifyCacheReady() {
         try { window.dispatchEvent(new CustomEvent('pmv:cache-ready')); } catch {}

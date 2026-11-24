@@ -177,12 +177,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 }
                 btn.dataset.on = now ? '1' : '';
                 styleRejectCardBtn(btn, now);
-                // Force a re-badge and re-tint on the next pass.
-                card.querySelectorAll('[data-playlist-name]').forEach(el => el.remove());
-                delete card.dataset.pmvChecked;
-                delete card.dataset.pmvRecChecked;
-                delete card.dataset.pmvMfChecked;
-                scheduleBadges();
+                invalidateCardBadges(id, card);
             } catch {
                 toast('Reject failed');
             } finally {
@@ -481,6 +476,16 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 try { renderQueueSidebar(); } catch {}
             }
         }, d));
+    }
+
+    // Playlist membership changed: drop the markers so the next pass redraws labels and tint.
+    function invalidateCardBadges(videoId, card = null) {
+        const cards = [...document.querySelectorAll('[data-video-id]')].filter(c => c.dataset.videoId === videoId);
+        if (card && !cards.includes(card)) cards.push(card);
+        cards.forEach(c => { c.querySelectorAll('[data-playlist-name]').forEach(el => el.remove()); delete c.dataset.pmvChecked; });
+        document.querySelectorAll('[data-pmv-rec-checked], [data-pmv-mf-checked]').forEach(el => { delete el.dataset.pmvRecChecked; delete el.dataset.pmvMfChecked; });
+        scheduleBadges();
+        try { addMoreFromBadges(); } catch {}
     }
 
     // Re-badge once the cache is ready (kicks may have fired before State.ready).

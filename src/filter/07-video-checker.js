@@ -258,9 +258,12 @@
         function start() {
             if (PB.active) return;
             PB.active = true;
+            PB.failed.clear(); // a new visit retries what failed last time (also Mini-checker failures)
             injectStyles();
             // Self-heal: re-insert the bar and re-apply when Vue replaces the header or grid.
-            PB.observer = new MutationObserver(() => {
+            PB.observer = new MutationObserver(muts => {
+                // Our own bar and button rewrite their text on every run; reacting to that would loop.
+                if (muts.every(m => m.target.closest?.('#' + BAR_ID + ', #' + BTN_ID))) return;
                 const btn = document.getElementById(BTN_ID);
                 const row = document.querySelector('.playlists-dashboard .dashboard-header .filter-pills');
                 if (!document.getElementById(BAR_ID) || !btn?.isConnected || (row && btn.parentElement !== row)) buildBar();
@@ -273,10 +276,12 @@
             buildBar();
             applyFilter();
             window.addEventListener('pmv:cache-ready', scheduleApply);
-            window.addEventListener('pmv:cache-ready', () => renderMineChips());
+            window.addEventListener('pmv:cache-ready', renderMineChipsOnReady);
         }
+        function renderMineChipsOnReady() { renderMineChips(); }
         function stop() {
             window.removeEventListener('pmv:cache-ready', scheduleApply);
+            window.removeEventListener('pmv:cache-ready', renderMineChipsOnReady);
             if (!PB.active) return;
             PB.active = false;
             ['mousedown', 'mouseup', 'click'].forEach(t => document.removeEventListener(t, onCardClick, true));
@@ -286,6 +291,8 @@
             document.getElementById(BTN_ID)?.remove();
             document.querySelectorAll('[data-pmvpb-note]').forEach(n => n.removeAttribute('data-pmvpb-note'));
             PB.bar = PB.input = PB.counter = PB.toggle = null;
+            // Queued scans would keep hitting the API after we left; running ones finish.
+            PB.queue.splice(0).forEach(job => { PB.pending.delete(job.id); job.resolve(); });
         }
         function onRoute() {
             if (isBrowsePage()) start(); else stop();

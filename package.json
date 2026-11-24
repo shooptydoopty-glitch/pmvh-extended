@@ -1,10 +1,11 @@
 {
   "name": "pmvh-extended",
-  "version": "1.2.88",
+  "version": "1.2.95",
   "description": "PMVH Extended: userscript that adds playlist tools, filters, a fullscreen HUD and an Up next queue to PMVHaven.",
   "private": true,
   "license": "MIT",
   "scripts": {
-    "build": "node build.js"
+    "build": "node build.js",
+    "test": "node test/parser.test.js"
   }
 }

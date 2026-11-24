@@ -148,7 +148,7 @@
         if (isRejectList(playlistId)) return rejectCurrentVideo();
         const videoId = getCurrentVideoId();
         if (!videoId) { toast('No video'); return; }
-        const plName = getPlaylistDisplayName(State.playlists.get(playlistId)?.name) || playlistId;
+        const plName = getPlaylistDisplayName(State.playlists.get(playlistId)?.name, playlistId) || playlistId;
         const isMember = getMatches(videoId).some(p => p.id === playlistId);
 
         if (isMember) {
@@ -324,7 +324,7 @@
     function describeBinding(binding) {
         if (!binding) return null;
         if (binding.action === 'playlist') {
-            const name = getPlaylistDisplayName(State.playlists.get(binding.playlistId)?.name) || binding.playlistId;
+            const name = getPlaylistDisplayName(State.playlists.get(binding.playlistId)?.name, binding.playlistId) || binding.playlistId;
             return isRejectList(binding.playlistId)
                 ? `"${name}" reject (out of every other playlist, next video)`
                 : `"${name}" toggle (press again within 3 s to remove)`;
@@ -345,7 +345,7 @@
             .map(([key, binding]) => ({ key, desc: describeBinding(binding) }))
             .filter(r => r.desc)
             .sort((a, b) => a.key.localeCompare(b.key))
-            .map(r => `<tr><td style="color:rgb(100,255,0);padding-right:16px;">${r.key.toUpperCase()}</td><td>${r.desc}</td></tr>`)
+            .map(r => `<tr><td style="color:rgb(100,255,0);padding-right:16px;">${escHtml(r.key.toUpperCase())}</td><td>${escHtml(r.desc)}</td></tr>`)
             .join('');
 
         const box = document.createElement('div');

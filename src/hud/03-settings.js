@@ -6,8 +6,7 @@
             const k = localStorage.key(i);
             // Settings only: caches are rebuilt from the site.
             if (!k || !k.startsWith('pmv') || /cache/i.test(k)) continue;
-            try { out[k] = JSON.parse(localStorage.getItem(k)); }
-            catch { out[k] = localStorage.getItem(k); }
+            out[k] = localStorage.getItem(k); // raw: parsing would strip the quotes off JSON string values
         }
         return out;
     }
@@ -216,7 +215,9 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             try { parsed = JSON.parse(ta.value); }
             catch { toast('Invalid JSON'); return; }
             if (!parsed || typeof parsed !== 'object') { toast('Invalid JSON'); return; }
-            const count = applyPmvSettings(parsed);
+            let count;
+            try { count = applyPmvSettings(parsed); }
+            catch (e) { toast(`Import stopped: ${e.message || e}`); return; }
             toast(`${count} setting(s) imported - reloading`);
             setTimeout(() => location.reload(), 1200);
         };
@@ -519,7 +520,8 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             render();
         });
         render();
-        window.addEventListener('pmv:cache-ready', () => { if (sec.isConnected) render(); });
+        const onReady = () => { if (sec.isConnected) render(); else window.removeEventListener('pmv:cache-ready', onReady); };
+        window.addEventListener('pmv:cache-ready', onReady);
         list.appendChild(sec);
         if (location.hash === '#pmvx') setTimeout(() => sec.scrollIntoView({ block: 'start', behavior: 'smooth' }), 100);
     }

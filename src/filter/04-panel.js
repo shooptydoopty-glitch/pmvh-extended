@@ -397,7 +397,12 @@
             if (card.style.minHeight !== want) card.style.minHeight = want;
         };
         placePanel();
-        try { const ro = new ResizeObserver(placePanel); ro.observe(header); ro.observe(card); } catch {}
+        // A rebuild (Vue replaced the input) drops the previous panel's observer and listener.
+        NF.panelCleanup?.();
+        const onReady = () => { try { updatePlBtn(); } catch {} };
+        let ro = null;
+        try { ro = new ResizeObserver(placePanel); ro.observe(header); ro.observe(card); } catch {}
+        NF.panelCleanup = () => { ro?.disconnect(); window.removeEventListener('pmv:cache-ready', onReady); };
         const setOpen = (v) => {
             UI.open = v;
             panel.dataset.open = v ? '1' : '0';
@@ -458,8 +463,8 @@
             const inp = e.target;
             const immediate = inp.dataset.pmvnfApply === '1';
             if (e.key === 'Enter') {
-                const term = inp.value.trim().replace(/^#/, '').toLowerCase();
-                if (!term) { applyAll(); return true; }
+                const term = chipTerm(inp.value);
+                if (!term || term === '=') { if (!inp.value.trim()) applyAll(); inp.value = ''; return true; }
                 const isDef = kind.startsWith('d');
                 const list = UI[kind], other = UI[isDef ? (kind === 'dpos' ? 'dneg' : 'dpos') : (kind === 'pos' ? 'neg' : 'pos')];
                 if (!list.includes(term)) list.push(term);
@@ -658,7 +663,7 @@
         injectQueueFooter();
         setOpen(UI.open);
         injectSortSelect();
-        window.addEventListener('pmv:cache-ready', () => { try { updatePlBtn(); } catch {} });
+        window.addEventListener('pmv:cache-ready', onReady);
         attachOwnInputKeyIntercept();
     }
 

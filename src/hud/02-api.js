@@ -141,11 +141,14 @@
         State.refreshPromise = (async () => {
             const ownerId = await getOwnerId();
             if (!ownerId) return;
-            const listJson = await api(`/api/playlists?owner=${ownerId}&limit=100`);
-            const list = Array.isArray(listJson) ? listJson : (listJson.playlists || listJson.data || []);
-
-            State.thumbnailIndex.clear();
-            State.titleIndex.clear();
+            const list = [];
+            for (let page = 1; ; page++) {
+                const listJson = await api(`/api/playlists?owner=${ownerId}&limit=100&page=${page}`);
+                const part = Array.isArray(listJson) ? listJson : (listJson.playlists || listJson.data || []);
+                list.push(...part);
+                if (!listJson?.meta?.hasMore || !part.length) break;
+            }
+            State.refreshEdits = [];
 
             function buildPlaylistEntry(p, detail) {
                 const root = detail?.data || detail;
@@ -169,6 +172,7 @@
             }
 
             const nextPlaylists = new Map();
+            let failed = false;
 
             // Largest playlist first, merged as soon as it lands so lookups work while the rest loads.
             const sizeOf = p => p.validVideoCount ?? (Array.isArray(p.videos) ? p.videos.length : 0);
@@ -189,7 +193,7 @@
                     State.ready = true;
                     rebuildReverseIndex();
                     if (!wasReady) notifyCacheReady();
-                } catch {}
+                } catch { failed = true; }
             })();
 
             // fetchAll=true is required, else only the first page of each playlist comes back. Two at a time.
@@ -201,6 +205,7 @@
 
             results.forEach(r => {
                 if (r.status !== 'fulfilled') {
+                    failed = true;
                     return;
                 }
                 const { p, detail } = r.value;
@@ -208,16 +213,21 @@
                 nextPlaylists.set(entry.id, entry);
             });
 
+            // A playlist that failed to load keeps its old entry; no fresh cache, so the next page load retries.
+            list.forEach(p => { if (!nextPlaylists.has(p._id) && State.playlists.has(p._id)) nextPlaylists.set(p._id, State.playlists.get(p._id)); });
+            // Adds/removes made while the fetches ran may be missing from their responses.
+            State.refreshEdits.forEach(([pid, vid, added]) => nextPlaylists.get(pid)?.ids[added ? 'add' : 'delete'](vid));
             State.playlists = nextPlaylists;
             State.ready = true;
             rebuildReverseIndex();
-            saveCache();
+            if (!failed) saveCache();
         })();
 
         try {
             await State.refreshPromise;
         } finally {
             State.refreshPromise = null;
+            State.refreshEdits = null;
         }
     }
 
@@ -535,7 +545,7 @@
     }
 
     // --- Watched tracking ---
-    // Local playback history (PMVX.watched / __pmvIsWatched / __pmvMarkWatched), attached from getVideo()'s init.
+    // Local playback history (PMVX.isWatched / PMVX.markWatched), attached from getVideo()'s init.
     let watchedMap = new Map(); // videoId -> ISO timestamp
     (function loadWatched() {
         try {
@@ -546,6 +556,9 @@
     })();
     function saveWatched() {
         try {
+            // Merge what other tabs wrote since we loaded; the newest timestamp wins.
+            const stored = JSON.parse(localStorage.getItem(WATCHED_KEY) || '{}') || {};
+            for (const [id, at] of Object.entries(stored)) if (!(watchedMap.get(id) >= at)) watchedMap.set(id, at);
             if (watchedMap.size > WATCHED_MAX) {
                 const sorted = [...watchedMap.entries()].sort((a, b) => a[1].localeCompare(b[1]));
                 for (const [id] of sorted.slice(0, watchedMap.size - WATCHED_MAX)) watchedMap.delete(id);
@@ -558,7 +571,6 @@
         watchedMap.set(videoId, new Date().toISOString());
         saveWatched();
     }
-    PMVX.watched = watchedMap;
     PMVX.isWatched = id => watchedMap.has(id);
     PMVX.markWatched = markWatched;
 

@@ -305,6 +305,12 @@
     // --- Video ID from a row ---
     // Thumbnails carry an asset ID, not the video _id: index lookups first.
 
+    // Hex id in a thumbnail URL: often an asset id, so callers check it against the playlists first.
+    function thumbHex(src) {
+        const m = src.match(/\/thumbnails\/([a-f0-9]{24})\//) || src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) || src.match(/\/([a-f0-9]{24})\/thumbnail\//);
+        return m ? m[1] : null;
+    }
+
     function getRowVideoId(row) {
         if (row.dataset.videoId) return row.dataset.videoId;
 
@@ -343,10 +349,8 @@
         // 5. Thumbnail URL hex, only if it is in a playlist.
         const { reverse } = getLivePlaylists();
         if (img?.src) {
-            const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
-                      img.src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
-                      img.src.match(/\/([a-f0-9]{24})\/thumbnail\//);
-            if (m && reverse?.has(m[1])) return m[1];
+            const hex = thumbHex(img.src);
+            if (hex && reverse?.has(hex)) return hex;
         }
 
         // 6. Video link href.
@@ -359,10 +363,8 @@
 
         // 7. Unvalidated hex (maybe an asset ID); last resort for !in/!out.
         if (img?.src) {
-            const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
-                      img.src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
-                      img.src.match(/\/([a-f0-9]{24})\/thumbnail\//);
-            if (m) return m[1];
+            const hex = thumbHex(img.src);
+            if (hex) return hex;
         }
 
         return null;

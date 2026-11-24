@@ -12,7 +12,7 @@
         }
 
         State.playlists.forEach((p, id) => {
-            const name = getPlaylistDisplayName(p.name) || id;
+            const name = getPlaylistDisplayName(p.name, id) || id;
             if (!q || name.toLowerCase().includes(q)) {
                 results.push({ type: 'playlist', id, label: name, sub: `${p.ids.size} videos`, href: `/playlists/${id}` });
             }
@@ -68,8 +68,8 @@
             resultsEl.innerHTML = current.length
                 ? current.map((r, i) => `
                     <div data-i="${i}" style="padding:8px 14px;cursor:pointer;display:flex;justify-content:space-between;gap:10px;${i === selectedIdx ? 'background:rgba(99,102,241,0.15);' : ''}">
-                        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${r.type === 'playlist' ? 'rgb(165,180,252)' : 'rgba(255,255,255,0.85)'};">${r.type === 'playlist' ? '▶ ' : ''}${r.label}</span>
-                        <span style="color:rgba(255,255,255,0.3);font-size:10px;white-space:nowrap;flex-shrink:0;">${r.sub || ''}</span>
+                        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${r.type === 'playlist' ? 'rgb(165,180,252)' : 'rgba(255,255,255,0.85)'};">${r.type === 'playlist' ? '▶ ' : ''}${escHtml(r.label)}</span>
+                        <span style="color:rgba(255,255,255,0.3);font-size:10px;white-space:nowrap;flex-shrink:0;">${escHtml(r.sub || '')}</span>
                     </div>`).join('')
                 : `<div style="padding:14px;color:rgba(255,255,255,0.3);font-size:12px;">${input.value.trim() ? 'No results' : 'Type to search videos, or browse playlists below'}</div>`;
         };

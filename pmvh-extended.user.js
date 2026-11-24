@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.2.88
+// @version      1.2.95
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -489,6 +489,12 @@ PMVX.scheduler = fn => {
     // --- Video ID from a row ---
     // Thumbnails carry an asset ID, not the video _id: index lookups first.
 
+    // Hex id in a thumbnail URL: often an asset id, so callers check it against the playlists first.
+    function thumbHex(src) {
+        const m = src.match(/\/thumbnails\/([a-f0-9]{24})\//) || src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) || src.match(/\/([a-f0-9]{24})\/thumbnail\//);
+        return m ? m[1] : null;
+    }
+
     function getRowVideoId(row) {
         if (row.dataset.videoId) return row.dataset.videoId;
 
@@ -527,10 +533,8 @@ PMVX.scheduler = fn => {
         // 5. Thumbnail URL hex, only if it is in a playlist.
         const { reverse } = getLivePlaylists();
         if (img?.src) {
-            const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
-                      img.src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
-                      img.src.match(/\/([a-f0-9]{24})\/thumbnail\//);
-            if (m && reverse?.has(m[1])) return m[1];
+            const hex = thumbHex(img.src);
+            if (hex && reverse?.has(hex)) return hex;
         }
 
         // 6. Video link href.
@@ -543,10 +547,8 @@ PMVX.scheduler = fn => {
 
         // 7. Unvalidated hex (maybe an asset ID); last resort for !in/!out.
         if (img?.src) {
-            const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
-                      img.src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
-                      img.src.match(/\/([a-f0-9]{24})\/thumbnail\//);
-            if (m) return m[1];
+            const hex = thumbHex(img.src);
+            if (hex) return hex;
         }
 
         return null;
@@ -561,7 +563,8 @@ PMVX.scheduler = fn => {
 
     // Quoted substrings (optionally with -) are one token; the rest splits on whitespace.
     function tokenizeRaw(raw) {
-        const re = /-?=?"[^"]*"|-?=?'[^']*'|\S+/g;
+        // A quote only closes at a token end, so the apostrophes in '80s or 90's stay inside their word.
+        const re = /-?=?"[^"]*"(?=\s|$)|-?=?'[^']*'(?=\s|$)|\S+/g;
         return PMVX.plainQuotes(raw).trim().match(re) || [];
     }
     // Quoted (smart quotes too) and =term match only whole words (PMVX.termMatch); stored as "=term".
@@ -609,6 +612,11 @@ PMVX.scheduler = fn => {
         });
 
         return result;
+    }
+
+    // Typed chip text -> stored term: "a b" becomes =a b, a stray " (unclosed, or 12" vinyl) is dropped.
+    function chipTerm(raw) {
+        return stripTerm(PMVX.plainQuotes(raw).trim().replace(/^#/, '').toLowerCase()).replace(/"/g, '').trim();
     }
 
     // Normalizes meta.duration to seconds (number or "H:MM:SS" / "M:SS" string).
@@ -760,106 +768,14 @@ PMVX.scheduler = fn => {
             if (huds.thumbnailIndex.has(clean)) return huds.thumbnailIndex.get(clean);
         }
 
-        // 3. URL hex, only if in a playlist (else an asset ID).
-        const { reverse } = getLivePlaylists();
-        if (img?.src) {
-            const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
-                      img.src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
-                      img.src.match(/\/([a-f0-9]{24})\/thumbnail\//);
-            if (m && reverse?.has(m[1])) return m[1];
-        }
-
-        // 4. Unvalidated hex.
-        if (img?.src) {
-            const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
-                      img.src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
-                      img.src.match(/\/([a-f0-9]{24})\/thumbnail\//);
-            if (m) return m[1];
-        }
-
-        return null;
+        // 3. URL hex (maybe an asset id: nothing better is known for the preview).
+        return img?.src ? thumbHex(img.src) : null;
     }
 
     function upNextPassesFilter(btn, tokens) {
         if (!btn) return true;
-        const text = getUpNextTitle(btn).toLowerCase();
-        const upVid = getUpNextVideoId(btn);
-        const upMeta = upVid ? PMVX.state?.videoMeta?.get(upVid) : null;
-        const upHay = [text];
-        if (matchDescEnabled() && upMeta?.description) upHay.push(upMeta.description);
-        for (const term of tokens.textInclude) if (!upHay.some(h => PMVX.termMatch(h, term))) return false;
-        for (const term of tokens.textExclude) if (upHay.some(h => PMVX.termMatch(h, term))) return false;
-
-        if (tokens.playlistFilters.length > 0) {
-            const vid = getUpNextVideoId(btn);
-            const { playlists, reverse } = getLivePlaylists();
-            const memberOf = vid ? (reverse.get(vid) || new Set()) : new Set();
-
-            for (const pf of tokens.playlistFilters) {
-                if (pf.name) {
-                    let matchedId = null;
-                    playlists.forEach((p, id) => {
-                        if (p.name.toLowerCase().includes(pf.name)) matchedId = id;
-                    });
-                    const inThat = matchedId ? memberOf.has(matchedId) : false;
-                    if (pf.mode === 'in'  &&  inThat) return false;
-                    if (pf.mode === 'out' && !inThat) return false;
-                } else {
-                    const inAny = memberOf.size > 0;
-                    if (pf.mode === 'in'  &&  inAny) return false;
-                    if (pf.mode === 'out' && !inAny) return false;
-                }
-            }
-        }
-        const vid2 = getUpNextVideoId(btn);
-        const meta2 = vid2 ? PMVX.state?.videoMeta?.get(vid2) : null;
-
-        if (tokens.seenFilter && vid2 && typeof PMVX.isWatched === 'function') {
-            const isWatched2 = PMVX.isWatched(vid2);
-            if (tokens.seenFilter === 'seen' && !isWatched2) return false;
-            if (tokens.seenFilter === 'unseen' && isWatched2) return false;
-        }
-
-        if ((BTN.ratingMin > 0 || BTN.ratingMax < 100) && meta2 && meta2.bayesianRating > 0) {
-            if (meta2.bayesianRating < BTN.ratingMin || meta2.bayesianRating > BTN.ratingMax) return false;
-        }
-
-        if ((BTN.durationMin > 0 || Number.isFinite(BTN.durationMax)) && meta2) {
-            const dur2 = toDurationSeconds(meta2.duration);
-            if (dur2 > 0 && (dur2 < BTN.durationMin || dur2 > BTN.durationMax)) return false;
-        }
-
-        if (flagsReject(vid2)) return false;
-
-        if (BTN.savedSearch && meta2) {
-            const ss = BTN.savedSearch;
-            if (ss.excludeTags?.length) {
-                for (const t of ss.excludeTags) {
-                    if (meta2.tags.includes(t)) return false;
-                }
-            }
-            if (ss.minRating && meta2.bayesianRating > 0 && meta2.bayesianRating < ss.minRating) return false;
-            if (ss.aspectFilter && meta2.width && meta2.height) {
-                const ratio = meta2.width / meta2.height;
-                const aspectOk = (ss._rawAspect || []).some(a => {
-                    if (a === '16:9') return ratio >= 1.7  && ratio <= 1.8;
-                    if (a === '21:9') return ratio >= 2.3  && ratio <= 2.45;
-                    if (a === '4:3')  return ratio >= 1.3  && ratio <= 1.35;
-                    return false;
-                });
-                if (!aspectOk) return false;
-            }
-        }
-
-        if (BTN.playlistMode !== 'all') {
-            const { reverse } = getLivePlaylists();
-            const memberOf2 = vid2 ? (reverse.get(vid2) || new Set()) : new Set();
-            const inSelected = inSelectedPlaylists(memberOf2);
-            if (inSelected !== null && BTN.playlistMode === 'in'  && !inSelected) return false;
-            if (inSelected !== null && BTN.playlistMode === 'out' &&  inSelected) return false;
-        }
-
-        return true;
+        // Same rules as the rows; the preview has no <h4>, so its title stands in for the row text.
+        return rowPassesFilter({ querySelector: () => null, textContent: getUpNextTitle(btn) }, tokens, getUpNextVideoId(btn));
     }
 
     // --- Applying the filter ---
@@ -867,6 +783,9 @@ PMVX.scheduler = fn => {
     let lastAppliedValue = null;
     let lastAppliedDataVersion = -1;
 
+
+    // One function, not a new arrow per run: the fetch queue keeps callbacks in a Set until it is done.
+    function reapplyFilter() { applyFilter(NF.lastOwnValue, true); }
 
     function applyFilter(ownValue, force = false) {
         const currentDataVersion = PMVX.state?.cacheVersion ?? 0;
@@ -899,15 +818,13 @@ PMVX.scheduler = fn => {
         );
         autoFetchAllIfNeeded(effectiveValue, hasOwnFilter, needsMeta);
 
-        // Flags missing from playlist data: fetched in bulk, then rows re-judged.
-        if (hasOwnFilter && flagKeysActive().length && typeof PMVX.fetchFlags === 'function') {
+        // Flags and full meta (playlist data has only 5 tags, no models) are fetched in bulk, then rows re-judged.
+        const wantFlags = hasOwnFilter && flagKeysActive().length && typeof PMVX.fetchFlags === 'function';
+        const wantMeta = hasOwnFilter && (tokens.textInclude.length || tokens.textExclude.length) && typeof PMVX.fetchFullMeta === 'function';
+        if (wantFlags || wantMeta) {
             const ids = queueRows().map(r => getRowVideoId(r)).filter(Boolean);
-            PMVX.fetchFlags(ids, flagKeysActive(), () => applyFilter(NF.lastOwnValue, true));
-        }
-        // Playlist data has only 5 tags and no models per video: fetch full meta, then re-judge.
-        if (hasOwnFilter && (tokens.textInclude.length || tokens.textExclude.length) && typeof PMVX.fetchFullMeta === 'function') {
-            const ids = queueRows().map(r => getRowVideoId(r)).filter(Boolean);
-            PMVX.fetchFullMeta(ids, () => applyFilter(NF.lastOwnValue, true));
+            if (wantFlags) PMVX.fetchFlags(ids, flagKeysActive(), reapplyFilter);
+            if (wantMeta) PMVX.fetchFullMeta(ids, reapplyFilter);
         }
 
         const rows = queueRows();
@@ -982,28 +899,18 @@ PMVX.scheduler = fn => {
     // --- Up next override ---
     // Up next box shows the first visible row after the active one; Vue's playback pointer is untouched.
 
-    let upNextOverrideActive = false;
-
     function overrideUpNext(tokens) {
         const upBtn = findUpNextButton();
         const upWrap = upNextWrapper(upBtn);
         if (!upBtn || !upWrap) return;
 
-        const hasFilter = filterLive() && (
-                          tokens.textExclude.length > 0 ||
-                          tokens.textInclude.length > 0 ||
-                          tokens.playlistFilters.length > 0 ||
-                          BTN.playlistMode !== 'all' ||
-                          BTN.savedSearch !== null ||
-                          BTN.ratingMin > 0 || BTN.ratingMax < 100 ||
-                          BTN.durationMin > 0 || Number.isFinite(BTN.durationMax));
+        const hasFilter = hasAnyActiveFilter();
 
         // Override also for a sort alone: Vue's up next follows its own unsorted order.
         if (!hasFilter && !sortedRowIds) {
             upWrap.style.removeProperty('display');
             const overlay = upWrap.querySelector('#pmvnf-upnext-overlay');
             if (overlay) overlay.remove();
-            upNextOverrideActive = false;
             return;
         }
 
@@ -1014,7 +921,6 @@ PMVX.scheduler = fn => {
                 const overlay = upWrap.querySelector('#pmvnf-upnext-overlay');
                 if (overlay) overlay.remove();
                 upWrap.style.removeProperty('display');
-                upNextOverrideActive = false;
                 return;
             }
         }
@@ -1033,7 +939,6 @@ PMVX.scheduler = fn => {
 
         if (!nextVisible) {
             upWrap.style.display = 'none';
-            upNextOverrideActive = false;
             return;
         }
 
@@ -1066,8 +971,6 @@ PMVX.scheduler = fn => {
         titleEl.textContent = nextTitle;
         titleEl.style.cssText = 'font-size:13px;color:rgba(255,255,255,0.85);line-clamp:2;overflow:hidden;';
         overlay.appendChild(titleEl);
-
-        upNextOverrideActive = true;
     }
 
     // --- Vue input patch ---
@@ -1629,7 +1532,12 @@ PMVX.scheduler = fn => {
             if (card.style.minHeight !== want) card.style.minHeight = want;
         };
         placePanel();
-        try { const ro = new ResizeObserver(placePanel); ro.observe(header); ro.observe(card); } catch {}
+        // A rebuild (Vue replaced the input) drops the previous panel's observer and listener.
+        NF.panelCleanup?.();
+        const onReady = () => { try { updatePlBtn(); } catch {} };
+        let ro = null;
+        try { ro = new ResizeObserver(placePanel); ro.observe(header); ro.observe(card); } catch {}
+        NF.panelCleanup = () => { ro?.disconnect(); window.removeEventListener('pmv:cache-ready', onReady); };
         const setOpen = (v) => {
             UI.open = v;
             panel.dataset.open = v ? '1' : '0';
@@ -1690,8 +1598,8 @@ PMVX.scheduler = fn => {
             const inp = e.target;
             const immediate = inp.dataset.pmvnfApply === '1';
             if (e.key === 'Enter') {
-                const term = inp.value.trim().replace(/^#/, '').toLowerCase();
-                if (!term) { applyAll(); return true; }
+                const term = chipTerm(inp.value);
+                if (!term || term === '=') { if (!inp.value.trim()) applyAll(); inp.value = ''; return true; }
                 const isDef = kind.startsWith('d');
                 const list = UI[kind], other = UI[isDef ? (kind === 'dpos' ? 'dneg' : 'dpos') : (kind === 'pos' ? 'neg' : 'pos')];
                 if (!list.includes(term)) list.push(term);
@@ -1890,7 +1798,7 @@ PMVX.scheduler = fn => {
         injectQueueFooter();
         setOpen(UI.open);
         injectSortSelect();
-        window.addEventListener('pmv:cache-ready', () => { try { updatePlBtn(); } catch {} });
+        window.addEventListener('pmv:cache-ready', onReady);
         attachOwnInputKeyIntercept();
     }
 
@@ -1971,6 +1879,7 @@ PMVX.scheduler = fn => {
         if (!NF.input?.isConnected) { clearInterval(NF.pollTimer); NF.pollTimer = null; return; }
         // Self-heal: reattach the observer if Vue replaced the queue container.
         watchVideoList();
+        watchActiveRow();
 
         const v = NF.input.value;
         if (v !== NF.lastNativeValue) {
@@ -2007,6 +1916,7 @@ PMVX.scheduler = fn => {
     // --- Auto-skip ---
 
     let activeRowObserver = null;
+    let activeRowContainer = null;
     let skipChainCount = 0;
     const SKIP_CHAIN_MAX = 30;
     const SKIP_CHAIN_WINDOW_MS = 5000;
@@ -2014,7 +1924,7 @@ PMVX.scheduler = fn => {
 
     function rowShouldBeHidden(row) {
         if (!hasAnyActiveFilter()) return false;
-        const tokens = parseTokens(NF.lastOwnValue);
+        const tokens = parseTokens(getEffectiveFilterValue(NF.lastOwnValue));
         return !rowPassesFilter(row, tokens);
     }
 
@@ -2085,10 +1995,11 @@ PMVX.scheduler = fn => {
     }
 
     function watchActiveRow() {
-        if (activeRowObserver) return;
-
         const container = queueRows()[0]?.parentElement;
-        if (!container) return;
+        // Reattach when Vue or a playlist navigation replaced the queue container.
+        if (!container || (activeRowObserver && container === activeRowContainer)) return;
+        activeRowObserver?.disconnect();
+        activeRowContainer = container;
 
         let lastActiveRow = container.querySelector('.border-orange-500');
 
@@ -2099,7 +2010,7 @@ PMVX.scheduler = fn => {
 
             if (!hasAnyActiveFilter()) return;
             if (!rowShouldBeHidden(active)) {
-                const tokens = parseTokens(NF.lastOwnValue);
+                const tokens = parseTokens(getEffectiveFilterValue(NF.lastOwnValue));
                 requestAnimationFrame(() => overrideUpNext(tokens));
                 return;
             }
@@ -2128,7 +2039,7 @@ PMVX.scheduler = fn => {
             const newTitle = getUpNextTitle(upNextBtn);
             if (newTitle === lastUpNextTitle) return;
             lastUpNextTitle = newTitle;
-            const tokens = parseTokens(NF.lastOwnValue);
+            const tokens = parseTokens(getEffectiveFilterValue(NF.lastOwnValue));
             requestAnimationFrame(() => overrideUpNext(tokens));
         };
         upNextObserver = new MutationObserver(muts => {
@@ -2308,7 +2219,9 @@ PMVX.scheduler = fn => {
     }
 
     // SPA navigation watcher; at document-start it waits for the body.
+    let domObserverStarted = false;
     function startObserver() {
+        if (domObserverStarted) return; // safeBoot runs again on every playlist navigation
         if (!document.body) {
             document.addEventListener('DOMContentLoaded', startObserver, { once: true });
             return;
@@ -2323,6 +2236,7 @@ PMVX.scheduler = fn => {
             if (NF.ownInput?.isConnected && !document.getElementById('pmvnf-qfoot')) { try { injectQueueFooter(); } catch {} }
         });
         domObserver.observe(document.body, { childList: true, subtree: true });
+        domObserverStarted = true;
     }
 
     function boot() {
@@ -2415,6 +2329,9 @@ PMVX.scheduler = fn => {
             terms: { neg: [], pos: [] },
             overlap: [],        // own playlist ids for overlap
             mineRange: { min: null, max: null }, // fractions; typed !mine overrides
+            countRange: { min: null, max: null }, // videos in the playlist
+            newRange: { min: null, max: null },   // videos not in my playlists
+            sort: 'site',       // 'site' | 'score'
             open: false,
             toggle: null,
             mode: 'hide',       // 'hide' | 'sink'
@@ -2451,6 +2368,9 @@ PMVX.scheduler = fn => {
             if (s && typeof s.open === 'boolean') PB.open = s.open;
             if (s && typeof s.enabled === 'boolean') PB.enabled = s.enabled;
             if (s && typeof s.autoScan === 'boolean') PB.autoScan = s.autoScan;
+            const count = v => (v == null || v === '' || !Number.isFinite(+v)) ? null : Math.max(0, Math.round(+v)); // not parseBound: no fractions
+            ['countRange', 'newRange'].forEach(k => { if (s?.[k]) PB[k] = { min: count(s[k].min), max: count(s[k].max) }; });
+            if (s?.sort === 'score') PB.sort = 'score';
             } catch {}
             PB.desc = matchDescEnabled();
             try {
@@ -2472,7 +2392,7 @@ PMVX.scheduler = fn => {
         }
         function saveSettings() {
             setMatchDesc(PB.desc);
-            try { localStorage.setItem(KEY_SETTINGS, JSON.stringify({ terms: PB.terms, mode: PB.mode, overlap: PB.overlap, mineRange: PB.mineRange, open: PB.open, enabled: PB.enabled, autoScan: PB.autoScan })); } catch {}
+            try { localStorage.setItem(KEY_SETTINGS, JSON.stringify({ terms: PB.terms, mode: PB.mode, overlap: PB.overlap, mineRange: PB.mineRange, countRange: PB.countRange, newRange: PB.newRange, sort: PB.sort, open: PB.open, enabled: PB.enabled, autoScan: PB.autoScan })); } catch {}
         }
         function loadCache() {
             try {
@@ -2544,7 +2464,12 @@ PMVX.scheduler = fn => {
         // Off = no filter: all cards shown, no tag fetches; overlap badges stay.
         const hasTagFilter = () => PB.enabled && (PB.tokens.neg.length > 0 || PB.tokens.pos.length > 0);
         const activeMineRange = () => PB.tokens.mine || ((PB.mineRange.min != null || PB.mineRange.max != null) ? PB.mineRange : null);
-        const hasFilter = () => PB.enabled && (hasTagFilter() || !!activeMineRange());
+        const hasRange = r => r.min != null || r.max != null;
+        const outside = (v, r) => v != null && ((r.min != null && v < r.min) || (r.max != null && v > r.max));
+        const rangeText = r => r.min != null && r.max != null ? `${r.min}\u2013${r.max}` : r.min != null ? `${r.min}+` : `\u2264${r.max}`;
+        // Videos not in my playlists (the ticked ones, else all of them); null when unknown.
+        const newOf = id => { if (!hasRange(PB.newRange)) return null; const o = overlapOf(id, true); return o ? o.total - o.n : null; };
+        const hasFilter = () => PB.enabled && (hasTagFilter() || !!activeMineRange() || hasRange(PB.countRange) || hasRange(PB.newRange));
 
         // --- Fetch interceptor ---
         // Records video counts from list pages; wrapped once, chains with other fetch wrappers.
@@ -2843,7 +2768,7 @@ PMVX.scheduler = fn => {
             return r;
         }
         // Every filter a playlist fails on its own (evaluate() stops at the first): 'neg:<term>', 'pos:<term>', 'mine'.
-        function failKeys(id) {
+        function failKeys(id, count) {
             const entry = PB.tags.get(id);
             const desc = descOf(id);
             const out = [];
@@ -2852,6 +2777,8 @@ PMVX.scheduler = fn => {
                 const o = overlapOf(id);
                 if (o && ((mineRange.min != null && o.frac < mineRange.min) || (mineRange.max != null && o.frac > mineRange.max))) out.push('mine');
             }
+            if (outside(count, PB.countRange)) out.push('count');
+            if (outside(newOf(id), PB.newRange)) out.push('new');
             for (const { term, max } of PB.tokens.neg) {
                 if (desc && PMVX.termMatch(desc, term)) { out.push('neg:' + term); continue; }
                 if (!entry) continue;
@@ -2900,6 +2827,9 @@ PMVX.scheduler = fn => {
                     }
                 }
             }
+            if (outside(count, PB.countRange)) return { state: 'fail', hits: [`${count} videos, outside ${rangeText(PB.countRange)}`] };
+            const nw = newOf(id);
+            if (outside(nw, PB.newRange)) return { state: 'fail', hits: [`${nw} videos not in my playlists, outside ${rangeText(PB.newRange)}`] };
             for (const { term, max } of PB.tokens.neg) {
                 // A description hit covers the whole playlist: no threshold.
                 if (desc && PMVX.termMatch(desc, term)) { hits.push('description: ' + term); continue; }
@@ -3013,6 +2943,9 @@ PMVX.scheduler = fn => {
                     if (card.getAttribute('data-pmvpb-score') !== String(sc.score)) card.setAttribute('data-pmvpb-score', String(sc.score));
                     if (card.getAttribute('data-pmvpb-grade') !== sc.grade) card.setAttribute('data-pmvpb-grade', sc.grade);
                 } else { card.removeAttribute('data-pmvpb-score'); card.removeAttribute('data-pmvpb-grade'); }
+                // Highest score first, unscored after; CSS order only, the site's list stays as it is.
+                const ord = PB.sort !== 'score' ? '' : String(sc ? 100 - sc.score : 101);
+                if (card.style.order !== ord) card.style.order = ord;
                 const ov = overlapOf(id);
                 let ovTitle = '';
                 if (ov) {
@@ -3042,7 +2975,7 @@ PMVX.scheduler = fn => {
                     setTitle('');
                     return;
                 }
-                const keys = failKeys(id);
+                const keys = failKeys(id, count);
                 evaluated++;
                 keys.forEach(k => removedBy.set(k, (removedBy.get(k) || 0) + 1));
                 if (keys.length === 1) removedOnly.set(keys[0], (removedOnly.get(keys[0]) || 0) + 1);
@@ -3090,11 +3023,13 @@ PMVX.scheduler = fn => {
             } else if (names.length) {
                 pill('pl', names.length === 1 ? names[0] : `${names.length} playlists`);
             }
+            if (hasRange(PB.countRange)) pill('pl', rangeText(PB.countRange) + ' videos');
+            if (hasRange(PB.newRange)) pill('pl', rangeText(PB.newRange) + ' new');
             PB.lastTotal = total; PB.lastHidden = hidden;
             // Result next to "N playlists total" via data-* + ::after, which survives Vue re-renders.
             const rc = document.querySelector('.playlists-dashboard .results-count');
             if (rc) {
-                const any = PB.terms.neg.length || PB.terms.pos.length || r.min != null || r.max != null;
+                const any = PB.terms.neg.length || PB.terms.pos.length || r.min != null || r.max != null || hasRange(PB.countRange) || hasRange(PB.newRange);
                 const note = !PB.enabled ? (any ? 'filter off' : '')
                     : (hasFilter() && total ? `${hidden} of ${total} ${PB.mode === 'hide' ? 'hidden' : 'moved down'}` : '');
                 if (note) { if (rc.getAttribute('data-pmvpb-note') !== note) rc.setAttribute('data-pmvpb-note', note); }
@@ -3128,7 +3063,7 @@ PMVX.scheduler = fn => {
             st.id = STYLE_ID;
             st.textContent = `
                 .playlists-grid > a[data-pmvpb-hide="1"] { display: none !important; }
-                .playlists-grid > a[data-pmvpb-sink="1"] { order: 9999; opacity: 0.35; filter: grayscale(0.6); }
+                .playlists-grid > a[data-pmvpb-sink="1"] { order: 9999 !important; opacity: 0.35; filter: grayscale(0.6); }
                 .playlists-grid > a[data-pmvpb-pending="1"] { outline: 1px dashed rgba(255,255,255,0.10); outline-offset: -1px; }
                 .playlists-grid > a[data-pmvpb-cached="1"], .playlists-grid > a[data-pmvpb-overlap] { position: relative; }
                 .playlists-grid > a { position: relative; }
@@ -3278,7 +3213,6 @@ PMVX.scheduler = fn => {
         const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
         const chip = (text, title, onClick) => { const b = el('button', 'pmvpb-chip', text); b.type = 'button'; if (title) b.title = title; b.onclick = onClick; return b; };
         let renderMineChips = () => {};
-        let renderRange = () => {};
 
         function buildBar() {
             const header = document.querySelector('.playlists-dashboard .dashboard-header');
@@ -3450,11 +3384,13 @@ PMVX.scheduler = fn => {
             const descChip = chip('Description', '', () => { PB.desc = !PB.desc; renderModeChips(); saveSettings(); applyFilter(); });
             const scanChip = chip('⟳ Scan page', 'Fetch the tags of the playlists on this page. Playlists over 300 videos are sampled (first, last and a few pages in between, about 300 videos) to keep it quick. Cached data is reused until a playlist\u2019s video count changes by more than 10%; click ✓ on a card to fetch that playlist in full.', scanVisible);
             const autoChip = chip('Auto-scan', '', () => { PB.autoScan = !PB.autoScan; renderModeChips(); saveSettings(); applyFilter(); });
+            const sortChip = chip('Sort by score', 'Highest Score-pill first; needs Headerfilter terms and scanned playlists', () => { PB.sort = PB.sort === 'score' ? 'site' : 'score'; renderModeChips(); saveSettings(); applyFilter(); });
             const renderModeChips = () => {
                 hideChip.classList.toggle('active', PB.mode === 'hide');
                 sinkChip.classList.toggle('active', PB.mode === 'sink');
                 descChip.classList.toggle('active', !!PB.desc);
                 autoChip.classList.toggle('active', !!PB.autoScan);
+                sortChip.classList.toggle('active', PB.sort === 'score');
                 autoChip.title = PB.autoScan
                     ? 'Tags are fetched automatically for every playlist shown (one request each) — click to scan only on request'
                     : 'Tags are fetched only when you press Scan page — click to fetch them automatically';
@@ -3463,7 +3399,7 @@ PMVX.scheduler = fn => {
                     : 'Video tags and performers only — click to also match the playlist description';
             };
             renderModeChips();
-            chips1.append(hideChip, sinkChip, descChip, scanChip, autoChip);
+            chips1.append(hideChip, sinkChip, sortChip, descChip, scanChip, autoChip);
             s1.appendChild(chips1);
             const counter = el('div', 'pmvpb-counter');
             s1.appendChild(counter);
@@ -3502,65 +3438,82 @@ PMVX.scheduler = fn => {
             };
             renderMineChips();
 
-            const s3 = el('section');
-            const h3 = el('h3'); h3.innerHTML = ICONS.range + ' Overlap range';
-            s3.appendChild(h3);
-            s3.appendChild(el('label', 'pmvpb-label', 'Share of videos that are also in the selected playlists'));
-            const pillRow = el('div', 'pmvpb-pillrow');
-            const pill = el('div', 'pmvpb-pill');
-            const pMin = el('span', null, '0%'); const pSep = el('span', 'sep', '-'); const pMax = el('span', null, 'Any');
-            pill.append(pMin, pSep, pMax); pillRow.appendChild(pill);
-            const rangeCnt = el('span', 'pmvpb-rangecnt');
-            rangeCnt.dataset.pmvpbKey = 'mine';
-            pillRow.appendChild(rangeCnt);
-            const slider = el('div', 'pmvpb-slider');
-            const track = el('div', 'pmvpb-track'); const fill = el('div', 'pmvpb-range');
-            const rMin = el('input'); rMin.type = 'range'; rMin.min = '0'; rMin.max = '100'; rMin.step = '1';
-            const rMax = el('input'); rMax.type = 'range'; rMax.min = '0'; rMax.max = '100'; rMax.step = '1';
-            slider.append(track, fill, rMin, rMax);
-            const labels = el('div', 'pmvpb-sliderlabels'); labels.append(el('span', null, '0%'), el('span', null, '100%'));
-            const presets = el('div', 'pmvpb-chips');
-            const PRESETS = [
-                { t: 'Any', min: null, max: null, title: 'No range filter' },
-                { t: '0%', min: null, max: 0, title: 'Only playlists with no overlap at all' },
-                { t: '<10%', min: null, max: 0.1, title: 'At most 10% overlap' },
-                { t: '50%+', min: 0.5, max: null, title: 'At least half overlaps' },
-                { t: '90%+', min: 0.9, max: null, title: 'Almost everything overlaps' },
-            ];
-            const presetBtns = PRESETS.map(p => {
-                const c = chip(p.t, p.title, () => { PB.mineRange = { min: p.min, max: p.max }; saveSettings(); renderRange(); applyFilter(); });
-                presets.appendChild(c); return c;
+            // Range section: dual slider over `steps` (first = no minimum, last = Any), pill and presets.
+            const rangeSection = ({ title, label, key, range, steps, fmt, presets }) => {
+                const sec = el('section');
+                const h = el('h3'); h.innerHTML = ICONS.range + ' ' + title;
+                sec.append(h, el('label', 'pmvpb-label', label));
+                const pillRow = el('div', 'pmvpb-pillrow'), pill = el('div', 'pmvpb-pill');
+                const pMin = el('span'), pMax = el('span');
+                pill.append(pMin, el('span', 'sep', '-'), pMax);
+                const cnt = el('span', 'pmvpb-rangecnt'); cnt.dataset.pmvpbKey = key;
+                pillRow.append(pill, cnt);
+                const last = steps.length - 1;
+                const mk = () => { const r = el('input'); r.type = 'range'; r.min = '0'; r.max = String(last); r.step = '1'; return r; };
+                const rMin = mk(), rMax = mk(), fill = el('div', 'pmvpb-range');
+                const slider = el('div', 'pmvpb-slider'); slider.append(el('div', 'pmvpb-track'), fill, rMin, rMax);
+                const labels = el('div', 'pmvpb-sliderlabels'); labels.append(el('span', null, fmt(steps[0])), el('span', null, fmt(steps[last])));
+                const idx = v => { const i = steps.findIndex(x => x >= v - 1e-9); return i < 0 ? last : i; };
+                const paint = (a, b) => {
+                    pMin.textContent = fmt(steps[a]); pMax.textContent = b >= last ? 'Any' : fmt(steps[b]);
+                    fill.style.left = (100 * a / last) + '%'; fill.style.width = (100 * (b - a) / last) + '%';
+                };
+                const presetRow = el('div', 'pmvpb-chips');
+                const set = r => { PB[range] = r; saveSettings(); render(); applyFilter(); };
+                const btns = presets.map(p => presetRow.appendChild(chip(p.t, p.title, () => set({ min: p.min ?? null, max: p.max ?? null }))));
+                const render = () => {
+                    const r = PB[range];
+                    const a = r.min != null ? idx(r.min) : 0, b = r.max != null ? idx(r.max) : last;
+                    rMin.value = String(a); rMax.value = String(b); paint(a, b);
+                    btns.forEach((c, i) => c.classList.toggle('active', (presets[i].min ?? null) === r.min && (presets[i].max ?? null) === r.max));
+                };
+                const drag = which => () => {
+                    let a = +rMin.value, b = +rMax.value;
+                    if (a > b) { if (which === 'min') rMax.value = String(b = a); else rMin.value = String(a = b); }
+                    paint(a, b);
+                };
+                const release = () => set({ min: +rMin.value > 0 ? steps[+rMin.value] : null, max: +rMax.value < last ? steps[+rMax.value] : null });
+                rMin.addEventListener('input', drag('min')); rMax.addEventListener('input', drag('max'));
+                rMin.addEventListener('change', release); rMax.addEventListener('change', release);
+                render();
+                sec.append(pillRow, slider, labels, presetRow);
+                return sec;
+            };
+            const COUNT_STEPS = [0, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000];
+            const countFmt = v => v >= 5000 ? '5000+' : String(v);
+            const s3 = rangeSection({
+                title: 'Overlap range', label: 'Share of videos that are also in the selected playlists', key: 'mine', range: 'mineRange',
+                steps: Array.from({ length: 101 }, (_, i) => i / 100), fmt: v => Math.round(v * 100) + '%',
+                presets: [
+                    { t: 'Any', title: 'No range filter' },
+                    { t: '0%', max: 0, title: 'Only playlists with no overlap at all' },
+                    { t: '<10%', max: 0.1, title: 'At most 10% overlap' },
+                    { t: '50%+', min: 0.5, title: 'At least half overlaps' },
+                    { t: '90%+', min: 0.9, title: 'Almost everything overlaps' },
+                ],
             });
-            const paint = (a, b) => {
-                pMin.textContent = a + '%'; pMax.textContent = b >= 100 ? 'Any' : b + '%';
-                fill.style.left = a + '%'; fill.style.width = (b - a) + '%';
-            };
-            renderRange = () => {
-                const a = PB.mineRange.min != null ? Math.round(PB.mineRange.min * 100) : 0;
-                const b = PB.mineRange.max != null ? Math.round(PB.mineRange.max * 100) : 100;
-                rMin.value = String(a); rMax.value = String(b);
-                paint(a, b);
-                presetBtns.forEach((c, i) => {
-                    const p = PRESETS[i];
-                    c.classList.toggle('active', (p.min ?? null) === (PB.mineRange.min ?? null) && (p.max ?? null) === (PB.mineRange.max ?? null));
-                });
-            };
-            const onDrag = (which) => () => {
-                let a = parseInt(rMin.value, 10), b = parseInt(rMax.value, 10);
-                if (a > b) { if (which === 'min') { b = a; rMax.value = String(b); } else { a = b; rMin.value = String(a); } }
-                paint(a, b);
-            };
-            const onRelease = () => {
-                const a = parseInt(rMin.value, 10), b = parseInt(rMax.value, 10);
-                PB.mineRange = { min: a > 0 ? a / 100 : null, max: b < 100 ? b / 100 : null };
-                saveSettings(); renderRange(); applyFilter();
-            };
-            rMin.addEventListener('input', onDrag('min')); rMax.addEventListener('input', onDrag('max'));
-            rMin.addEventListener('change', onRelease); rMax.addEventListener('change', onRelease);
-            renderRange();
-            s3.append(pillRow, slider, labels, presets);
+            const s4 = rangeSection({
+                title: 'Videos', label: 'Number of videos in the playlist', key: 'count', range: 'countRange', steps: COUNT_STEPS, fmt: countFmt,
+                presets: [
+                    { t: 'Any', title: 'No limit' },
+                    { t: '\u226450', max: 50, title: 'Small playlists' },
+                    { t: '50\u2013300', min: 50, max: 300, title: 'Medium playlists' },
+                    { t: '300+', min: 300, title: 'Large playlists' },
+                    { t: '1000+', min: 1000, title: 'Very large playlists' },
+                ],
+            });
+            const s5 = rangeSection({
+                title: 'New videos', label: 'Videos not in my playlists (the selected ones, else all of them)', key: 'new', range: 'newRange', steps: COUNT_STEPS, fmt: countFmt,
+                presets: [
+                    { t: 'Any', title: 'No limit' },
+                    { t: '0', max: 0, title: 'Nothing new: every video is already in my playlists' },
+                    { t: '\u226410', max: 10, title: 'Almost nothing new' },
+                    { t: '50+', min: 50, title: 'At least 50 new videos' },
+                    { t: '200+', min: 200, title: 'At least 200 new videos' },
+                ],
+            });
 
-            grid.append(s1, s2, s3);
+            grid.append(s1, s2, s3, s4, s5);
             header.insertAdjacentElement('afterend', bar);
             PB.bar = bar; PB.input = inp; PB.counter = counter;
             placeCaret();
@@ -3908,9 +3861,12 @@ PMVX.scheduler = fn => {
         function start() {
             if (PB.active) return;
             PB.active = true;
+            PB.failed.clear(); // a new visit retries what failed last time (also Mini-checker failures)
             injectStyles();
             // Self-heal: re-insert the bar and re-apply when Vue replaces the header or grid.
-            PB.observer = new MutationObserver(() => {
+            PB.observer = new MutationObserver(muts => {
+                // Our own bar and button rewrite their text on every run; reacting to that would loop.
+                if (muts.every(m => m.target.closest?.('#' + BAR_ID + ', #' + BTN_ID))) return;
                 const btn = document.getElementById(BTN_ID);
                 const row = document.querySelector('.playlists-dashboard .dashboard-header .filter-pills');
                 if (!document.getElementById(BAR_ID) || !btn?.isConnected || (row && btn.parentElement !== row)) buildBar();
@@ -3923,10 +3879,12 @@ PMVX.scheduler = fn => {
             buildBar();
             applyFilter();
             window.addEventListener('pmv:cache-ready', scheduleApply);
-            window.addEventListener('pmv:cache-ready', () => renderMineChips());
+            window.addEventListener('pmv:cache-ready', renderMineChipsOnReady);
         }
+        function renderMineChipsOnReady() { renderMineChips(); }
         function stop() {
             window.removeEventListener('pmv:cache-ready', scheduleApply);
+            window.removeEventListener('pmv:cache-ready', renderMineChipsOnReady);
             if (!PB.active) return;
             PB.active = false;
             ['mousedown', 'mouseup', 'click'].forEach(t => document.removeEventListener(t, onCardClick, true));
@@ -3936,6 +3894,8 @@ PMVX.scheduler = fn => {
             document.getElementById(BTN_ID)?.remove();
             document.querySelectorAll('[data-pmvpb-note]').forEach(n => n.removeAttribute('data-pmvpb-note'));
             PB.bar = PB.input = PB.counter = PB.toggle = null;
+            // Queued scans would keep hitting the API after we left; running ones finish.
+            PB.queue.splice(0).forEach(job => { PB.pending.delete(job.id); job.resolve(); });
         }
         function onRoute() {
             if (isBrowsePage()) start(); else stop();
@@ -4072,6 +4032,7 @@ whenBody(() => {
         reverse: new Map(),
         cacheLoadedAt: 0,
         refreshPromise: null,
+        refreshEdits: null, // [playlistId, videoId, added] made while a refresh runs
         ready: false,
 
         currentVideoId: null,
@@ -4182,6 +4143,10 @@ whenBody(() => {
         saveCacheTimer = setTimeout(() => { saveCacheTimer = null; saveCache(); }, 250);
     }
     window.addEventListener('pagehide', () => { if (saveCacheTimer) saveCache(); });
+    // Another tab saved playlist changes: take them over (not mid-refresh or with an own save pending).
+    window.addEventListener('storage', e => {
+        if (e.key === CACHE_KEY && !State.refreshPromise && !saveCacheTimer && loadCache()) notifyCacheReady();
+    });
 
     function notifyCacheReady() {
         try { window.dispatchEvent(new CustomEvent('pmv:cache-ready')); } catch {}
@@ -4350,11 +4315,14 @@ whenBody(() => {
         State.refreshPromise = (async () => {
             const ownerId = await getOwnerId();
             if (!ownerId) return;
-            const listJson = await api(`/api/playlists?owner=${ownerId}&limit=100`);
-            const list = Array.isArray(listJson) ? listJson : (listJson.playlists || listJson.data || []);
-
-            State.thumbnailIndex.clear();
-            State.titleIndex.clear();
+            const list = [];
+            for (let page = 1; ; page++) {
+                const listJson = await api(`/api/playlists?owner=${ownerId}&limit=100&page=${page}`);
+                const part = Array.isArray(listJson) ? listJson : (listJson.playlists || listJson.data || []);
+                list.push(...part);
+                if (!listJson?.meta?.hasMore || !part.length) break;
+            }
+            State.refreshEdits = [];
 
             function buildPlaylistEntry(p, detail) {
                 const root = detail?.data || detail;
@@ -4378,6 +4346,7 @@ whenBody(() => {
             }
 
             const nextPlaylists = new Map();
+            let failed = false;
 
             // Largest playlist first, merged as soon as it lands so lookups work while the rest loads.
             const sizeOf = p => p.validVideoCount ?? (Array.isArray(p.videos) ? p.videos.length : 0);
@@ -4398,7 +4367,7 @@ whenBody(() => {
                     State.ready = true;
                     rebuildReverseIndex();
                     if (!wasReady) notifyCacheReady();
-                } catch {}
+                } catch { failed = true; }
             })();
 
             // fetchAll=true is required, else only the first page of each playlist comes back. Two at a time.
@@ -4410,6 +4379,7 @@ whenBody(() => {
 
             results.forEach(r => {
                 if (r.status !== 'fulfilled') {
+                    failed = true;
                     return;
                 }
                 const { p, detail } = r.value;
@@ -4417,16 +4387,21 @@ whenBody(() => {
                 nextPlaylists.set(entry.id, entry);
             });
 
+            // A playlist that failed to load keeps its old entry; no fresh cache, so the next page load retries.
+            list.forEach(p => { if (!nextPlaylists.has(p._id) && State.playlists.has(p._id)) nextPlaylists.set(p._id, State.playlists.get(p._id)); });
+            // Adds/removes made while the fetches ran may be missing from their responses.
+            State.refreshEdits.forEach(([pid, vid, added]) => nextPlaylists.get(pid)?.ids[added ? 'add' : 'delete'](vid));
             State.playlists = nextPlaylists;
             State.ready = true;
             rebuildReverseIndex();
-            saveCache();
+            if (!failed) saveCache();
         })();
 
         try {
             await State.refreshPromise;
         } finally {
             State.refreshPromise = null;
+            State.refreshEdits = null;
         }
     }
 
@@ -4744,7 +4719,7 @@ whenBody(() => {
     }
 
     // --- Watched tracking ---
-    // Local playback history (PMVX.watched / __pmvIsWatched / __pmvMarkWatched), attached from getVideo()'s init.
+    // Local playback history (PMVX.isWatched / PMVX.markWatched), attached from getVideo()'s init.
     let watchedMap = new Map(); // videoId -> ISO timestamp
     (function loadWatched() {
         try {
@@ -4755,6 +4730,9 @@ whenBody(() => {
     })();
     function saveWatched() {
         try {
+            // Merge what other tabs wrote since we loaded; the newest timestamp wins.
+            const stored = JSON.parse(localStorage.getItem(WATCHED_KEY) || '{}') || {};
+            for (const [id, at] of Object.entries(stored)) if (!(watchedMap.get(id) >= at)) watchedMap.set(id, at);
             if (watchedMap.size > WATCHED_MAX) {
                 const sorted = [...watchedMap.entries()].sort((a, b) => a[1].localeCompare(b[1]));
                 for (const [id] of sorted.slice(0, watchedMap.size - WATCHED_MAX)) watchedMap.delete(id);
@@ -4767,7 +4745,6 @@ whenBody(() => {
         watchedMap.set(videoId, new Date().toISOString());
         saveWatched();
     }
-    PMVX.watched = watchedMap;
     PMVX.isWatched = id => watchedMap.has(id);
     PMVX.markWatched = markWatched;
 
@@ -4979,8 +4956,7 @@ whenBody(() => {
             const k = localStorage.key(i);
             // Settings only: caches are rebuilt from the site.
             if (!k || !k.startsWith('pmv') || /cache/i.test(k)) continue;
-            try { out[k] = JSON.parse(localStorage.getItem(k)); }
-            catch { out[k] = localStorage.getItem(k); }
+            out[k] = localStorage.getItem(k); // raw: parsing would strip the quotes off JSON string values
         }
         return out;
     }
@@ -5189,7 +5165,9 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             try { parsed = JSON.parse(ta.value); }
             catch { toast('Invalid JSON'); return; }
             if (!parsed || typeof parsed !== 'object') { toast('Invalid JSON'); return; }
-            const count = applyPmvSettings(parsed);
+            let count;
+            try { count = applyPmvSettings(parsed); }
+            catch (e) { toast(`Import stopped: ${e.message || e}`); return; }
             toast(`${count} setting(s) imported - reloading`);
             setTimeout(() => location.reload(), 1200);
         };
@@ -5492,7 +5470,8 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             render();
         });
         render();
-        window.addEventListener('pmv:cache-ready', () => { if (sec.isConnected) render(); });
+        const onReady = () => { if (sec.isConnected) render(); else window.removeEventListener('pmv:cache-ready', onReady); };
+        window.addEventListener('pmv:cache-ready', onReady);
         list.appendChild(sec);
         if (location.hash === '#pmvx') setTimeout(() => sec.scrollIntoView({ block: 'start', behavior: 'smooth' }), 100);
     }
@@ -5826,7 +5805,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
     }
     function bindingShort(b) {
         if (!b) return '';
-        if (b.action === 'playlist') return getPlaylistDisplayName(State.playlists.get(b.playlistId)?.name) || b.playlistId;
+        if (b.action === 'playlist') return getPlaylistDisplayName(State.playlists.get(b.playlistId)?.name, b.playlistId) || b.playlistId;
         const label = BUILTIN_ACTIONS[b.action?.slice(8)]?.label || '';
         return label.split(/\s[(:]|:\s/)[0];
     }
@@ -6162,7 +6141,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
 
         State.playlists.forEach((p, id) => {
-            const name = getPlaylistDisplayName(p.name) || id;
+            const name = getPlaylistDisplayName(p.name, id) || id;
             if (!q || name.toLowerCase().includes(q)) {
                 results.push({ type: 'playlist', id, label: name, sub: `${p.ids.size} videos`, href: `/playlists/${id}` });
             }
@@ -6218,8 +6197,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             resultsEl.innerHTML = current.length
                 ? current.map((r, i) => `
                     <div data-i="${i}" style="padding:8px 14px;cursor:pointer;display:flex;justify-content:space-between;gap:10px;${i === selectedIdx ? 'background:rgba(99,102,241,0.15);' : ''}">
-                        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${r.type === 'playlist' ? 'rgb(165,180,252)' : 'rgba(255,255,255,0.85)'};">${r.type === 'playlist' ? '▶ ' : ''}${r.label}</span>
-                        <span style="color:rgba(255,255,255,0.3);font-size:10px;white-space:nowrap;flex-shrink:0;">${r.sub || ''}</span>
+                        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${r.type === 'playlist' ? 'rgb(165,180,252)' : 'rgba(255,255,255,0.85)'};">${r.type === 'playlist' ? '▶ ' : ''}${escHtml(r.label)}</span>
+                        <span style="color:rgba(255,255,255,0.3);font-size:10px;white-space:nowrap;flex-shrink:0;">${escHtml(r.sub || '')}</span>
                     </div>`).join('')
                 : `<div style="padding:14px;color:rgba(255,255,255,0.3);font-size:12px;">${input.value.trim() ? 'No results' : 'Type to search videos, or browse playlists below'}</div>`;
         };
@@ -6436,14 +6415,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     function savedQueuesHtml() {
         const list = loadSavedQueues();
         if (!list.length) return '<div class="text-gray-500">None yet. Saved queues stay until you delete them.</div>';
-        return list.map((q, i) => {
+        return list.map(q => {
             const when = q.at ? new Date(q.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '';
             return `<div class="flex items-center gap-2" style="margin-bottom:4px;">
                 <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;" title="${escHtml(q.name)}">${escHtml(q.name)}</span>
                 <span class="text-gray-500" style="white-space:nowrap;">${q.items.length} \u2022 ${escHtml(when)}</span>
-                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-load="${i}" title="Replace Up next with this queue">Load</button>
-                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-append="${i}" title="Add these videos to the end of Up next">Add</button>
-                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-del="${i}" title="Delete (click twice)">\u2715</button>
+                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-load="${q.at}" title="Replace Up next with this queue">Load</button>
+                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-append="${q.at}" title="Add these videos to the end of Up next">Add</button>
+                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-del="${q.at}" title="Delete (click twice)">\u2715</button>
             </div>`;
         }).join('');
     }
@@ -6471,12 +6450,17 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             const generated = generateSmartQueue(queueSettings)
                 .filter(c => !manuallyAddedIds.has(c.id))
                 .map(c => ({ id: c.id, href: knownHrefForId(c.id), meta: resolveQueueMeta(c.id) }));
-            const added = [...manuallyAddedIds].map(id => {
+            // Hand-added videos that were already played stay out; the new queue starts unplayed.
+            const played = new Set(smartQueueItems.slice(0, queueCursor + 1).map(it => it.id));
+            const added = [...manuallyAddedIds].filter(id => !played.has(id)).map(id => {
                 const existing = smartQueueItems.find(it => it.id === id);
                 return { id, href: existing?.href || knownHrefForId(id), meta: resolveQueueMeta(id) };
             });
             if (smartQueueItems.length) snapshotQueue(`Before "Fill from your playlists" \u2022 ${smartQueueItems.length} videos`);
             smartQueueItems = [...added, ...generated];
+            queueCursor = -1;
+            dismissedCurrentId = null;
+            queueHistoryShown = QUEUE_HISTORY_SHOWN;
             smartQueueActive = true;
 
             if (smartQueueItems.length) {
@@ -6507,6 +6491,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             const input = q('#sq-save-name');
             const name = (input.value || '').trim() || `Queue ${new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
             const list = loadSavedQueues().filter(x => x.name !== name);
+            if (list.length >= SAVED_QUEUES_MAX) { toast(`${SAVED_QUEUES_MAX} saved queues: delete one first`, 'red'); return; }
             list.unshift({ name, at: Date.now(), items });
             if (!storeSavedQueues(list)) { toast('Could not save (storage full)', 'red'); return; }
             input.value = '';
@@ -6519,7 +6504,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             e.preventDefault();
             e.stopPropagation();
             const list = loadSavedQueues();
-            const idx = +(b.dataset.sqLoad ?? b.dataset.sqAppend ?? b.dataset.sqDel);
+            // By save time, not position: another tab may have changed the list since it was drawn.
+            const at = b.dataset.sqLoad ?? b.dataset.sqAppend ?? b.dataset.sqDel;
+            const idx = list.findIndex(x => String(x.at) === at);
             const saved = list[idx];
             if (!saved) return;
             if (b.dataset.sqDel !== undefined) {
@@ -6569,10 +6556,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     // --- Up next refill ---
-    function scoreRecommendedCandidate(id, card) {
+    function scoreRecommendedCandidate(id, card, tagScores) {
         const meta = State.videoMeta.get(id);
         if (meta) {
-            const tagScores = computeTagAffinity();
             const tagScore = (meta.tags || []).reduce((sum, t) => sum + (tagScores.get(t) || 0), 0);
             return tagScore + (meta.bayesianRating || 0) / 20;
         }
@@ -6590,6 +6576,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const useFilter = queueSettings.useNfFilter && filterIsMeaningful();
         const candidates = [];
         let rejected = 0;
+        const tagScores = computeTagAffinity(); // loops over all known videos: once per top-up, not per card
         container.querySelectorAll('.w-40').forEach(thumbDiv => {
             const card = thumbDiv.parentElement;
             if (!card) return;
@@ -6599,7 +6586,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             if (existingIds.has(apiId)) return;
             const meta = resolveQueueMeta(apiId, card);
             if (useFilter && !passesFilter(apiId, meta)) { rejected++; return; }
-            candidates.push({ id: apiId, href: cardHref(card), meta, score: scoreRecommendedCandidate(apiId, card) });
+            candidates.push({ id: apiId, href: cardHref(card), meta, score: scoreRecommendedCandidate(apiId, card, tagScores) });
         });
         lastFilteredOut = rejected;
         if (!candidates.length) { renderQueueSidebar(); return; }
@@ -7570,10 +7557,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 row.style.opacity = '';
                 const order = [...rowsEl.querySelectorAll('[data-queue-id]')].map(r => r.dataset.queueId);
                 const byId = new Map(smartQueueItems.map(it => [it.id, it]));
-                smartQueueItems = order.map(id => byId.get(id)).filter(Boolean);
+                const shown = new Set(order);
+                const cursorId = smartQueueItems[queueCursor]?.id;
+                // Collapsed played rows are not in the DOM: keep them in front, else a drag deletes them.
+                smartQueueItems = [...smartQueueItems.filter(it => !shown.has(it.id)), ...order.map(id => byId.get(id)).filter(Boolean)];
                 const currentId = getCurrentVideoId();
                 const moved = smartQueueItems.findIndex(it => it.id === currentId);
-                if (moved !== -1) queueCursor = moved;
+                queueCursor = moved !== -1 ? moved : smartQueueItems.findIndex(it => it.id === cursorId);
                 saveQueueState();
                 draggingId = null;
             });
@@ -7786,8 +7776,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             let s = State.reverse.get(videoId);
             if (!s) { s = new Set(); State.reverse.set(videoId, s); }
             s.add(playlistId);
+            State.refreshEdits?.push([playlistId, videoId, true]);
             saveCacheSoon();
             refreshQueuePlaylistChips(videoId);
+            invalidateCardBadges(videoId);
         }
         // Filters keep this video visible until applied again (PMVX.markActed).
         PMVX.markActed(videoId);
@@ -7812,8 +7804,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
         State.playlists.get(playlistId)?.ids.delete(videoId);
         State.reverse.get(videoId)?.delete(playlistId);
+        State.refreshEdits?.push([playlistId, videoId, false]);
         saveCacheSoon();
         refreshQueuePlaylistChips(videoId);
+        invalidateCardBadges(videoId);
         PMVX.markActed(videoId);
         return true;
     }
@@ -7870,6 +7864,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         removeProgressBar();
 
         document.querySelectorAll('#pmv-toast, #pmv-progress-bar, #pmv-ctx-menu, #pmv-page-playlists, [data-pmv-badge="1"]').forEach(el => el.remove());
+        // In fullscreen the bar is only built on fullscreenchange, so rebuild it here.
+        if (document.fullscreenElement) createProgressBar();
 
         // Reset markers so badges and page playlist buttons are re-placed.
         document.querySelectorAll('[data-pmv-checked]').forEach(el => delete el.dataset.pmvChecked);
@@ -8274,10 +8270,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             include: 'Required in filter — click: exclude',
             exclude: 'Excluded in filter — click: remove from filter',
         };
-        const makeTagSwitch = (el, tag, neutralStyle, render) => {
+        const makeTagSwitch = (el, tag, neutralStyle, render, kind) => {
             el.dataset.pmvTagChip = tag;
             const paint = () => {
-                const state = tagFilterState(tag);
+                const state = tagFilterState(tag, kind);
                 el.style.cssText = TAG_STYLE_BASE + neutralStyle + (TAG_STATE_STYLE[state] || '');
                 el.title = TAG_STATE_TITLE[state];
                 render(state);
@@ -8285,7 +8281,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             paint();
             el.addEventListener('click', e => {
                 e.stopPropagation();
-                cycleTagInFilter(tag);
+                cycleTagInFilter(tag, kind);
                 paint();
             });
         };
@@ -8304,7 +8300,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             const nameSpan = document.createElement('span');
             el.appendChild(nameSpan);
             makeTagSwitch(el, star, 'display:inline-flex;align-items:center;gap:4px;background:rgba(234,179,8,.14);border:1px solid rgba(234,179,8,.45);color:rgb(253,224,71);',
-                state => { nameSpan.textContent = (state === 'exclude' ? '⊘ ' : '') + star; });
+                state => { nameSpan.textContent = (state === 'exclude' ? '⊘ ' : '') + star; }, 'stars');
             tags.appendChild(el);
         });
 
@@ -10425,8 +10421,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             status(filterConfig.active ? `${filterHiddenCount} hidden on this page` : 'Saved — the filter is off');
         };
         clearBtn.onclick = () => {
-            filterConfig = { ...FILTER_DEFAULTS };
-            saveFilterConfig(); applyFilterToCards(); reopen();
+            // Keep what the site had before we changed it, so syncSitePrefs can give it back.
+            filterConfig = { ...FILTER_DEFAULTS, siteInfiniteWas: filterConfig.siteInfiniteWas, sitePageSizeWas: filterConfig.sitePageSizeWas };
+            saveFilterConfig(); syncSitePrefs(); applyFilterToCards(); reopen();
         };
         importBtn.onclick = () => {
             const nf = loadNfFilter();
@@ -10442,7 +10439,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 flags: { ...nf.flags },
             };
             filterConfig = { ...d, active: filterConfig.active };
-            saveFilterConfig(); reopen();
+            saveFilterConfig(); applyFilterToCards(); reopen();
         };
         refreshPending();
         // External changes (a tag clicked in the HUD) redraw the open panel.
@@ -10917,7 +10914,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
         const key = `${location.pathname}${location.search}#${paging.page}`;
         if (skipState.key !== key) skipState = { key, seen: 0, done: skipState.done };
-        if (visible >= below) { skipState.seen = 0; return; }
+        if (visible >= below) { skipState.seen = skipState.done = 0; return; } // the max counts thin pages in a row
 
         // Playlist membership and ratings resolve late: skip only if still thin on a second look.
         if (++skipState.seen < 2) { setTimeout(skipThinPage, 1500); return; }
@@ -11110,12 +11107,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 }
                 btn.dataset.on = now ? '1' : '';
                 styleRejectCardBtn(btn, now);
-                // Force a re-badge and re-tint on the next pass.
-                card.querySelectorAll('[data-playlist-name]').forEach(el => el.remove());
-                delete card.dataset.pmvChecked;
-                delete card.dataset.pmvRecChecked;
-                delete card.dataset.pmvMfChecked;
-                scheduleBadges();
+                invalidateCardBadges(id, card);
             } catch {
                 toast('Reject failed');
             } finally {
@@ -11414,6 +11406,16 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 try { renderQueueSidebar(); } catch {}
             }
         }, d));
+    }
+
+    // Playlist membership changed: drop the markers so the next pass redraws labels and tint.
+    function invalidateCardBadges(videoId, card = null) {
+        const cards = [...document.querySelectorAll('[data-video-id]')].filter(c => c.dataset.videoId === videoId);
+        if (card && !cards.includes(card)) cards.push(card);
+        cards.forEach(c => { c.querySelectorAll('[data-playlist-name]').forEach(el => el.remove()); delete c.dataset.pmvChecked; });
+        document.querySelectorAll('[data-pmv-rec-checked], [data-pmv-mf-checked]').forEach(el => { delete el.dataset.pmvRecChecked; delete el.dataset.pmvMfChecked; });
+        scheduleBadges();
+        try { addMoreFromBadges(); } catch {}
     }
 
     // Re-badge once the cache is ready (kicks may have fired before State.ready).
@@ -11927,26 +11929,21 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
 
     function addNotificationBadges() {
         const onPage = /^\/notifications\/?$/.test(location.pathname);
-        if (!onPage) { document.getElementById('pmv-notif-selpl')?.remove(); return; }
+        if (!onPage) { document.getElementById('pmv-notif-selpl')?.remove(); document.getElementById('pmv-notif-read')?.remove(); return; }
         if (!State.ready) return;
 
         const toFetch = [];
+        const doneCards = new Set();
 
         document.querySelectorAll('a[href*="/video/"]').forEach(link => {
             const card = link.closest('div.group');
             if (!card?.querySelector('input[type="checkbox"]')) return;
             wireNotifMarkAsRead(link);
-            const hex = link.getAttribute('href')
-                ?.match(/\/video\/(?:[^?#\/]*_)?([0-9a-f]{24})(?:[?#\/]|$)/i)?.[1]?.toLowerCase();
-            if (!hex) return;
-
-            const title = link.textContent.trim().replace(/^["\u201c]|["\u201d]$/g, '').trim().toLowerCase();
-            const videoId = State.slugToApiId.get(hex)
-                || (State.reverse.has(hex) ? hex : null)
-                || (title && State.titleIndex.get(title))
-                || null;
-            // hex is the real video _id: fallback for the thumbnail/tags fetch when no index hits.
-            const apiId = videoId || hex;
+            // Title and thumbnail both link to the video: one label row per card, after the first link.
+            if (doneCards.has(card)) { if (link.nextElementSibling?.dataset?.pmvNotifBadge !== undefined) link.nextElementSibling.remove(); return; }
+            doneCards.add(card);
+            const apiId = resolveNotifVideoApiId(link);
+            if (!apiId) return;
             const meta = State.videoMeta.get(apiId);
             if (meta) {
                 renderNotifPreview(card, apiId, meta);
@@ -11956,7 +11953,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             }
 
             const matching = [];
-            if (videoId) State.playlists.forEach(p => { if (p.ids.has(videoId)) matching.push({ id: p.id, name: p.name }); });
+            State.playlists.forEach(p => { if (p.ids.has(apiId)) matching.push({ id: p.id, name: p.name }); });
             const key = matching.map(m => m.name).join('|');
             // data-* survives Vue re-renders; the select button reads it.
             card.dataset.pmvInpl = matching.length ? '1' : '0';
@@ -11965,12 +11962,11 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 ? link.nextElementSibling : null;
             if (existing && existing.dataset.pmvNotifBadge === key) return;
             existing?.remove();
-            if (!matching.length) return;
 
             const row = document.createElement('div');
             row.dataset.pmvNotifBadge = key;
             row.dataset.pmvBadge = '1';
-            row.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;';
+            row.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:6px;';
             matching.forEach(({ id: plId, name }) => {
                 const badge = document.createElement('span');
                 badge.dataset.playlistName = name;
@@ -11980,6 +11976,18 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 badge.textContent = (isRejectList(plId) ? '\u2298 ' : '\u2713 ') + name;
                 row.appendChild(badge);
             });
+            // Same Up next button as on video cards (Kaartknoppen); the global sync keeps its state.
+            const aqBtn = cardBtn('queue', 'Add to Up next', CARD_ICON.upNext);
+            aqBtn.dataset.pmvAddqueue = '1';
+            aqBtn.dataset.qid = apiId;
+            aqBtn.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (queuedPosition(apiId)) { removeFromQueue(apiId); toast('\u2212 Removed from Up next', null, { under: upNextToastAnchor() }); return; }
+                addVideoToQueue(apiId, card, link.getAttribute('href'));
+            });
+            row.appendChild(aqBtn);
+            syncQueueCardBtn(aqBtn);
             link.insertAdjacentElement('afterend', row);
         });
 
@@ -12001,13 +12009,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
 
     // "Select in playlist": clicks the checkbox of each loaded notification whose video is in a playlist (keeps Vue's
     // v-model in sync); again deselects. Next to the All/Unread pills, re-attached each run (Vue drops it); else fixed on body.
-    function isNotifVideoInPlaylist(apiId) {
-        for (const p of State.playlists.values()) {
-            if (p.ids.has(apiId)) return true;
-        }
-        return false;
-    }
-
     // Resolved from State and the live DOM per call, not data-pmv-inpl (can be stale mid-loop).
     function getNotifInPlaylistBoxes() {
         return [...document.querySelectorAll('div.group')]
@@ -12016,7 +12017,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 const link = card.querySelector('a[href*="/video/"]');
                 if (!checkbox || !link) return null;
                 const apiId = resolveNotifVideoApiId(link);
-                return apiId && isNotifVideoInPlaylist(apiId) ? checkbox : null;
+                return apiId && isVideoInPlaylist(apiId) ? checkbox : null;
             })
             .filter(Boolean);
     }
@@ -12062,7 +12063,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             btn.addEventListener('click', () => {
                 const initial = getNotifInPlaylistBoxes();
                 const allChecked = initial.length && initial.every(b => b.checked);
-                clickNotifCheckboxesWhere(isNotifVideoInPlaylist, { target: !allChecked });
+                clickNotifCheckboxesWhere(isVideoInPlaylist, { target: !allChecked });
             });
         }
 
@@ -12079,12 +12080,50 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         btn.disabled = !boxes.length;
         btn.title = allChecked ? 'Deselect notifications whose video is in a playlist' : 'Select notifications whose video is in a playlist';
         btn.textContent = `\u2713 In playlist (${boxes.length})`;
+
+        // Mark the selected unread ones read via the site's own per-card button (its request, its UI update).
+        let readBtn = document.getElementById('pmv-notif-read');
+        if (!readBtn) {
+            readBtn = document.createElement('button');
+            readBtn.id = 'pmv-notif-read';
+            readBtn.type = 'button';
+            readBtn.title = 'Mark the selected notifications as read';
+            readBtn.addEventListener('click', async () => {
+                if (readBtn.dataset.busy) return;
+                readBtn.dataset.busy = '1';
+                // The site's own bulk button (shown with an unread selection) does it in one request.
+                const bulk = [...document.querySelectorAll('button')].find(b => b !== readBtn && !b.disabled && !b.closest('div.group')
+                    && /mark/i.test(b.textContent) && /read/i.test(b.textContent) && !/\ball\b/i.test(b.textContent));
+                if (bulk) bulk.click();
+                else for (const b of selectedNotifReadButtons()) {
+                    if (b.isConnected) b.click();
+                    await new Promise(r => setTimeout(r, 250)); // one at a time: the site rate-limits bursts
+                }
+                delete readBtn.dataset.busy;
+                updateNotifSelectButton();
+            });
+        }
+        if (readBtn.previousElementSibling !== btn) btn.after(readBtn);
+        const unread = selectedNotifReadButtons().length;
+        const readStyle = !unread ? 'display:none;'
+            : 'display:inline-flex;align-items:center;padding:4px 12px;border-radius:9999px;font-size:12px;line-height:1.33;cursor:pointer;white-space:nowrap;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.25);color:rgb(229,231,235);'
+              + (row ? '' : 'position:fixed;right:16px;bottom:56px;z-index:9999;');
+        PMVX.setAttr(readBtn, 'style', readStyle);
+        PMVX.setText(readBtn, `\u2713 Mark read (${unread})`);
+    }
+
+    function selectedNotifReadButtons() {
+        return [...document.querySelectorAll('div.group')]
+            .filter(card => card.querySelector('input[type="checkbox"]')?.checked)
+            .map(card => card.querySelector('button[title="Mark as read"]'))
+            .filter(Boolean);
     }
 
     // Keep the select/deselect label in sync with manual checkbox clicks.
     document.addEventListener('change', e => {
+        // Next frame: on "Select All" Vue ticks the other boxes after this capture-phase listener.
         if (e.target?.matches?.('input[type="checkbox"]') && document.getElementById('pmv-notif-selpl')) {
-            updateNotifSelectButton();
+            requestAnimationFrame(updateNotifSelectButton);
         }
     }, true);
 
@@ -13276,7 +13315,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         if (isRejectList(playlistId)) return rejectCurrentVideo();
         const videoId = getCurrentVideoId();
         if (!videoId) { toast('No video'); return; }
-        const plName = getPlaylistDisplayName(State.playlists.get(playlistId)?.name) || playlistId;
+        const plName = getPlaylistDisplayName(State.playlists.get(playlistId)?.name, playlistId) || playlistId;
         const isMember = getMatches(videoId).some(p => p.id === playlistId);
 
         if (isMember) {
@@ -13452,7 +13491,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     function describeBinding(binding) {
         if (!binding) return null;
         if (binding.action === 'playlist') {
-            const name = getPlaylistDisplayName(State.playlists.get(binding.playlistId)?.name) || binding.playlistId;
+            const name = getPlaylistDisplayName(State.playlists.get(binding.playlistId)?.name, binding.playlistId) || binding.playlistId;
             return isRejectList(binding.playlistId)
                 ? `"${name}" reject (out of every other playlist, next video)`
                 : `"${name}" toggle (press again within 3 s to remove)`;
@@ -13473,7 +13512,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             .map(([key, binding]) => ({ key, desc: describeBinding(binding) }))
             .filter(r => r.desc)
             .sort((a, b) => a.key.localeCompare(b.key))
-            .map(r => `<tr><td style="color:rgb(100,255,0);padding-right:16px;">${r.key.toUpperCase()}</td><td>${r.desc}</td></tr>`)
+            .map(r => `<tr><td style="color:rgb(100,255,0);padding-right:16px;">${escHtml(r.key.toUpperCase())}</td><td>${escHtml(r.desc)}</td></tr>`)
             .join('');
 
         const box = document.createElement('div');
@@ -13986,7 +14025,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
 
     function isFilterPage() {
         const p = location.pathname.replace(/\/$/, '') || '/';
-        return PANEL_PAGES.some(pp => p === pp || p.startsWith(pp + '?'))
+        return PANEL_PAGES.includes(p)
             || PANEL_PREFIX_PAGES.some(pp => p.startsWith(pp));
     }
 
@@ -14074,8 +14113,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     // --- Fetch interceptor ---
 
     const thumbToId = new Map();
-    let lastApiUrl  = null;
-    let lastApiPage = 1;
 
     // PMVX.resJson is shared (first module defines it): one JSON parse per response.
     const pmvResJson = PMVX.resJson || (PMVX.resJson = res => {
@@ -14102,10 +14139,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
             const rawUrl = rawUrl0;
             // _pmvx=: the script's own side lists (star popout), not the page's grid.
             if (/\/api\/videos(\?|$)/.test(rawUrl) && !/[?&]_pmvx=/.test(rawUrl)) {
-                lastApiUrl = rawUrl;
-                const u = new URL(rawUrl, location.origin);
-                const p = parseInt(u.searchParams.get('page') || '1');
-                if (p >= lastApiPage) lastApiPage = p;
                 pmvResJson(res).then(json => {
                     indexVideos(json?.data?.videos || json?.videos || json?.data || []);
                 }).catch(() => {});
@@ -14147,15 +14180,8 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
             const m = clean.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
                       clean.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
                       clean.match(/\/([a-f0-9]{24})\/thumbnail\//);
-            if (m) {
-                const hexId = m[1];
-                const s = huds?.reverse || reverseMap;
-                if (s?.has(hexId)) return hexId;
-                return hexId;
-            }
+            if (m) return m[1];
         }
-        const a = card.querySelector('a[href*="/videos/"]');
-        if (a) { const m = a.href.match(/\/videos\/([a-f0-9]{24})/); if (m) return m[1]; }
         return null;
     }
 
@@ -14164,14 +14190,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         document.querySelectorAll('[data-video-id]').forEach(c => {
             if (!seen.has(c)) { seen.add(c); all.push(c); }
         });
-        if (all.length === 0) {
-            document.querySelectorAll('a[href*="/videos/"]').forEach(a => {
-                const card = a.closest('[class*="card"]') ||
-                             a.closest('[class*="video-item"]') ||
-                             a.parentElement?.parentElement || a.parentElement;
-                if (card && !seen.has(card)) { seen.add(card); all.push(card); }
-            });
-        }
         return all;
     }
 
@@ -14266,8 +14284,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         for (const m of muts) {
             for (const n of m.addedNodes) {
                 if (n.nodeType === 1 && (n.dataset?.videoId ||
-                    n.querySelector?.('[data-video-id]') ||
-                    n.querySelector?.('a[href*="/videos/"]'))) {
+                    n.querySelector?.('[data-video-id]'))) {
                     hasNew = true; break;
                 }
             }
@@ -14390,6 +14407,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
                 chips.appendChild(c);
             });
         };
+        window.removeEventListener('pmv:cache-ready', NF_renderChips); // the previous inject's chips
         NF_renderChips = renderChips;
         renderChips();
         window.addEventListener('pmv:cache-ready', renderChips);
@@ -14533,15 +14551,15 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     }).observe(document.body, { childList: true, subtree: true });
 
     // SPA navigation: reset and re-inject.
-    let lastUrl = location.href;
+    // Path only: a query change (page, sort) must not switch the Content-chip back to Any.
+    let lastPath = location.pathname;
     function onNav() {
-        if (location.href === lastUrl) return;
-        lastUrl = location.href;
+        if (location.pathname === lastPath) return;
+        lastPath = location.pathname;
         injected = false;
         playlistFilterMode = 'any';
         pendingMode = 'any';
         pendingIds = selectedPlaylistIds.slice();
-        lastApiPage  = 1;
         setTimeout(injectButtons, 800);
     }
     PMVX.onRoute(onNav);

@@ -59,6 +59,7 @@ Every video shows whether it is already in one of your playlists, and adding or 
 <summary>More</summary>
 
 - Badges on the home, browse, search and profile grids, *Recommended*, *More from* and notifications.
+- **Notifications**: an Up next button on every video notification; *✓ In playlist* selects the ones you already saved, *✓ Mark read* marks the selected unread ones as read.
 - **Favourites from any card**: the heart on a card adds or removes the video from your site favourites without opening it, and is filled when the video is already a favourite.
 - **Add to several playlists at once**: the playlist menu on a card stays open after each pick; click next to it to close it.
 - **Reject list**: pick one playlist as your reject list. Adding a video there removes it from every other playlist; rejected videos show in red. Cards get a ⊘ in the corner of the thumbnail, and the player a ⊘ in its button row. While a filter is on, a card asks for a second click first.
@@ -202,7 +203,7 @@ Each scanned playlist also gets a **score**: the share of its videos that pass y
 *① Filters button with on/off and a summary. ② Overlap with your own playlists on every card. ③ Score from your filters. Hover a card to follow the playlist straight from it.*
 
 ![Playlist filter panel](docs/screenshots/15-playlists-filter-panel.png)
-*① Exclude a tag above a share of the videos; the count shows how many playlists on the page it removes. ② Scan page / Auto-scan. ③ Result. ④ Your playlist counted for the overlap badge.*
+*① Exclude a tag above a share of the videos; the count shows how many playlists on the page it removes. ② Scan page / Auto-scan. ③ Result. ④ Your playlist counted for the overlap badge. ⑤ Sort by score, best first. ⑥ Filter by playlist size, and by how many videos you don't have yet.*
 
 **On video pages too.** *Playlists with this video* gets a Scan button: it shows how much of each playlist you already have, its score, and which ones fail your filters — handy for finding the next playlist to follow.
 

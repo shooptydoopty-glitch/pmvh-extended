@@ -1,28 +1,18 @@
     // --- Up next override ---
     // Up next box shows the first visible row after the active one; Vue's playback pointer is untouched.
 
-    let upNextOverrideActive = false;
-
     function overrideUpNext(tokens) {
         const upBtn = findUpNextButton();
         const upWrap = upNextWrapper(upBtn);
         if (!upBtn || !upWrap) return;
 
-        const hasFilter = filterLive() && (
-                          tokens.textExclude.length > 0 ||
-                          tokens.textInclude.length > 0 ||
-                          tokens.playlistFilters.length > 0 ||
-                          BTN.playlistMode !== 'all' ||
-                          BTN.savedSearch !== null ||
-                          BTN.ratingMin > 0 || BTN.ratingMax < 100 ||
-                          BTN.durationMin > 0 || Number.isFinite(BTN.durationMax));
+        const hasFilter = hasAnyActiveFilter();
 
         // Override also for a sort alone: Vue's up next follows its own unsorted order.
         if (!hasFilter && !sortedRowIds) {
             upWrap.style.removeProperty('display');
             const overlay = upWrap.querySelector('#pmvnf-upnext-overlay');
             if (overlay) overlay.remove();
-            upNextOverrideActive = false;
             return;
         }
 
@@ -33,7 +23,6 @@
                 const overlay = upWrap.querySelector('#pmvnf-upnext-overlay');
                 if (overlay) overlay.remove();
                 upWrap.style.removeProperty('display');
-                upNextOverrideActive = false;
                 return;
             }
         }
@@ -52,7 +41,6 @@
 
         if (!nextVisible) {
             upWrap.style.display = 'none';
-            upNextOverrideActive = false;
             return;
         }
 
@@ -85,8 +73,6 @@
         titleEl.textContent = nextTitle;
         titleEl.style.cssText = 'font-size:13px;color:rgba(255,255,255,0.85);line-clamp:2;overflow:hidden;';
         overlay.appendChild(titleEl);
-
-        upNextOverrideActive = true;
     }
 
     // --- Vue input patch ---

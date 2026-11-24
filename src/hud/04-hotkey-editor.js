@@ -9,7 +9,7 @@
     }
     function bindingShort(b) {
         if (!b) return '';
-        if (b.action === 'playlist') return getPlaylistDisplayName(State.playlists.get(b.playlistId)?.name) || b.playlistId;
+        if (b.action === 'playlist') return getPlaylistDisplayName(State.playlists.get(b.playlistId)?.name, b.playlistId) || b.playlistId;
         const label = BUILTIN_ACTIONS[b.action?.slice(8)]?.label || '';
         return label.split(/\s[(:]|:\s/)[0];
     }
