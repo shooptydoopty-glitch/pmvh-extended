@@ -37,7 +37,6 @@
         }
 
 
-
     }
 
     // Fetch interceptor is live from document-start; init() waits for "load" (also fires in background tabs).

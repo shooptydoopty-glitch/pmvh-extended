@@ -21,7 +21,7 @@
         if (btn) {
             const inAny = getMatches(videoId).length > 0;
             const rgb = isRejected(videoId) ? REJECT_RGB : '100,255,0';
-            btn.dataset.pmvPlaylistButton = '1';
+            if (btn.dataset.pmvPlaylistButton !== '1') btn.dataset.pmvPlaylistButton = '1';
             btn.style.transition = 'color 120ms ease, border-color 120ms ease';
             if (inAny) {
                 btn.style.color = `rgb(${rgb})`;
@@ -156,8 +156,10 @@
         (document.head || document.documentElement).appendChild(st);
     }
     function styleRejectPageBtn(btn, on) {
-        btn.dataset.on = on ? '1' : '';
-        btn.title = on ? 'Rejected — click to remove from the reject list' : 'Reject (move to the reject list, remove from every other playlist)';
+        const flag = on ? '1' : '';
+        const title = on ? 'Rejected — click to remove from the reject list' : 'Reject (move to the reject list, remove from every other playlist)';
+        if (btn.dataset.on !== flag) btn.dataset.on = flag;
+        if (btn.title !== title) btn.title = title;
     }
     function rejectPageButton(videoId) {
         ensureRejectBtnStyle();

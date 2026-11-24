@@ -86,8 +86,7 @@
             idJobs.forEach(id => PB.idsPending.delete(id));
             loadIdsAll(idJobs);
         }
-        const setText = (n, t) => { if (n && n.textContent !== t) n.textContent = t; };
-        const setAttr = (n, k, v) => { if (v == null) { if (n.hasAttribute(k)) n.removeAttribute(k); } else if (n.getAttribute(k) !== v) n.setAttribute(k, v); };
+        const setText = PMVX.setText, setAttr = PMVX.setAttr;
         function ensureVideoButton(header) {
             let w = document.getElementById(VSCAN_ID);
             if (w && w.parentElement === header) return w;
@@ -298,12 +297,7 @@
         loadCache();
         const bootPb = () => {
             onRoute();
-            window.addEventListener('popstate', onRoute);
-            // Vue router's pushState fires no event; poll.
-            let last = location.pathname;
-            PB.routeTimer = setInterval(() => {
-                if (location.pathname !== last) { last = location.pathname; onRoute(); }
-            }, 500);
+            PMVX.onRoute((path, prev) => { if (path !== prev) onRoute(); });
         };
         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootPb, { once: true });
         else bootPb();

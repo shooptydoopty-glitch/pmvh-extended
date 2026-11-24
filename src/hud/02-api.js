@@ -574,3 +574,191 @@
         }
     }
 
+    // --- Current video and playlist membership ---
+    function getCurrentVideoId() {
+        // Playlist pages: the active queue row (border-orange-500) wins over currentVideoData (lags a step on
+        // advance) and the poster (its hex is a thumbnail asset id).
+        if (location.pathname.startsWith('/playlists/')) {
+            const active = getActiveQueueVideoId();
+            if (active) return active;
+        }
+        if (State.currentVideoData?.id) return State.currentVideoData.id;
+
+        // /video/ pages: the URL hex (slug id or API _id) is the only reliable id before any API response.
+        // Must precede the poster fallback: a poster hex is a thumbnail asset id, not a video _id.
+        const pageId = location.pathname.match(/^\/video\/(?:[^?#]*_)?([0-9a-f]{24})(?:[?#]|$)/i)?.[1];
+        if (pageId) return State.slugToApiId.get(pageId) || pageId;
+
+        const v = getVideo();
+        if (v?.poster) {
+            const m = v.poster.match(/\/([a-f0-9]{24})/);
+            if (m) return m[1];
+        }
+
+        const link = document.querySelector('a[href*="/videos/"][aria-current="page"], a[href*="/videos/"].active');
+        if (link) {
+            const m = link.href.match(/\/videos\/([a-f0-9]{24})/);
+            if (m) return m[1];
+        }
+
+        return getJsonLdVideoId();
+    }
+
+    // Vue often hydrates from SSR without a client fetch, so fetch here (deduped) to fill
+    // State.currentVideoData; adopted only if it is still the video on screen.
+    function ensureCurrentVideoData(videoId) {
+        if (!videoId || State.currentVideoData?.id === videoId) return;
+        if (lookupOnCooldown(videoId)) return;
+        fetchVideoDeduped(videoId).then(v => {
+            if (!v?._id || State.currentVideoData?.id === v._id) return;
+            if (videoId !== v._id) State.slugToApiId.set(videoId, v._id);
+            const cur = getCurrentVideoId();
+            if (cur !== videoId && cur !== v._id) return;
+            adoptCurrentVideo(v);
+        }).catch(() => noteLookupFailure(videoId));
+    }
+
+    function learnVideoId(id, oldId) {
+        if (typeof id !== 'string' || !HEX24_RE.test(id)) return 0;
+        if (typeof oldId === 'string' && HEX24_RE.test(oldId) && oldId !== id) {
+            if (State.slugToApiId.get(oldId) === id) return 0;
+            State.slugToApiId.set(oldId, id);
+            return 1;
+        }
+        if (State.slugToApiId.has(id)) return 0;
+        State.slugToApiId.set(id, id);
+        return 1;
+    }
+
+    function learnVideoIds(root) {
+        let added = 0, guard = 0;
+        const stack = [root];
+        while (stack.length && guard++ < 300000) {
+            const o = stack.pop();
+            if (!o || typeof o !== 'object') continue;
+            if (Array.isArray(o)) {
+                for (const x of o) if (x && typeof x === 'object') stack.push(x);
+                continue;
+            }
+            if (typeof o._id === 'string' && typeof o.title === 'string'
+                && ('duration' in o || 'previewUrl' in o || 'oldId' in o)) {
+                added += learnVideoId(o._id, o.oldId);
+            }
+            for (const k in o) {
+                const v = o[k];
+                if (v && typeof v === 'object') stack.push(v);
+            }
+        }
+        return added;
+    }
+
+    // Nuxt's payload is devalue's flat array: objects hold indices into it.
+    function learnVideoIdsFromNuxtPayload() {
+        const el = document.getElementById('__NUXT_DATA__');
+        if (!el || el.dataset.pmvLearned) return 0;
+        el.dataset.pmvLearned = '1';
+        let arr;
+        try { arr = JSON.parse(el.textContent); } catch { return 0; }
+        if (!Array.isArray(arr)) return 0;
+        const val = ref => (typeof ref === 'number' ? arr[ref] : ref);
+        // Resolves indices, arrays of indices and devalue's Reactive/Ref wrappers.
+        const res = (ref, depth = 0) => {
+            if (typeof ref !== 'number' || ref < 0 || depth > 4) return typeof ref === 'number' ? undefined : ref;
+            const x = arr[ref];
+            if (Array.isArray(x)) {
+                if (typeof x[0] === 'string' && /^(Reactive|ShallowReactive|Ref|ShallowRef)$/.test(x[0])) return res(x[1], depth + 1);
+                return x.map(r => res(r, depth + 1));
+            }
+            return x;
+        };
+        const FIELDS = ['_id', 'title', 'duration', 'tags', 'top5Tags', 'starsTags', 'bayesianRating', 'width', 'height',
+            'uploaderUsername', 'uploader', 'thumbnailUrl', 'previewUrl', 'uploadDate', 'views', 'description',
+            ...CONTENT_FLAGS.map(([k]) => k)];
+        let added = 0;
+        const videos = [];
+        for (const o of arr) {
+            if (!o || typeof o !== 'object' || Array.isArray(o) || !('_id' in o) || !('title' in o)) continue;
+            if (!('duration' in o || 'previewUrl' in o || 'oldId' in o)) continue;
+            added += learnVideoId(val(o._id), val(o.oldId));
+            // SSR lists (homepage first page) never pass the fetch interceptor; read their metadata here.
+            if (!('tags' in o || 'top5Tags' in o)) continue;
+            const v = {};
+            FIELDS.forEach(k => { if (k in o) v[k] = res(o[k]); });
+            if (typeof v._id === 'string' && typeof v.title === 'string') videos.push(v);
+        }
+        if (videos.length) { try { indexVideoDetails(videos); } catch {} }
+        return added;
+    }
+
+    function getMatches(videoId) {
+        if (!videoId) return [];
+        const ids = State.reverse.get(videoId);
+        if (!ids) return [];
+        return [...ids].map(id => State.playlists.get(id)).filter(Boolean);
+    }
+
+    function getMeta() {
+        // During a fullscreen hand-over the page still shows the previous video; use only fetched data.
+        const pageIsBehind = !!staleFullscreenHref;
+
+        const liveTitle = pageIsBehind ? null :
+            document.querySelector('.min-w-0 h1')?.textContent?.trim() ||
+            document.querySelector('h1')?.textContent?.trim();
+
+        // Creator: orange gradient h3, text nodes only (skips the "Creator" badge).
+        let liveCreator = null;
+        const uploaderH3 = pageIsBehind ? null : document.querySelector('h3.bg-gradient-to-r.from-orange-400');
+        if (uploaderH3) {
+            const text = [...uploaderH3.childNodes]
+                .filter(n => n.nodeType === Node.TEXT_NODE)
+                .map(n => n.textContent).join('').trim();
+            if (text) liveCreator = text;
+        }
+        // Fallback: the "More from X (N)" h3.
+        if (!liveCreator && !pageIsBehind) {
+            const h3s = document.querySelectorAll('h3[class]');
+            for (const h of h3s) {
+                const t = h.textContent.trim();
+                if (t.startsWith('More from ')) {
+                    liveCreator = t.replace(/^More from /, '').replace(/\s*\(\d+\)$/, '').trim() || null;
+                    break;
+                }
+            }
+        }
+
+        const domTags = pageIsBehind ? [] : [...document.querySelectorAll('a[href^="/search?tags="]')]
+            .slice(0, 15)
+            .map(a => (a.getAttribute('title')?.replace(/^Search for '|'$/g, '') ||
+                       a.textContent.replace(/^#/, '')).trim())
+            .filter(Boolean);
+
+        // Performers: /search?stars= or /model/ links; /model/ titles read "View <name>'s profile", so use the text.
+        const domStars = pageIsBehind ? [] : [...document.querySelectorAll('a[href^="/search?stars="], a[href^="/model/"]')]
+            .slice(0, 10)
+            .map(a => (a.querySelector('.truncate')?.textContent || a.textContent || '').replace(/^#/, '').trim())
+            .filter(Boolean);
+
+        let liveDescription = null;
+        const descBlock = pageIsBehind ? null : document.querySelector('div.bg-\\[\\#1A1A1A\\] p.whitespace-pre-wrap, div.bg-\\[\\#1A1A1A\\] p.text-gray-300');
+        if (descBlock) liveDescription = descBlock.textContent.trim() || null;
+
+        let ldCreator = null, ldDescription = null;
+        try {
+            const jsonLd = pageIsBehind ? null : document.querySelector('script[type="application/ld+json"]');
+            if (jsonLd) {
+                const data = JSON.parse(jsonLd.textContent);
+                if (data['@type'] === 'VideoObject') {
+                    ldCreator = data.creator?.name || null;
+                    ldDescription = data.description || null;
+                }
+            }
+        } catch {}
+
+        return {
+            title: liveTitle || State.currentVideoData?.title || document.querySelector('meta[property="og:title"]')?.content || 'Unknown',
+            creator: liveCreator || State.currentVideoData?.creator || ldCreator || 'Unknown',
+            tags: domTags.length ? domTags : (State.currentVideoData?.tags || []).slice(0, 15),
+            starsTags: domStars.length ? domStars : (State.currentVideoData?.starsTags || []).slice(0, 10),
+            description: liveDescription || ldDescription || State.currentVideoData?.description || null,
+        };
+    }

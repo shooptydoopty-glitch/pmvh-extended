@@ -34,7 +34,6 @@
         }
     }
 
-
     // --- Cached player repair ---
     // Nuxt's KeepAlive doesn't remount a reactivated page's player, and the media sweep emptied its
     // <video> while detached; reloadSource() restores it (up to two nudges). Production Vue hides
@@ -136,7 +135,6 @@
         updateNativePlaylistButtons();
         if (State.ready) { try { ensureRejectBarButton(getCurrentVideoId()); } catch {} }
     }, 2000);
-
 
     // --- Context menu ---
     // Playlist menu for a video, opened by the "+" button on cards.

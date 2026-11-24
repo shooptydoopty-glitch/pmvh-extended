@@ -107,6 +107,33 @@ PMVX.playlistFilterExempt = () => {
 };
 PMVX.currentPlaylistPageId = () => location.pathname.match(/^\/playlists\/([a-f0-9]{24})/i)?.[1] || null;
 
+// DOM writes only when the value changes: an unchanged write is still a mutation and wakes every observer.
+PMVX.setText = (n, t) => { if (n && n.textContent !== t) n.textContent = t; };
+PMVX.setAttr = (n, k, v) => { if (!n) return; if (v == null) { if (n.hasAttribute(k)) n.removeAttribute(k); } else if (n.getAttribute(k) !== v) n.setAttribute(k, v); };
+
+// --- Navigation ---
+// One hook on the site's client-side routing (Vue router: pushState; Back/Forward: popstate). replaceState
+// (query updates on the same page) is left out on purpose. beforeRoute runs synchronously before pushState,
+// with the old page still mounted; onRoute(path, prevPath) runs after the URL changed.
+const routeBefore = [], routeAfter = [];
+let routeHref = location.href, routePath = location.pathname;
+function routeChanged() {
+    if (location.href === routeHref) return;
+    const prev = routePath;
+    routeHref = location.href; routePath = location.pathname;
+    routeAfter.forEach(fn => { try { fn(location.pathname, prev); } catch {} });
+}
+const sitePushState = history.pushState;
+history.pushState = function (...a) {
+    routeBefore.forEach(fn => { try { fn(); } catch {} });
+    const r = sitePushState.apply(this, a);
+    setTimeout(routeChanged, 0);
+    return r;
+};
+window.addEventListener('popstate', () => setTimeout(routeChanged, 0));
+PMVX.beforeRoute = fn => routeBefore.push(fn);
+PMVX.onRoute = fn => routeAfter.push(fn);
+
 PMVX.apiTaps = [];
 // [API key, label]. Order matters: the flag cache stores them as bits.
 PMVX.contentFlags = [

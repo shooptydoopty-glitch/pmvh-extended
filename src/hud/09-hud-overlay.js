@@ -606,3 +606,262 @@
         }
     });
 
+    // --- Next-video notification ---
+    function getQueueRowVisibleTitle(itemRoot) {
+        const titleEl = itemRoot.querySelector('.flex-1.min-w-0 p, .flex-1.min-w-0 span, .flex-1.min-w-0');
+        return titleEl?.firstChild?.nodeValue?.trim() ||
+               titleEl?.childNodes?.[0]?.textContent?.trim() ||
+               titleEl?.textContent?.trim() || '';
+    }
+
+    function resolveQueueItemVideoId(itemRoot) {
+        // Visible title, not img.alt: Vue recycles nodes on virtual scroll, so alt lags.
+        const visibleTitle = getQueueRowVisibleTitle(itemRoot);
+        if (visibleTitle) return State.titleIndex.get(visibleTitle.toLowerCase()) || null;
+        return null;
+    }
+
+    // N key: read the visible Up next preview synchronously, before Vue re-renders it.
+    // The filter overlay (#pmvnf-upnext-overlay) wins: the native button still shows the filtered-out video.
+    function getUpNextVideoInfo() {
+        if (!isPlaylistPage()) return null;
+        const upNextRoot = State.queueUpNextEl || findQueueParts()?.upNext;
+        if (!upNextRoot) return null;
+
+        const overlay = upNextRoot.querySelector('#pmvnf-upnext-overlay');
+        if (overlay) {
+            const title = overlay.querySelector('span')?.textContent?.trim() || '';
+            if (!title) return null;
+            const thumbnail = overlay.querySelector('img')?.src || '';
+            const videoId = getVideoIdFromThumbUrl(thumbnail) || State.titleIndex.get(title.toLowerCase()) || null;
+            return { key: videoId || thumbnail || title, title, creator: State.videoMeta.get(videoId)?.uploaderDisplay || '', thumbnail };
+        }
+
+        // .flex-1.min-w-0 holds two <p>'s: title, then creator.
+        const textWrap = upNextRoot.querySelector('.flex-1.min-w-0');
+        const [titleEl, creatorEl] = textWrap ? textWrap.querySelectorAll('p') : [];
+        const title = titleEl?.textContent?.trim() || '';
+        if (!title) return null;
+        const thumbnail = upNextRoot.querySelector('img')?.src || '';
+        const videoId = getVideoIdFromThumbUrl(thumbnail) || State.titleIndex.get(title.toLowerCase()) || null;
+        return { key: videoId || thumbnail || title, title, creator: creatorEl?.textContent?.trim() || '', thumbnail };
+    }
+
+    function maybeShowNextVideoFromUpNext() {
+        const info = getUpNextVideoInfo();
+        if (!info) return;
+        showNextVideoNotificationWithInfo(info, 'n-key-upnext');
+    }
+
+    // Single gate for the Mini-HUD; `key` dedupes (video id, else thumbnail URL or title).
+    function showNextVideoNotificationWithInfo(info, source) {
+        if (!document.fullscreenElement) return;
+        if (!info?.title || !info.key || info.key === State.lastNextHudVideoId) return;
+        State.lastNextHudVideoId = info.key;
+        showNextVideoHUD({ title: info.title, creator: info.creator, thumbnail: info.thumbnail });
+    }
+
+    function showNextVideoNotificationFor(videoId, fallbackTitle, source) {
+        if (!videoId) return;
+        const meta = State.videoMeta.get(videoId);
+        showNextVideoNotificationWithInfo({
+            key: videoId,
+            title: meta?.title || fallbackTitle || '',
+            creator: meta?.uploaderDisplay || '',
+            thumbnail: meta?.thumbnailUrl || '',
+        }, source);
+    }
+
+    // Fallback if the console message disappears: the active queue row (border-orange-500).
+    function maybeShowNextVideoNotification() {
+        if (!document.fullscreenElement || !isPlaylistPage()) return;
+        const row = getActiveQueueRow();
+        if (!row) return;
+        const videoId = resolveQueueItemVideoId(row);
+        if (!videoId) return;
+        showNextVideoNotificationFor(videoId, getQueueRowVisibleTitle(row), 'dom-fallback');
+    }
+
+    // --- HUD building blocks ---
+    // API frames if available; else the page strip, unless fullscreen is ahead of the page (previous video's).
+    function timelineFrames() {
+        const data = State.currentVideoData;
+        const id = getCurrentVideoId();
+        if (data?.id && data.id === id && data.timelineThumbnails?.length) {
+            return data.timelineThumbnails
+                .filter(t => t?.url)
+                .map(t => ({ src: t.url, time: Number.isFinite(t.captureTime) ? t.captureTime : null }));
+        }
+        if (staleFullscreenHref) return [];
+        return [...document.querySelectorAll('.timeline-thumbnail-item')].map(item => {
+            const img = item.querySelector('img');
+            const label = item.querySelector('div:last-child')?.textContent?.trim() || img?.alt?.replace('Thumbnail at ', '') || '';
+            return { src: pageImgSrc(img), time: parseTimestamp(label) };
+        }).filter(x => x.src);
+    }
+
+    function buildThumbs() {
+        const data = timelineFrames().slice(0, 10).map(f => ({ ...f, label: formatThumbTime(f.time) }));
+        if (!data.length) return null;
+
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;gap:8px;margin-top:12px;overflow-x:auto;overflow-y:hidden;padding-bottom:4px;max-width:100%;';
+
+        data.forEach(item => {
+            const box = document.createElement('button');
+            box.type = 'button';
+            box.style.cssText = 'flex:0 0 150px;border:0;padding:0;margin:0;background:transparent;cursor:pointer;position:relative;';
+
+            const thumb = document.createElement('img');
+            thumb.src = item.src;
+            thumb.draggable = false;
+            thumb.loading = 'eager';
+            thumb.style.cssText = 'width:150px;aspect-ratio:16/9;object-fit:cover;border-radius:8px;display:block;background:#111;';
+
+            box.onclick = e => {
+                e.stopPropagation();
+                const v = getVideo();
+                if (v && item.time !== null) v.currentTime = item.time;
+            };
+
+            box.appendChild(thumb);
+            if (item.label) {
+                const lbl = document.createElement('div');
+                lbl.textContent = item.label;
+                lbl.style.cssText = 'position:absolute;right:4px;bottom:4px;font-size:10px;color:white;background:rgba(0,0,0,.65);padding:2px 5px;border-radius:4px;pointer-events:none;';
+                box.appendChild(lbl);
+            }
+            wrap.appendChild(box);
+        });
+
+        return wrap;
+    }
+
+    function closeHud() {
+        clearTimeout(State.hudTimeout);
+        clearTimeout(State.hudHardTimeout);
+        State.hudHardTimeout = null;
+        State.hud?.remove();
+        State.hud = null;
+    }
+
+    function startHudTimer(ms) {
+        clearTimeout(State.hudTimeout);
+        State.hudTimeout = setTimeout(() => {
+            if (!State.hud) return;
+            State.hud.style.opacity = '0';
+            State.hud.style.transition = 'opacity 0.25s';
+            setTimeout(closeHud, 250);
+        }, ms);
+    }
+
+    function buildNativeActionBarClone() {
+        // Skipped while fullscreen is ahead of the page: those buttons belong to the previous video.
+        if (staleFullscreenHref) return null;
+        const nativeActionBar = findNativeActionBar();
+        if (!nativeActionBar) return null;
+
+        const cloneBar = document.createElement('div');
+        cloneBar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;';
+        [...nativeActionBar.children].forEach(child => {
+            if (child.id === 'pmv-page-playlists' || child.dataset?.pmvPlBtn) return;
+            if (child.tagName !== 'BUTTON' && child.tagName !== 'A') return;
+
+            const clone = child.cloneNode(true);
+            // Strip Vue attributes to avoid duplicate handlers.
+            clone.removeAttribute('data-v-18f75d28');
+            clone.addEventListener('click', e => {
+                e.stopPropagation();
+                // Our own buttons (⊘, Tags) open their menus at the clone, not the hidden original.
+                forwardedAnchor = { rect: clone.getBoundingClientRect(), at: performance.now() };
+                child.click();
+                startHudTimer(4000);
+                // Snapshot clone: re-sync classes once Vue patched the original (again later for slow API toggles).
+                const sync = () => {
+                    if (!clone.isConnected) return;
+                    clone.className = child.className;
+                    if (child.title) clone.title = child.title;
+                    if (child.dataset.on !== undefined) clone.dataset.on = child.dataset.on;
+                    const label = child.getAttribute('aria-label');
+                    if (label) clone.setAttribute('aria-label', label);
+                };
+                setTimeout(sync, 80);
+                setTimeout(sync, 1500);
+            });
+            clone.style.cssText = (clone.style.cssText || '') + ';pointer-events:auto;';
+            cloneBar.appendChild(clone);
+        });
+
+        return cloneBar.children.length ? cloneBar : null;
+    }
+
+    function buildApiActionBar(videoId) {
+        if (!videoId) return null;
+        const cvd = State.currentVideoData?.id === videoId ? State.currentVideoData : null;
+        const st = { liked: !!cvd?.isLiked, disliked: !!cvd?.isDisliked, favorited: !!cvd?.isFavorited };
+        const writeBack = () => {
+            const d = State.currentVideoData;
+            if (d?.id !== videoId) return;
+            d.isLiked = st.liked; d.isDisliked = st.disliked; d.isFavorited = st.favorited;
+        };
+
+        const bar = document.createElement('div');
+        bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;';
+        const buttons = {};
+        const paint = () => API_BTNS.forEach(b => {
+            const el = buttons[b.key];
+            el.className = `${API_BTN_BASE} ${st[b.key] ? b.cls : API_BTN_OFF}`;
+            el.title = b.title(st[b.key]);
+        });
+
+        API_BTNS.forEach(b => {
+            const el = document.createElement('button');
+            el.type = 'button';
+            el.innerHTML = b.icon;
+            el.style.cssText = 'pointer-events:auto;';
+            buttons[b.key] = el;
+            el.addEventListener('click', async e => {
+                e.stopPropagation();
+                startHudTimer(4000);
+                if (el.disabled) return;
+                const before = { ...st };
+                const turnOn = !st[b.key];
+                st[b.key] = turnOn;
+                if (turnOn && b.key === 'liked') st.disliked = false;
+                if (turnOn && b.key === 'disliked') st.liked = false;
+                paint();
+                el.disabled = true;
+                try {
+                    const res = await fetch(`/api/videos/${videoId}/${b.endpoint}`, {
+                        method: 'PUT',
+                        headers: { 'content-type': 'application/json', accept: 'application/json' },
+                        credentials: 'include',
+                        body: JSON.stringify({ action: turnOn ? b.on : b.off }),
+                    });
+                    if (!res.ok) throw res.status;
+                    const d = (await res.json().catch(() => null))?.data;
+                    if (d && b.key !== 'favorited') {
+                        if (typeof d.userHasLiked === 'boolean') st.liked = d.userHasLiked;
+                        if (typeof d.userHasDisliked === 'boolean') st.disliked = d.userHasDisliked;
+                    }
+                    writeBack();
+                } catch (err) {
+                    Object.assign(st, before);
+                    toast(`${b.endpoint[0].toUpperCase() + b.endpoint.slice(1)} failed${typeof err === 'number' ? ` (${err})` : ''}`, 'red');
+                } finally {
+                    el.disabled = false;
+                    paint();
+                }
+            });
+            bar.appendChild(el);
+        });
+        paint();
+        // ⊘ and Tags for the video actually playing, first as under the video.
+        try {
+            const extra = [];
+            if (rejectPlaylistId && State.playlists.has(rejectPlaylistId)) extra.push(rejectPageButton(videoId));
+            extra.push(tagBarButton(videoId), tagBarButton(videoId, 'stars'));
+            extra.reverse().forEach(el => { el.style.pointerEvents = 'auto'; bar.insertBefore(el, bar.firstChild); });
+        } catch {}
+        return bar;
+    }

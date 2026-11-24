@@ -756,6 +756,6 @@
     // Vue may re-render the header: re-find the box and catch a missed open/close.
     findContainer();
     syncOpen();
-    setInterval(() => { findContainer(); syncOpen(); }, 1000);
+    setInterval(() => { if (!document.hidden) { findContainer(); syncOpen(); } }, 1000);
     document.addEventListener('click', e => { if (e.target?.closest?.('.search-trigger')) setTimeout(() => { findContainer(); syncOpen(); }, 0); }, true);
 })();

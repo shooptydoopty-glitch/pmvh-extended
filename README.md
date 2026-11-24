@@ -288,7 +288,7 @@ node build.js   # writes pmvh-extended.user.js
 | `src/header.js` | Userscript metadata |
 | `src/core.js` | Shared namespace, startup and performance helpers |
 | `src/filter/` | Playlist-page filter (`01`–`05`), the `/playlists` filter (`06`) and the playlist check on video pages (`07`) |
-| `src/hud/` | Playlist cache and API (`01`–`02`), settings and hotkey editor (`03`–`05`), Up next (`06`–`07`), player, HUD and playlist buttons (`08`–`10`), site-wide filter (`11`), homepage and pagination (`12`), badges (`13`), notifications and menus (`14`–`15`), seekbar preview (`16`), hotkeys (`17`), startup (`18`) |
+| `src/hud/` | Playlist cache and API (`01`–`02`), settings, hotkey editor and palette (`03`–`05`), Up next (`06`–`07`), player, HUD and playlist buttons (`08`–`10`), site-wide filter (`11`), homepage and pagination (`12`), badges and *More about this video* (`13`), notifications and menus (`14`–`15`), seekbar preview (`16`), hotkeys, reject and tag popup (`17`), startup (`18`) |
 | `src/browse.js` | In / not-in-playlist filter in the site's filter menu, stored with saved filters |
 | `src/search.js` | Search panel under the site's search box |
 | `src/tagmenu.js` | Menu for tag, star and music chips |

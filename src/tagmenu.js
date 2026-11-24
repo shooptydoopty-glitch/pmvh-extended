@@ -234,7 +234,9 @@
     // --- Menu ---
     let pop = null, anchor = null, cur = null, el = {};
 
+    let openWatch = null;
     function close() {
+        clearInterval(openWatch); openWatch = null;
         if (!pop) return;
         pop.remove(); pop = null; anchor = null; el = {};
         if (cur) cur.seq++;
@@ -288,6 +290,8 @@
         cur = { kind, item, href: item.href || a.getAttribute('href'), musicMode: item.song ? 'song' : 'artist', src: null, page: 0, total: null, star: null,
                 seen: new Set(), shown: 0, seq: 0, loading: false, more: true, error: false };
         pop = mk('div'); pop.id = 'pmvst'; pop.dataset.kind = kind;
+        // While open: close when its chip is gone, keep the filter state current.
+        openWatch = setInterval(() => { if (anchor && !anchor.isConnected) close(); else if (pop) renderFilter(); }, 500);
         pop.setAttribute('data-pmvx-tag-menu', '1');
 
         const head = mk('div', 'pmvst-head');
@@ -487,6 +491,7 @@
     }
 
     // --- Wiring ---
+    let lastToggle = { el: null, at: 0 };
     window.addEventListener('click', e => {
         if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
         if (e.target?.closest?.('#pmvst')) return;
@@ -495,6 +500,11 @@
         // Also keeps the card's link from navigating.
         e.preventDefault();
         e.stopImmediatePropagation();
+        // After client-side navigation the site re-dispatches a click on the same chip within the same tick:
+        // count one toggle per chip per 300 ms, or the second click closes the menu right away.
+        const now = performance.now();
+        if (c.el === lastToggle.el && now - lastToggle.at < 300) { e.preventDefault(); e.stopImmediatePropagation(); return; }
+        lastToggle = { el: c.el, at: now };
         if (pop && anchor === c.el) { close(); return; }
         open(c.el, c.kind, c.item);
     }, true);
@@ -509,11 +519,5 @@
     window.addEventListener('scroll', e => { if (pop && !pop.contains(e.target)) place(); }, { passive: true, capture: true });
     // Filter changes elsewhere (panel, other tab) show in the open menu.
     window.addEventListener('storage', () => renderFilter());
-    // Close on navigation, or when its chip is gone.
-    let lastPath = location.pathname;
-    setInterval(() => {
-        if (location.pathname !== lastPath) { lastPath = location.pathname; close(); }
-        else if (pop && anchor && !anchor.isConnected) close();
-        else if (pop) renderFilter();
-    }, 500);
+    PMVX.onRoute((path, prev) => { if (path !== prev) close(); });
 })();

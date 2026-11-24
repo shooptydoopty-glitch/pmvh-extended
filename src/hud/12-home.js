@@ -53,7 +53,7 @@
             b.innerHTML = native.innerHTML;
         }
     }
-    setInterval(() => { try { ensureSavedSearchShortcut(); } catch {} }, 1000);
+    setInterval(() => { if (!document.hidden) { try { ensureSavedSearchShortcut(); } catch {} } }, 1000);
 
     const isHomePath = () => location.pathname === '/' || location.pathname === '';
     function homeListCount() { return document.querySelectorAll('[data-video-id]').length; }
@@ -108,8 +108,7 @@
     }
     // Capture before the route changes (homepage still mounted), on link clicks and regularly.
     (() => {
-        const push = history.pushState;
-        history.pushState = function (...a) { try { captureHomeState(); } catch {} return push.apply(this, a); };
+        PMVX.beforeRoute(() => { try { captureHomeState(); } catch {} });
         document.addEventListener('click', e => { if (e.target.closest?.('a[href]')) { try { captureHomeState(); } catch {} } }, true);
         setInterval(() => { if (isHomePath() && !document.hidden) { try { captureHomeState(); } catch {} } }, 2000);
         window.addEventListener('pagehide', () => { try { captureHomeState(); } catch {} });

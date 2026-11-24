@@ -269,7 +269,6 @@
         return false;
     }
 
-
     // --- Fullscreen hand-over ---
     // A route change ends fullscreen, which cannot be re-requested. In fullscreen the next video loads into
     // the same <video> instead; the page catches up when fullscreen ends.

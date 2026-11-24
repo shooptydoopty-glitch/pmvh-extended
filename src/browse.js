@@ -569,9 +569,7 @@
         lastApiPage  = 1;
         setTimeout(injectButtons, 800);
     }
-    const _push = history.pushState.bind(history);
-    history.pushState = function (...a) { _push(...a); setTimeout(onNav, 0); };
-    window.addEventListener('popstate', onNav);
+    PMVX.onRoute(onNav);
 
     let retryTimer = null, retryCount = 0;
     function scheduleRetry() {

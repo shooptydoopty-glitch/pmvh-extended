@@ -34,7 +34,6 @@
             input: null,
             counter: null,
             observer: null,
-            routeTimer: null,
             active: false,
             sessionStart: Date.now(), // older cache entries predate this session
         };
@@ -478,9 +477,9 @@
                 const only = PB.removedOnly.get(key) || 0;
                 let cnt = c.querySelector('.cnt');
                 if (!cnt) { cnt = document.createElement('span'); cnt.className = 'cnt'; c.insertBefore(cnt, c.querySelector('.x')); }
-                cnt.textContent = '\u2212' + n;
-                cnt.dataset.zero = n ? '' : '1';
-                cnt.title = `Removes ${n} of ${PB.removedOf} playlists on this page` + (n ? ` (${only} only because of this filter)` : '');
+                PMVX.setText(cnt, '\u2212' + n);
+                PMVX.setAttr(cnt, 'data-zero', n ? '' : '1');
+                PMVX.setAttr(cnt, 'title', `Removes ${n} of ${PB.removedOf} playlists on this page` + (n ? ` (${only} only because of this filter)` : ''));
             });
         }
         function evaluate(id, count) {
@@ -707,7 +706,7 @@
             if (neg.length) lines.push('Excluded: ' + neg.map(t => t.term + (t.max > 0 ? ' \u2264' + pct(t.max) : '')).join(', '));
             if (names.length) lines.push('My playlists: ' + names.join(', '));
             const btn = host.closest('#' + BTN_ID);
-            if (btn) btn.title = lines.length ? lines.join('\n') : 'Filter playlists by the tags of their videos';
+            if (btn) PMVX.setAttr(btn, 'title', lines.length ? lines.join('\n') : 'Filter playlists by the tags of their videos');
         }
         function updateCounter(total, hidden, pending, fromCache, notScanned = 0) {
             updateSummary(total, hidden);

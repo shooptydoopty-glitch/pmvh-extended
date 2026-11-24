@@ -41,10 +41,11 @@
     }
 
     function pollNative() {
+        // Off the playlist page (or input replaced): stop; attachNativeInput restarts it for a new input.
+        if (!NF.input?.isConnected) { clearInterval(NF.pollTimer); NF.pollTimer = null; return; }
         // Self-heal: reattach the observer if Vue replaced the queue container.
         watchVideoList();
 
-        if (!NF.input) return;
         const v = NF.input.value;
         if (v !== NF.lastNativeValue) {
             NF.lastNativeValue = v;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.2.87
+// @version      1.2.88
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -126,6 +126,33 @@ PMVX.playlistFilterExempt = () => {
     return v;
 };
 PMVX.currentPlaylistPageId = () => location.pathname.match(/^\/playlists\/([a-f0-9]{24})/i)?.[1] || null;
+
+// DOM writes only when the value changes: an unchanged write is still a mutation and wakes every observer.
+PMVX.setText = (n, t) => { if (n && n.textContent !== t) n.textContent = t; };
+PMVX.setAttr = (n, k, v) => { if (!n) return; if (v == null) { if (n.hasAttribute(k)) n.removeAttribute(k); } else if (n.getAttribute(k) !== v) n.setAttribute(k, v); };
+
+// --- Navigation ---
+// One hook on the site's client-side routing (Vue router: pushState; Back/Forward: popstate). replaceState
+// (query updates on the same page) is left out on purpose. beforeRoute runs synchronously before pushState,
+// with the old page still mounted; onRoute(path, prevPath) runs after the URL changed.
+const routeBefore = [], routeAfter = [];
+let routeHref = location.href, routePath = location.pathname;
+function routeChanged() {
+    if (location.href === routeHref) return;
+    const prev = routePath;
+    routeHref = location.href; routePath = location.pathname;
+    routeAfter.forEach(fn => { try { fn(location.pathname, prev); } catch {} });
+}
+const sitePushState = history.pushState;
+history.pushState = function (...a) {
+    routeBefore.forEach(fn => { try { fn(); } catch {} });
+    const r = sitePushState.apply(this, a);
+    setTimeout(routeChanged, 0);
+    return r;
+};
+window.addEventListener('popstate', () => setTimeout(routeChanged, 0));
+PMVX.beforeRoute = fn => routeBefore.push(fn);
+PMVX.onRoute = fn => routeAfter.push(fn);
 
 PMVX.apiTaps = [];
 // [API key, label]. Order matters: the flag cache stores them as bits.
@@ -1940,10 +1967,11 @@ PMVX.scheduler = fn => {
     }
 
     function pollNative() {
+        // Off the playlist page (or input replaced): stop; attachNativeInput restarts it for a new input.
+        if (!NF.input?.isConnected) { clearInterval(NF.pollTimer); NF.pollTimer = null; return; }
         // Self-heal: reattach the observer if Vue replaced the queue container.
         watchVideoList();
 
-        if (!NF.input) return;
         const v = NF.input.value;
         if (v !== NF.lastNativeValue) {
             NF.lastNativeValue = v;
@@ -2406,7 +2434,6 @@ PMVX.scheduler = fn => {
             input: null,
             counter: null,
             observer: null,
-            routeTimer: null,
             active: false,
             sessionStart: Date.now(), // older cache entries predate this session
         };
@@ -2850,9 +2877,9 @@ PMVX.scheduler = fn => {
                 const only = PB.removedOnly.get(key) || 0;
                 let cnt = c.querySelector('.cnt');
                 if (!cnt) { cnt = document.createElement('span'); cnt.className = 'cnt'; c.insertBefore(cnt, c.querySelector('.x')); }
-                cnt.textContent = '\u2212' + n;
-                cnt.dataset.zero = n ? '' : '1';
-                cnt.title = `Removes ${n} of ${PB.removedOf} playlists on this page` + (n ? ` (${only} only because of this filter)` : '');
+                PMVX.setText(cnt, '\u2212' + n);
+                PMVX.setAttr(cnt, 'data-zero', n ? '' : '1');
+                PMVX.setAttr(cnt, 'title', `Removes ${n} of ${PB.removedOf} playlists on this page` + (n ? ` (${only} only because of this filter)` : ''));
             });
         }
         function evaluate(id, count) {
@@ -3079,7 +3106,7 @@ PMVX.scheduler = fn => {
             if (neg.length) lines.push('Excluded: ' + neg.map(t => t.term + (t.max > 0 ? ' \u2264' + pct(t.max) : '')).join(', '));
             if (names.length) lines.push('My playlists: ' + names.join(', '));
             const btn = host.closest('#' + BTN_ID);
-            if (btn) btn.title = lines.length ? lines.join('\n') : 'Filter playlists by the tags of their videos';
+            if (btn) PMVX.setAttr(btn, 'title', lines.length ? lines.join('\n') : 'Filter playlists by the tags of their videos');
         }
         function updateCounter(total, hidden, pending, fromCache, notScanned = 0) {
             updateSummary(total, hidden);
@@ -3709,8 +3736,7 @@ PMVX.scheduler = fn => {
             idJobs.forEach(id => PB.idsPending.delete(id));
             loadIdsAll(idJobs);
         }
-        const setText = (n, t) => { if (n && n.textContent !== t) n.textContent = t; };
-        const setAttr = (n, k, v) => { if (v == null) { if (n.hasAttribute(k)) n.removeAttribute(k); } else if (n.getAttribute(k) !== v) n.setAttribute(k, v); };
+        const setText = PMVX.setText, setAttr = PMVX.setAttr;
         function ensureVideoButton(header) {
             let w = document.getElementById(VSCAN_ID);
             if (w && w.parentElement === header) return w;
@@ -3921,12 +3947,7 @@ PMVX.scheduler = fn => {
         loadCache();
         const bootPb = () => {
             onRoute();
-            window.addEventListener('popstate', onRoute);
-            // Vue router's pushState fires no event; poll.
-            let last = location.pathname;
-            PB.routeTimer = setInterval(() => {
-                if (location.pathname !== last) { last = location.pathname; onRoute(); }
-            }, 500);
+            PMVX.onRoute((path, prev) => { if (path !== prev) onRoute(); });
         };
         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootPb, { once: true });
         else bootPb();
@@ -4762,6 +4783,194 @@ whenBody(() => {
         }
     }
 
+    // --- Current video and playlist membership ---
+    function getCurrentVideoId() {
+        // Playlist pages: the active queue row (border-orange-500) wins over currentVideoData (lags a step on
+        // advance) and the poster (its hex is a thumbnail asset id).
+        if (location.pathname.startsWith('/playlists/')) {
+            const active = getActiveQueueVideoId();
+            if (active) return active;
+        }
+        if (State.currentVideoData?.id) return State.currentVideoData.id;
+
+        // /video/ pages: the URL hex (slug id or API _id) is the only reliable id before any API response.
+        // Must precede the poster fallback: a poster hex is a thumbnail asset id, not a video _id.
+        const pageId = location.pathname.match(/^\/video\/(?:[^?#]*_)?([0-9a-f]{24})(?:[?#]|$)/i)?.[1];
+        if (pageId) return State.slugToApiId.get(pageId) || pageId;
+
+        const v = getVideo();
+        if (v?.poster) {
+            const m = v.poster.match(/\/([a-f0-9]{24})/);
+            if (m) return m[1];
+        }
+
+        const link = document.querySelector('a[href*="/videos/"][aria-current="page"], a[href*="/videos/"].active');
+        if (link) {
+            const m = link.href.match(/\/videos\/([a-f0-9]{24})/);
+            if (m) return m[1];
+        }
+
+        return getJsonLdVideoId();
+    }
+
+    // Vue often hydrates from SSR without a client fetch, so fetch here (deduped) to fill
+    // State.currentVideoData; adopted only if it is still the video on screen.
+    function ensureCurrentVideoData(videoId) {
+        if (!videoId || State.currentVideoData?.id === videoId) return;
+        if (lookupOnCooldown(videoId)) return;
+        fetchVideoDeduped(videoId).then(v => {
+            if (!v?._id || State.currentVideoData?.id === v._id) return;
+            if (videoId !== v._id) State.slugToApiId.set(videoId, v._id);
+            const cur = getCurrentVideoId();
+            if (cur !== videoId && cur !== v._id) return;
+            adoptCurrentVideo(v);
+        }).catch(() => noteLookupFailure(videoId));
+    }
+
+    function learnVideoId(id, oldId) {
+        if (typeof id !== 'string' || !HEX24_RE.test(id)) return 0;
+        if (typeof oldId === 'string' && HEX24_RE.test(oldId) && oldId !== id) {
+            if (State.slugToApiId.get(oldId) === id) return 0;
+            State.slugToApiId.set(oldId, id);
+            return 1;
+        }
+        if (State.slugToApiId.has(id)) return 0;
+        State.slugToApiId.set(id, id);
+        return 1;
+    }
+
+    function learnVideoIds(root) {
+        let added = 0, guard = 0;
+        const stack = [root];
+        while (stack.length && guard++ < 300000) {
+            const o = stack.pop();
+            if (!o || typeof o !== 'object') continue;
+            if (Array.isArray(o)) {
+                for (const x of o) if (x && typeof x === 'object') stack.push(x);
+                continue;
+            }
+            if (typeof o._id === 'string' && typeof o.title === 'string'
+                && ('duration' in o || 'previewUrl' in o || 'oldId' in o)) {
+                added += learnVideoId(o._id, o.oldId);
+            }
+            for (const k in o) {
+                const v = o[k];
+                if (v && typeof v === 'object') stack.push(v);
+            }
+        }
+        return added;
+    }
+
+    // Nuxt's payload is devalue's flat array: objects hold indices into it.
+    function learnVideoIdsFromNuxtPayload() {
+        const el = document.getElementById('__NUXT_DATA__');
+        if (!el || el.dataset.pmvLearned) return 0;
+        el.dataset.pmvLearned = '1';
+        let arr;
+        try { arr = JSON.parse(el.textContent); } catch { return 0; }
+        if (!Array.isArray(arr)) return 0;
+        const val = ref => (typeof ref === 'number' ? arr[ref] : ref);
+        // Resolves indices, arrays of indices and devalue's Reactive/Ref wrappers.
+        const res = (ref, depth = 0) => {
+            if (typeof ref !== 'number' || ref < 0 || depth > 4) return typeof ref === 'number' ? undefined : ref;
+            const x = arr[ref];
+            if (Array.isArray(x)) {
+                if (typeof x[0] === 'string' && /^(Reactive|ShallowReactive|Ref|ShallowRef)$/.test(x[0])) return res(x[1], depth + 1);
+                return x.map(r => res(r, depth + 1));
+            }
+            return x;
+        };
+        const FIELDS = ['_id', 'title', 'duration', 'tags', 'top5Tags', 'starsTags', 'bayesianRating', 'width', 'height',
+            'uploaderUsername', 'uploader', 'thumbnailUrl', 'previewUrl', 'uploadDate', 'views', 'description',
+            ...CONTENT_FLAGS.map(([k]) => k)];
+        let added = 0;
+        const videos = [];
+        for (const o of arr) {
+            if (!o || typeof o !== 'object' || Array.isArray(o) || !('_id' in o) || !('title' in o)) continue;
+            if (!('duration' in o || 'previewUrl' in o || 'oldId' in o)) continue;
+            added += learnVideoId(val(o._id), val(o.oldId));
+            // SSR lists (homepage first page) never pass the fetch interceptor; read their metadata here.
+            if (!('tags' in o || 'top5Tags' in o)) continue;
+            const v = {};
+            FIELDS.forEach(k => { if (k in o) v[k] = res(o[k]); });
+            if (typeof v._id === 'string' && typeof v.title === 'string') videos.push(v);
+        }
+        if (videos.length) { try { indexVideoDetails(videos); } catch {} }
+        return added;
+    }
+
+    function getMatches(videoId) {
+        if (!videoId) return [];
+        const ids = State.reverse.get(videoId);
+        if (!ids) return [];
+        return [...ids].map(id => State.playlists.get(id)).filter(Boolean);
+    }
+
+    function getMeta() {
+        // During a fullscreen hand-over the page still shows the previous video; use only fetched data.
+        const pageIsBehind = !!staleFullscreenHref;
+
+        const liveTitle = pageIsBehind ? null :
+            document.querySelector('.min-w-0 h1')?.textContent?.trim() ||
+            document.querySelector('h1')?.textContent?.trim();
+
+        // Creator: orange gradient h3, text nodes only (skips the "Creator" badge).
+        let liveCreator = null;
+        const uploaderH3 = pageIsBehind ? null : document.querySelector('h3.bg-gradient-to-r.from-orange-400');
+        if (uploaderH3) {
+            const text = [...uploaderH3.childNodes]
+                .filter(n => n.nodeType === Node.TEXT_NODE)
+                .map(n => n.textContent).join('').trim();
+            if (text) liveCreator = text;
+        }
+        // Fallback: the "More from X (N)" h3.
+        if (!liveCreator && !pageIsBehind) {
+            const h3s = document.querySelectorAll('h3[class]');
+            for (const h of h3s) {
+                const t = h.textContent.trim();
+                if (t.startsWith('More from ')) {
+                    liveCreator = t.replace(/^More from /, '').replace(/\s*\(\d+\)$/, '').trim() || null;
+                    break;
+                }
+            }
+        }
+
+        const domTags = pageIsBehind ? [] : [...document.querySelectorAll('a[href^="/search?tags="]')]
+            .slice(0, 15)
+            .map(a => (a.getAttribute('title')?.replace(/^Search for '|'$/g, '') ||
+                       a.textContent.replace(/^#/, '')).trim())
+            .filter(Boolean);
+
+        // Performers: /search?stars= or /model/ links; /model/ titles read "View <name>'s profile", so use the text.
+        const domStars = pageIsBehind ? [] : [...document.querySelectorAll('a[href^="/search?stars="], a[href^="/model/"]')]
+            .slice(0, 10)
+            .map(a => (a.querySelector('.truncate')?.textContent || a.textContent || '').replace(/^#/, '').trim())
+            .filter(Boolean);
+
+        let liveDescription = null;
+        const descBlock = pageIsBehind ? null : document.querySelector('div.bg-\\[\\#1A1A1A\\] p.whitespace-pre-wrap, div.bg-\\[\\#1A1A1A\\] p.text-gray-300');
+        if (descBlock) liveDescription = descBlock.textContent.trim() || null;
+
+        let ldCreator = null, ldDescription = null;
+        try {
+            const jsonLd = pageIsBehind ? null : document.querySelector('script[type="application/ld+json"]');
+            if (jsonLd) {
+                const data = JSON.parse(jsonLd.textContent);
+                if (data['@type'] === 'VideoObject') {
+                    ldCreator = data.creator?.name || null;
+                    ldDescription = data.description || null;
+                }
+            }
+        } catch {}
+
+        return {
+            title: liveTitle || State.currentVideoData?.title || document.querySelector('meta[property="og:title"]')?.content || 'Unknown',
+            creator: liveCreator || State.currentVideoData?.creator || ldCreator || 'Unknown',
+            tags: domTags.length ? domTags : (State.currentVideoData?.tags || []).slice(0, 15),
+            starsTags: domStars.length ? domStars : (State.currentVideoData?.starsTags || []).slice(0, 10),
+            description: liveDescription || ldDescription || State.currentVideoData?.description || null,
+        };
+    }
     // --- Settings export/import ---
     // Exports every pmv*-prefixed localStorage key.
     function collectPmvSettings() {
@@ -6054,6 +6263,372 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
     });
 
+    // --- Up next panel: settings, Previous queues, Saved queues, Undo ---
+    function queueSettingsHtml() {
+        const s = queueSettings;
+        return `
+            <div id="pmv-sq-set" class="mb-2 p-2 rounded-lg text-xs text-gray-400" style="background:#0F0F0F;border:1px solid rgba(255,255,255,0.08);">
+                <label class="flex items-center gap-2" style="margin-bottom:6px;">
+                    <input id="sq-autorefill" type="checkbox" ${s.autoRefill ? 'checked' : ''}>
+                    <span>Auto-refill from Recommended, up to</span>
+                    <input id="sq-target" type="number" min="1" max="20" value="${s.targetSize}" style="${Q_INPUT}width:46px;">
+                    <span>videos</span>
+                </label>
+                <div class="flex items-center gap-2 flex-wrap" style="margin-bottom:6px;">
+                    <label class="flex items-center gap-1"><span>Count</span><input id="sq-count" type="number" min="1" max="100" value="${s.count}" style="${Q_INPUT}width:52px;"></label>
+                    <label class="flex items-center gap-1"><span>Min. rating</span><input id="sq-rating" type="number" min="0" max="100" value="${s.minRating}" style="${Q_INPUT}width:46px;"><span>%</span></label>
+                    <label class="flex items-center gap-1"><span>Max length</span><input id="sq-duration" type="number" min="0" placeholder="none" value="${s.maxDuration || ''}" style="${Q_INPUT}width:70px;"><span>min</span></label>
+                </div>
+                <label class="flex items-center gap-1" style="margin-bottom:6px;" title="A long session in one page keeps growing in memory. A full page load clears it; Up next and the playback position are kept. A page load ends fullscreen; one click or key on the new page puts it back.">
+                    <span>Fresh page load every</span>
+                    <input id="sq-fresh" type="number" min="0" max="200" placeholder="off" value="${s.freshEvery || ''}" style="${Q_INPUT}width:52px;">
+                    <span>videos, in fullscreen every</span>
+                    <input id="sq-fresh-fs" type="number" min="0" max="200" placeholder="off" value="${s.freshEveryFs || ''}" style="${Q_INPUT}width:52px;">
+                    <span>(empty = off)</span>
+                </label>
+                <label class="flex items-center gap-1" style="margin-bottom:6px;" title="Uses the filter behind the funnel button in the header">
+                    <input id="sq-nffilter" type="checkbox" ${s.useNfFilter ? 'checked' : ''}>
+                    <span>Apply my filter${filterSummary()}</span>
+                </label>
+                <div class="flex items-center gap-2 flex-wrap" style="margin-bottom:6px;">
+                    <label class="flex items-center gap-1"><input id="sq-unseen" type="checkbox" ${s.unseenOnly ? 'checked' : ''}><span>Unseen only</span></label>
+                    <input id="sq-tag" type="text" placeholder="tag contains..." value="${escHtml(s.tagFilter)}" style="${Q_INPUT}flex:1;min-width:90px;">
+                </div>
+                <div class="flex items-center gap-2">
+                    <button id="sq-generate" type="button" class="${Q_CHIP_ON}" style="cursor:pointer;">Fill from your playlists</button>
+                    <span id="sq-status" class="text-gray-500"></span>
+                </div>
+                <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);">
+                    <div class="text-gray-300" style="margin-bottom:6px;font-weight:600;">Saved queues</div>
+                    <div class="flex items-center gap-2" style="margin-bottom:6px;">
+                        <input id="sq-save-name" type="text" placeholder="Name this queue\u2026" maxlength="60" style="${Q_INPUT}flex:1;min-width:90px;">
+                        <button id="sq-save" type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" title="Save Up next from the current video on; kept until you delete it">Save</button>
+                    </div>
+                    <div id="sq-saved-list">${savedQueuesHtml()}</div>
+                    <div class="text-gray-300" style="margin:10px 0 6px;font-weight:600;">Previous queues</div>
+                    <div id="sq-prev-list">${prevQueuesHtml()}</div>
+                </div>
+            </div>`;
+    }
+
+    // Two-step click ("Clear all?"): the second click within 3 s goes through.
+    function confirmClick(btn, label) {
+        if (btn.dataset.armed === '1') { clearTimeout(btn._pmvArm); delete btn.dataset.armed; return true; }
+        btn.dataset.armed = '1';
+        btn._pmvLabel = btn.textContent;
+        btn.textContent = label;
+        btn.style.color = 'rgb(252,165,165)';
+        btn.style.borderColor = 'rgba(239,68,68,.5)';
+        btn._pmvArm = setTimeout(() => {
+            if (!btn.isConnected) return;
+            delete btn.dataset.armed;
+            btn.textContent = btn._pmvLabel;
+            btn.style.color = ''; btn.style.borderColor = '';
+        }, 3000);
+        return false;
+    }
+
+    function loadPrevQueues() {
+        try {
+            const a = JSON.parse(localStorage.getItem(QUEUE_PREV_KEY) || '[]');
+            const now = Date.now();
+            return (Array.isArray(a) ? a : []).filter(q => q && Array.isArray(q.items) && q.items.length && now - (q.at || 0) < QUEUE_PREV_MAX_AGE_MS);
+        } catch { return []; }
+    }
+
+    function storePrevQueues(list) {
+        try { localStorage.setItem(QUEUE_PREV_KEY, JSON.stringify(list.slice(0, QUEUE_PREV_MAX))); } catch {}
+    }
+
+    function snapshotQueue(label) {
+        const snap = {
+            label, at: Date.now(), cursor: queueCursor, active: smartQueueActive, manual: [...manuallyAddedIds],
+            items: smartQueueItems.map(it => ({ id: it.id, href: it.href, meta: it.meta ? { ...it.meta } : {} })),
+        };
+        if (!snap.items.length) return snap;
+        const list = loadPrevQueues().filter(q => queueSig(q.items) !== queueSig(snap.items));
+        list.unshift(snap);
+        storePrevQueues(list);
+        return snap;
+    }
+
+    function loadQueueUndo() { return loadPrevQueues()[0] || null; }
+
+    function prevQueueCount() { return loadPrevQueues().length; }
+
+    // Restores a previous queue; the replaced queue goes into the list, so this is undoable too.
+    function restoreQueueSnapshot(snap) {
+        if (!snap) return;
+        const rest = loadPrevQueues().filter(q => !(q.at === snap.at && queueSig(q.items) === queueSig(snap.items)));
+        storePrevQueues(rest);
+        // Not when the current queue is only part of the restored one (an undo).
+        const restoredIds = new Set(snap.items.map(it => it.id));
+        if (smartQueueItems.length && !smartQueueItems.every(it => restoredIds.has(it.id))) snapshotQueue(`Replaced by a restore \u2022 ${smartQueueItems.length} videos`);
+        smartQueueItems = snap.items.map(it => ({ ...it, meta: it.meta ? { ...it.meta } : {} }));
+        manuallyAddedIds = new Set(snap.manual || []);
+        smartQueueActive = snap.active !== false;
+        queueCursor = Math.min(snap.cursor ?? -1, smartQueueItems.length - 1);
+        dismissedCurrentId = null;
+        document.getElementById('pmv-undo-toast')?.remove();
+        renderQueueSidebar();
+        toast(`↺ Up next restored (${upcomingCount()} to come)`, 'green', { under: upNextToastAnchor() });
+    }
+
+    function prevQueuesHtml() {
+        const list = loadPrevQueues();
+        if (!list.length) return '<div class="text-gray-500">Nothing yet. Cleared or replaced queues are kept here for 14 days.</div>';
+        return list.map((q, i) => {
+            const d = new Date(q.at);
+            const when = d.toDateString() === new Date().toDateString()
+                ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+                : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+            const first = q.items[Math.max(0, (q.cursor ?? -1) + 1)]?.meta?.title || q.items[0]?.meta?.title || '';
+            return `<div class="flex items-center gap-2" style="margin-bottom:4px;">
+                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;" title="${escHtml(first)}">${escHtml(q.label || q.items.length + ' videos')}</span>
+                <span class="text-gray-500" style="white-space:nowrap;">${escHtml(when)}</span>
+                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-prev="${i}" title="Put this queue back (the current one is kept in this list)">Restore</button>
+            </div>`;
+        }).join('');
+    }
+
+    // Undo toast under Up next in the header; fades after 2 s (held on hover).
+    function showQueueUndo(msg, snap) {
+        document.getElementById('pmv-undo-toast')?.remove();
+        const el = document.createElement('div');
+        el.id = 'pmv-undo-toast';
+        el.style.cssText = 'position:fixed;bottom:30px;right:30px;z-index:1000003;display:flex;align-items:center;gap:12px;padding:8px 8px 8px 14px;' +
+            'border-radius:10px;background:rgba(0,0,0,.9);border:1px solid rgba(255,255,255,.15);color:#fff;font-size:14px;box-shadow:0 8px 24px rgba(0,0,0,.5);';
+        const t = document.createElement('span');
+        t.textContent = msg;
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = 'Undo';
+        b.style.cssText = 'padding:5px 12px;border-radius:7px;border:none;cursor:pointer;font:inherit;font-weight:600;color:#000;background:rgb(100,255,0);';
+        b.onclick = e => { e.preventDefault(); e.stopPropagation(); restoreQueueSnapshot(snap); };
+        el.append(t, b);
+        const anchor = upNextToastAnchor();
+        const r = anchor && !document.fullscreenElement && anchor.isConnected ? anchor.getBoundingClientRect() : null;
+        if (r && r.width) { el.style.bottom = 'auto'; el.style.top = Math.round(r.bottom + 8) + 'px'; el.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px'; }
+        (document.fullscreenElement || document.body).appendChild(el);
+        el.style.transition = 'opacity .3s';
+        let timer = null;
+        const arm = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 2000);
+        };
+        el.addEventListener('mouseenter', () => { clearTimeout(timer); el.style.opacity = '1'; });
+        el.addEventListener('mouseleave', arm);
+        arm();
+    }
+
+    function loadSavedQueues() {
+        try {
+            const a = JSON.parse(localStorage.getItem(SAVED_QUEUES_KEY) || '[]');
+            return Array.isArray(a) ? a.filter(q => q && typeof q.name === 'string' && Array.isArray(q.items)) : [];
+        } catch { return []; }
+    }
+
+    function storeSavedQueues(list) {
+        try { localStorage.setItem(SAVED_QUEUES_KEY, JSON.stringify(list.slice(0, SAVED_QUEUES_MAX))); return true; }
+        catch { return false; }
+    }
+
+    function savedQueuesHtml() {
+        const list = loadSavedQueues();
+        if (!list.length) return '<div class="text-gray-500">None yet. Saved queues stay until you delete them.</div>';
+        return list.map((q, i) => {
+            const when = q.at ? new Date(q.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '';
+            return `<div class="flex items-center gap-2" style="margin-bottom:4px;">
+                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;" title="${escHtml(q.name)}">${escHtml(q.name)}</span>
+                <span class="text-gray-500" style="white-space:nowrap;">${q.items.length} \u2022 ${escHtml(when)}</span>
+                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-load="${i}" title="Replace Up next with this queue">Load</button>
+                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-append="${i}" title="Add these videos to the end of Up next">Add</button>
+                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-del="${i}" title="Delete (click twice)">\u2715</button>
+            </div>`;
+        }).join('');
+    }
+
+    function wireQueueSettings(panel) {
+        const q = sel => panel.querySelector(sel);
+        const bind = (sel, key, read) => {
+            const el = q(sel);
+            if (el) el.onchange = () => { queueSettings[key] = read(el); saveQueueSettings(); renderQueueSidebar(); };
+        };
+        bind('#sq-autorefill', 'autoRefill', el => el.checked);
+        bind('#sq-target', 'targetSize', el => Math.max(1, parseInt(el.value, 10) || 5));
+        bind('#sq-count', 'count', el => parseInt(el.value, 10) || 20);
+        bind('#sq-rating', 'minRating', el => parseInt(el.value, 10) || 0);
+        bind('#sq-duration', 'maxDuration', el => parseInt(el.value, 10) || 0);
+        bind('#sq-unseen', 'unseenOnly', el => el.checked);
+        bind('#sq-nffilter', 'useNfFilter', el => el.checked);
+        bind('#sq-fresh', 'freshEvery', el => Math.max(0, parseInt(el.value, 10) || 0));
+        bind('#sq-fresh-fs', 'freshEveryFs', el => Math.max(0, parseInt(el.value, 10) || 0));
+        q('#sq-tag').onchange = () => { queueSettings.tagFilter = q('#sq-tag').value; saveQueueSettings(); };
+
+        q('#sq-generate').onclick = () => {
+            queueSettings.tagFilter = q('#sq-tag').value;
+            saveQueueSettings();
+            const generated = generateSmartQueue(queueSettings)
+                .filter(c => !manuallyAddedIds.has(c.id))
+                .map(c => ({ id: c.id, href: knownHrefForId(c.id), meta: resolveQueueMeta(c.id) }));
+            const added = [...manuallyAddedIds].map(id => {
+                const existing = smartQueueItems.find(it => it.id === id);
+                return { id, href: existing?.href || knownHrefForId(id), meta: resolveQueueMeta(id) };
+            });
+            if (smartQueueItems.length) snapshotQueue(`Before "Fill from your playlists" \u2022 ${smartQueueItems.length} videos`);
+            smartQueueItems = [...added, ...generated];
+            smartQueueActive = true;
+
+            if (smartQueueItems.length) {
+                renderQueueSidebar();
+            } else {
+                const st = q('#sq-status');
+                st.textContent = State.videoMeta.size === 0
+                    ? 'Nothing cached yet \u2014 browse around or refresh playlists.'
+                    : 'Nothing matched these filters.';
+            }
+        };
+
+        const prevList = q('#sq-prev-list');
+        if (prevList) prevList.onclick = e => {
+            const b = e.target.closest('[data-sq-prev]');
+            if (!b) return;
+            e.preventDefault(); e.stopPropagation();
+            restoreQueueSnapshot(loadPrevQueues()[+b.dataset.sqPrev]);
+        };
+
+        const savedList = q('#sq-saved-list');
+        const redrawSaved = () => { if (savedList) savedList.innerHTML = savedQueuesHtml(); };
+        const copyItems = items => items.filter(it => it?.id).map(it => ({ id: it.id, href: it.href, meta: it.meta ? { ...it.meta } : {} }));
+        const saveBtn = q('#sq-save');
+        if (saveBtn) saveBtn.onclick = () => {
+            const items = copyItems(smartQueueItems.slice(Math.max(0, queueCursor)));
+            if (!items.length) { toast('Up next is empty'); return; }
+            const input = q('#sq-save-name');
+            const name = (input.value || '').trim() || `Queue ${new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
+            const list = loadSavedQueues().filter(x => x.name !== name);
+            list.unshift({ name, at: Date.now(), items });
+            if (!storeSavedQueues(list)) { toast('Could not save (storage full)', 'red'); return; }
+            input.value = '';
+            redrawSaved();
+            toast(`\u2713 Saved "${name}" (${items.length} videos)`, 'green');
+        };
+        if (savedList) savedList.onclick = e => {
+            const b = e.target.closest('button');
+            if (!b) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const list = loadSavedQueues();
+            const idx = +(b.dataset.sqLoad ?? b.dataset.sqAppend ?? b.dataset.sqDel);
+            const saved = list[idx];
+            if (!saved) return;
+            if (b.dataset.sqDel !== undefined) {
+                if (b.dataset.armed !== '1') {
+                    b.dataset.armed = '1'; b.textContent = 'Delete?';
+                    setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = '\u2715'; } }, 3000);
+                    return;
+                }
+                list.splice(idx, 1);
+                storeSavedQueues(list);
+                redrawSaved();
+                return;
+            }
+            const items = copyItems(saved.items);
+            if (b.dataset.sqLoad !== undefined) {
+                if (upcomingCount() > 0 && b.dataset.armed !== '1') {
+                    b.dataset.armed = '1'; b.textContent = 'Replace?';
+                    setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Load'; } }, 3000);
+                    return;
+                }
+                if (smartQueueItems.length) snapshotQueue(`Replaced by "${saved.name}" \u2022 ${smartQueueItems.length} videos`);
+                smartQueueItems = items;
+                queueCursor = -1;
+                dismissedCurrentId = null;
+                queueHistoryShown = QUEUE_HISTORY_SHOWN;
+            } else {
+                const have = new Set(smartQueueItems.map(it => it.id));
+                smartQueueItems = smartQueueItems.concat(items.filter(it => !have.has(it.id)));
+            }
+            // Loaded videos count as added by hand, so auto-refill never swaps them out.
+            items.forEach(it => manuallyAddedIds.add(it.id));
+            smartQueueActive = true;
+            toast(b.dataset.sqLoad !== undefined ? `Loaded "${saved.name}" (${items.length} videos)` : `Added "${saved.name}" to Up next`, 'green');
+            renderQueueSidebar();
+        };
+    }
+
+    function openQueueSettings() {
+        if (!findVisibleRecommendedContainer()) {
+            toast('Up next appears on a video page, next to "Recommended"');
+            return;
+        }
+        queueSettingsOpen = true;
+        queueCollapsed = false;
+        renderQueueSidebar();
+        document.getElementById('pmv-sq-set')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+
+    // --- Up next refill ---
+    function scoreRecommendedCandidate(id, card) {
+        const meta = State.videoMeta.get(id);
+        if (meta) {
+            const tagScores = computeTagAffinity();
+            const tagScore = (meta.tags || []).reduce((sum, t) => sum + (tagScores.get(t) || 0), 0);
+            return tagScore + (meta.bayesianRating || 0) / 20;
+        }
+        return (scrapeCardMeta(card).bayesianRating ?? 50) / 20;
+    }
+
+    function topUpQueueFromRecommended() {
+        const targetSize = queueSettings.targetSize;
+        // Only items still ahead count toward the target.
+        if (!smartQueueActive || !queueSettings.autoRefill || upcomingCount() >= targetSize) return;
+        const container = findVisibleRecommendedContainer();
+        if (!container) return;
+
+        const existingIds = new Set(smartQueueItems.map(it => it.id));
+        const useFilter = queueSettings.useNfFilter && filterIsMeaningful();
+        const candidates = [];
+        let rejected = 0;
+        container.querySelectorAll('.w-40').forEach(thumbDiv => {
+            const card = thumbDiv.parentElement;
+            if (!card) return;
+            const slugId = resolveRecCardVideoId(card);
+            if (!slugId) return;
+            const apiId = State.slugToApiId.get(slugId) || slugId;
+            if (existingIds.has(apiId)) return;
+            const meta = resolveQueueMeta(apiId, card);
+            if (useFilter && !passesFilter(apiId, meta)) { rejected++; return; }
+            candidates.push({ id: apiId, href: cardHref(card), meta, score: scoreRecommendedCandidate(apiId, card) });
+        });
+        lastFilteredOut = rejected;
+        if (!candidates.length) { renderQueueSidebar(); return; }
+
+        candidates.sort((a, b) => b.score - a.score);
+        const need = targetSize - upcomingCount();
+        smartQueueItems.push(...candidates.slice(0, need).map(({ id, href, meta }) => ({ id, href, meta })));
+        renderQueueSidebar();
+    }
+
+    function generateSmartQueue({ count, minRating, maxDuration, unseenOnly, tagFilter }) {
+        const tagScores = computeTagAffinity();
+        const tagFilterLower = tagFilter.trim().toLowerCase();
+        const candidates = [];
+
+        State.videoMeta.forEach((meta, id) => {
+            if ((meta.bayesianRating || 0) < minRating) return;
+            if (maxDuration && durationToMinutes(meta.duration) > maxDuration) return;
+            if (unseenOnly && PMVX.isWatched?.(id)) return;
+            if (tagFilterLower && !(meta.tags || []).some(t => t.toLowerCase().includes(tagFilterLower))) return;
+
+            const tagScore = (meta.tags || []).reduce((sum, t) => sum + (tagScores.get(t) || 0), 0);
+            const score = tagScore + (meta.bayesianRating || 0) / 20;
+            candidates.push({ id, meta, score });
+        });
+
+        candidates.sort((a, b) => b.score - a.score);
+        return candidates.slice(0, count);
+    }
     // --- Up next queue ---
     // Ranked by constraints and tag affinity from the user's playlists; candidates from State.videoMeta.
     function computeTagAffinity() {
@@ -6324,7 +6899,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         } catch {}
         return false;
     }
-
 
     // --- Fullscreen hand-over ---
     // A route change ends fullscreen, which cannot be re-requested. In fullscreen the next video loads into
@@ -7074,132 +7648,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return bits.length ? ` (${bits.join(', ')})` : ' (nothing set)';
     }
 
-    function scoreRecommendedCandidate(id, card) {
-        const meta = State.videoMeta.get(id);
-        if (meta) {
-            const tagScores = computeTagAffinity();
-            const tagScore = (meta.tags || []).reduce((sum, t) => sum + (tagScores.get(t) || 0), 0);
-            return tagScore + (meta.bayesianRating || 0) / 20;
-        }
-        return (scrapeCardMeta(card).bayesianRating ?? 50) / 20;
-    }
-
-    function topUpQueueFromRecommended() {
-        const targetSize = queueSettings.targetSize;
-        // Only items still ahead count toward the target.
-        if (!smartQueueActive || !queueSettings.autoRefill || upcomingCount() >= targetSize) return;
-        const container = findVisibleRecommendedContainer();
-        if (!container) return;
-
-        const existingIds = new Set(smartQueueItems.map(it => it.id));
-        const useFilter = queueSettings.useNfFilter && filterIsMeaningful();
-        const candidates = [];
-        let rejected = 0;
-        container.querySelectorAll('.w-40').forEach(thumbDiv => {
-            const card = thumbDiv.parentElement;
-            if (!card) return;
-            const slugId = resolveRecCardVideoId(card);
-            if (!slugId) return;
-            const apiId = State.slugToApiId.get(slugId) || slugId;
-            if (existingIds.has(apiId)) return;
-            const meta = resolveQueueMeta(apiId, card);
-            if (useFilter && !passesFilter(apiId, meta)) { rejected++; return; }
-            candidates.push({ id: apiId, href: cardHref(card), meta, score: scoreRecommendedCandidate(apiId, card) });
-        });
-        lastFilteredOut = rejected;
-        if (!candidates.length) { renderQueueSidebar(); return; }
-
-        candidates.sort((a, b) => b.score - a.score);
-        const need = targetSize - upcomingCount();
-        smartQueueItems.push(...candidates.slice(0, need).map(({ id, href, meta }) => ({ id, href, meta })));
-        renderQueueSidebar();
-    }
-
-    function generateSmartQueue({ count, minRating, maxDuration, unseenOnly, tagFilter }) {
-        const tagScores = computeTagAffinity();
-        const tagFilterLower = tagFilter.trim().toLowerCase();
-        const candidates = [];
-
-        State.videoMeta.forEach((meta, id) => {
-            if ((meta.bayesianRating || 0) < minRating) return;
-            if (maxDuration && durationToMinutes(meta.duration) > maxDuration) return;
-            if (unseenOnly && PMVX.isWatched?.(id)) return;
-            if (tagFilterLower && !(meta.tags || []).some(t => t.toLowerCase().includes(tagFilterLower))) return;
-
-            const tagScore = (meta.tags || []).reduce((sum, t) => sum + (tagScores.get(t) || 0), 0);
-            const score = tagScore + (meta.bayesianRating || 0) / 20;
-            candidates.push({ id, meta, score });
-        });
-
-        candidates.sort((a, b) => b.score - a.score);
-        return candidates.slice(0, count);
-    }
 
     const Q_INPUT = 'background:#0F0F0F;border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:#fff;padding:3px 6px;font:inherit;';
 
-    function queueSettingsHtml() {
-        const s = queueSettings;
-        return `
-            <div id="pmv-sq-set" class="mb-2 p-2 rounded-lg text-xs text-gray-400" style="background:#0F0F0F;border:1px solid rgba(255,255,255,0.08);">
-                <label class="flex items-center gap-2" style="margin-bottom:6px;">
-                    <input id="sq-autorefill" type="checkbox" ${s.autoRefill ? 'checked' : ''}>
-                    <span>Auto-refill from Recommended, up to</span>
-                    <input id="sq-target" type="number" min="1" max="20" value="${s.targetSize}" style="${Q_INPUT}width:46px;">
-                    <span>videos</span>
-                </label>
-                <div class="flex items-center gap-2 flex-wrap" style="margin-bottom:6px;">
-                    <label class="flex items-center gap-1"><span>Count</span><input id="sq-count" type="number" min="1" max="100" value="${s.count}" style="${Q_INPUT}width:52px;"></label>
-                    <label class="flex items-center gap-1"><span>Min. rating</span><input id="sq-rating" type="number" min="0" max="100" value="${s.minRating}" style="${Q_INPUT}width:46px;"><span>%</span></label>
-                    <label class="flex items-center gap-1"><span>Max length</span><input id="sq-duration" type="number" min="0" placeholder="none" value="${s.maxDuration || ''}" style="${Q_INPUT}width:70px;"><span>min</span></label>
-                </div>
-                <label class="flex items-center gap-1" style="margin-bottom:6px;" title="A long session in one page keeps growing in memory. A full page load clears it; Up next and the playback position are kept. A page load ends fullscreen; one click or key on the new page puts it back.">
-                    <span>Fresh page load every</span>
-                    <input id="sq-fresh" type="number" min="0" max="200" placeholder="off" value="${s.freshEvery || ''}" style="${Q_INPUT}width:52px;">
-                    <span>videos, in fullscreen every</span>
-                    <input id="sq-fresh-fs" type="number" min="0" max="200" placeholder="off" value="${s.freshEveryFs || ''}" style="${Q_INPUT}width:52px;">
-                    <span>(empty = off)</span>
-                </label>
-                <label class="flex items-center gap-1" style="margin-bottom:6px;" title="Uses the filter behind the funnel button in the header">
-                    <input id="sq-nffilter" type="checkbox" ${s.useNfFilter ? 'checked' : ''}>
-                    <span>Apply my filter${filterSummary()}</span>
-                </label>
-                <div class="flex items-center gap-2 flex-wrap" style="margin-bottom:6px;">
-                    <label class="flex items-center gap-1"><input id="sq-unseen" type="checkbox" ${s.unseenOnly ? 'checked' : ''}><span>Unseen only</span></label>
-                    <input id="sq-tag" type="text" placeholder="tag contains..." value="${escHtml(s.tagFilter)}" style="${Q_INPUT}flex:1;min-width:90px;">
-                </div>
-                <div class="flex items-center gap-2">
-                    <button id="sq-generate" type="button" class="${Q_CHIP_ON}" style="cursor:pointer;">Fill from your playlists</button>
-                    <span id="sq-status" class="text-gray-500"></span>
-                </div>
-                <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);">
-                    <div class="text-gray-300" style="margin-bottom:6px;font-weight:600;">Saved queues</div>
-                    <div class="flex items-center gap-2" style="margin-bottom:6px;">
-                        <input id="sq-save-name" type="text" placeholder="Name this queue\u2026" maxlength="60" style="${Q_INPUT}flex:1;min-width:90px;">
-                        <button id="sq-save" type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" title="Save Up next from the current video on; kept until you delete it">Save</button>
-                    </div>
-                    <div id="sq-saved-list">${savedQueuesHtml()}</div>
-                    <div class="text-gray-300" style="margin:10px 0 6px;font-weight:600;">Previous queues</div>
-                    <div id="sq-prev-list">${prevQueuesHtml()}</div>
-                </div>
-            </div>`;
-    }
-
-    // Two-step click ("Clear all?"): the second click within 3 s goes through.
-    function confirmClick(btn, label) {
-        if (btn.dataset.armed === '1') { clearTimeout(btn._pmvArm); delete btn.dataset.armed; return true; }
-        btn.dataset.armed = '1';
-        btn._pmvLabel = btn.textContent;
-        btn.textContent = label;
-        btn.style.color = 'rgb(252,165,165)';
-        btn.style.borderColor = 'rgba(239,68,68,.5)';
-        btn._pmvArm = setTimeout(() => {
-            if (!btn.isConnected) return;
-            delete btn.dataset.armed;
-            btn.textContent = btn._pmvLabel;
-            btn.style.color = ''; btn.style.borderColor = '';
-        }, 3000);
-        return false;
-    }
 
     // Previous queues: Up next before a clear or replace, newest first, in localStorage (QUEUE_PREV_MAX,
     // QUEUE_PREV_MAX_AGE_MS), so a cleared queue can come back after the Undo is gone.
@@ -7214,432 +7665,18 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
         localStorage.removeItem('pmv_queue_undo_v1');
     } catch {}
-    function loadPrevQueues() {
-        try {
-            const a = JSON.parse(localStorage.getItem(QUEUE_PREV_KEY) || '[]');
-            const now = Date.now();
-            return (Array.isArray(a) ? a : []).filter(q => q && Array.isArray(q.items) && q.items.length && now - (q.at || 0) < QUEUE_PREV_MAX_AGE_MS);
-        } catch { return []; }
-    }
-    function storePrevQueues(list) {
-        try { localStorage.setItem(QUEUE_PREV_KEY, JSON.stringify(list.slice(0, QUEUE_PREV_MAX))); } catch {}
-    }
     const queueSig = items => items.map(it => it.id).join(',');
-    function snapshotQueue(label) {
-        const snap = {
-            label, at: Date.now(), cursor: queueCursor, active: smartQueueActive, manual: [...manuallyAddedIds],
-            items: smartQueueItems.map(it => ({ id: it.id, href: it.href, meta: it.meta ? { ...it.meta } : {} })),
-        };
-        if (!snap.items.length) return snap;
-        const list = loadPrevQueues().filter(q => queueSig(q.items) !== queueSig(snap.items));
-        list.unshift(snap);
-        storePrevQueues(list);
-        return snap;
-    }
-    function loadQueueUndo() { return loadPrevQueues()[0] || null; }
-    function prevQueueCount() { return loadPrevQueues().length; }
-    // Restores a previous queue; the replaced queue goes into the list, so this is undoable too.
-    function restoreQueueSnapshot(snap) {
-        if (!snap) return;
-        const rest = loadPrevQueues().filter(q => !(q.at === snap.at && queueSig(q.items) === queueSig(snap.items)));
-        storePrevQueues(rest);
-        // Not when the current queue is only part of the restored one (an undo).
-        const restoredIds = new Set(snap.items.map(it => it.id));
-        if (smartQueueItems.length && !smartQueueItems.every(it => restoredIds.has(it.id))) snapshotQueue(`Replaced by a restore \u2022 ${smartQueueItems.length} videos`);
-        smartQueueItems = snap.items.map(it => ({ ...it, meta: it.meta ? { ...it.meta } : {} }));
-        manuallyAddedIds = new Set(snap.manual || []);
-        smartQueueActive = snap.active !== false;
-        queueCursor = Math.min(snap.cursor ?? -1, smartQueueItems.length - 1);
-        dismissedCurrentId = null;
-        document.getElementById('pmv-undo-toast')?.remove();
-        renderQueueSidebar();
-        toast(`↺ Up next restored (${upcomingCount()} to come)`, 'green', { under: upNextToastAnchor() });
-    }
-    function prevQueuesHtml() {
-        const list = loadPrevQueues();
-        if (!list.length) return '<div class="text-gray-500">Nothing yet. Cleared or replaced queues are kept here for 14 days.</div>';
-        return list.map((q, i) => {
-            const d = new Date(q.at);
-            const when = d.toDateString() === new Date().toDateString()
-                ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-                : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-            const first = q.items[Math.max(0, (q.cursor ?? -1) + 1)]?.meta?.title || q.items[0]?.meta?.title || '';
-            return `<div class="flex items-center gap-2" style="margin-bottom:4px;">
-                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;" title="${escHtml(first)}">${escHtml(q.label || q.items.length + ' videos')}</span>
-                <span class="text-gray-500" style="white-space:nowrap;">${escHtml(when)}</span>
-                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-prev="${i}" title="Put this queue back (the current one is kept in this list)">Restore</button>
-            </div>`;
-        }).join('');
-    }
 
-    // Undo toast under Up next in the header; fades after 2 s (held on hover).
-    function showQueueUndo(msg, snap) {
-        document.getElementById('pmv-undo-toast')?.remove();
-        const el = document.createElement('div');
-        el.id = 'pmv-undo-toast';
-        el.style.cssText = 'position:fixed;bottom:30px;right:30px;z-index:1000003;display:flex;align-items:center;gap:12px;padding:8px 8px 8px 14px;' +
-            'border-radius:10px;background:rgba(0,0,0,.9);border:1px solid rgba(255,255,255,.15);color:#fff;font-size:14px;box-shadow:0 8px 24px rgba(0,0,0,.5);';
-        const t = document.createElement('span');
-        t.textContent = msg;
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.textContent = 'Undo';
-        b.style.cssText = 'padding:5px 12px;border-radius:7px;border:none;cursor:pointer;font:inherit;font-weight:600;color:#000;background:rgb(100,255,0);';
-        b.onclick = e => { e.preventDefault(); e.stopPropagation(); restoreQueueSnapshot(snap); };
-        el.append(t, b);
-        const anchor = upNextToastAnchor();
-        const r = anchor && !document.fullscreenElement && anchor.isConnected ? anchor.getBoundingClientRect() : null;
-        if (r && r.width) { el.style.bottom = 'auto'; el.style.top = Math.round(r.bottom + 8) + 'px'; el.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px'; }
-        (document.fullscreenElement || document.body).appendChild(el);
-        el.style.transition = 'opacity .3s';
-        let timer = null;
-        const arm = () => {
-            clearTimeout(timer);
-            timer = setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 2000);
-        };
-        el.addEventListener('mouseenter', () => { clearTimeout(timer); el.style.opacity = '1'; });
-        el.addEventListener('mouseleave', arm);
-        arm();
-    }
 
     // Saved queues: named Up next copies in localStorage until deleted (the auto backup only bridges a restart).
     const SAVED_QUEUES_KEY = 'pmv_saved_queues_v1';
     const SAVED_QUEUES_MAX = 20;
-    function loadSavedQueues() {
-        try {
-            const a = JSON.parse(localStorage.getItem(SAVED_QUEUES_KEY) || '[]');
-            return Array.isArray(a) ? a.filter(q => q && typeof q.name === 'string' && Array.isArray(q.items)) : [];
-        } catch { return []; }
-    }
-    function storeSavedQueues(list) {
-        try { localStorage.setItem(SAVED_QUEUES_KEY, JSON.stringify(list.slice(0, SAVED_QUEUES_MAX))); return true; }
-        catch { return false; }
-    }
-    function savedQueuesHtml() {
-        const list = loadSavedQueues();
-        if (!list.length) return '<div class="text-gray-500">None yet. Saved queues stay until you delete them.</div>';
-        return list.map((q, i) => {
-            const when = q.at ? new Date(q.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '';
-            return `<div class="flex items-center gap-2" style="margin-bottom:4px;">
-                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;" title="${escHtml(q.name)}">${escHtml(q.name)}</span>
-                <span class="text-gray-500" style="white-space:nowrap;">${q.items.length} \u2022 ${escHtml(when)}</span>
-                <button type="button" class="${Q_CHIP_ON}" style="cursor:pointer;" data-sq-load="${i}" title="Replace Up next with this queue">Load</button>
-                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-append="${i}" title="Add these videos to the end of Up next">Add</button>
-                <button type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;" data-sq-del="${i}" title="Delete (click twice)">\u2715</button>
-            </div>`;
-        }).join('');
-    }
 
-    function wireQueueSettings(panel) {
-        const q = sel => panel.querySelector(sel);
-        const bind = (sel, key, read) => {
-            const el = q(sel);
-            if (el) el.onchange = () => { queueSettings[key] = read(el); saveQueueSettings(); renderQueueSidebar(); };
-        };
-        bind('#sq-autorefill', 'autoRefill', el => el.checked);
-        bind('#sq-target', 'targetSize', el => Math.max(1, parseInt(el.value, 10) || 5));
-        bind('#sq-count', 'count', el => parseInt(el.value, 10) || 20);
-        bind('#sq-rating', 'minRating', el => parseInt(el.value, 10) || 0);
-        bind('#sq-duration', 'maxDuration', el => parseInt(el.value, 10) || 0);
-        bind('#sq-unseen', 'unseenOnly', el => el.checked);
-        bind('#sq-nffilter', 'useNfFilter', el => el.checked);
-        bind('#sq-fresh', 'freshEvery', el => Math.max(0, parseInt(el.value, 10) || 0));
-        bind('#sq-fresh-fs', 'freshEveryFs', el => Math.max(0, parseInt(el.value, 10) || 0));
-        q('#sq-tag').onchange = () => { queueSettings.tagFilter = q('#sq-tag').value; saveQueueSettings(); };
-
-        q('#sq-generate').onclick = () => {
-            queueSettings.tagFilter = q('#sq-tag').value;
-            saveQueueSettings();
-            const generated = generateSmartQueue(queueSettings)
-                .filter(c => !manuallyAddedIds.has(c.id))
-                .map(c => ({ id: c.id, href: knownHrefForId(c.id), meta: resolveQueueMeta(c.id) }));
-            const added = [...manuallyAddedIds].map(id => {
-                const existing = smartQueueItems.find(it => it.id === id);
-                return { id, href: existing?.href || knownHrefForId(id), meta: resolveQueueMeta(id) };
-            });
-            if (smartQueueItems.length) snapshotQueue(`Before "Fill from your playlists" \u2022 ${smartQueueItems.length} videos`);
-            smartQueueItems = [...added, ...generated];
-            smartQueueActive = true;
-
-            if (smartQueueItems.length) {
-                renderQueueSidebar();
-            } else {
-                const st = q('#sq-status');
-                st.textContent = State.videoMeta.size === 0
-                    ? 'Nothing cached yet \u2014 browse around or refresh playlists.'
-                    : 'Nothing matched these filters.';
-            }
-        };
-
-        const prevList = q('#sq-prev-list');
-        if (prevList) prevList.onclick = e => {
-            const b = e.target.closest('[data-sq-prev]');
-            if (!b) return;
-            e.preventDefault(); e.stopPropagation();
-            restoreQueueSnapshot(loadPrevQueues()[+b.dataset.sqPrev]);
-        };
-
-        const savedList = q('#sq-saved-list');
-        const redrawSaved = () => { if (savedList) savedList.innerHTML = savedQueuesHtml(); };
-        const copyItems = items => items.filter(it => it?.id).map(it => ({ id: it.id, href: it.href, meta: it.meta ? { ...it.meta } : {} }));
-        const saveBtn = q('#sq-save');
-        if (saveBtn) saveBtn.onclick = () => {
-            const items = copyItems(smartQueueItems.slice(Math.max(0, queueCursor)));
-            if (!items.length) { toast('Up next is empty'); return; }
-            const input = q('#sq-save-name');
-            const name = (input.value || '').trim() || `Queue ${new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
-            const list = loadSavedQueues().filter(x => x.name !== name);
-            list.unshift({ name, at: Date.now(), items });
-            if (!storeSavedQueues(list)) { toast('Could not save (storage full)', 'red'); return; }
-            input.value = '';
-            redrawSaved();
-            toast(`\u2713 Saved "${name}" (${items.length} videos)`, 'green');
-        };
-        if (savedList) savedList.onclick = e => {
-            const b = e.target.closest('button');
-            if (!b) return;
-            e.preventDefault();
-            e.stopPropagation();
-            const list = loadSavedQueues();
-            const idx = +(b.dataset.sqLoad ?? b.dataset.sqAppend ?? b.dataset.sqDel);
-            const saved = list[idx];
-            if (!saved) return;
-            if (b.dataset.sqDel !== undefined) {
-                if (b.dataset.armed !== '1') {
-                    b.dataset.armed = '1'; b.textContent = 'Delete?';
-                    setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = '\u2715'; } }, 3000);
-                    return;
-                }
-                list.splice(idx, 1);
-                storeSavedQueues(list);
-                redrawSaved();
-                return;
-            }
-            const items = copyItems(saved.items);
-            if (b.dataset.sqLoad !== undefined) {
-                if (upcomingCount() > 0 && b.dataset.armed !== '1') {
-                    b.dataset.armed = '1'; b.textContent = 'Replace?';
-                    setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Load'; } }, 3000);
-                    return;
-                }
-                if (smartQueueItems.length) snapshotQueue(`Replaced by "${saved.name}" \u2022 ${smartQueueItems.length} videos`);
-                smartQueueItems = items;
-                queueCursor = -1;
-                dismissedCurrentId = null;
-                queueHistoryShown = QUEUE_HISTORY_SHOWN;
-            } else {
-                const have = new Set(smartQueueItems.map(it => it.id));
-                smartQueueItems = smartQueueItems.concat(items.filter(it => !have.has(it.id)));
-            }
-            // Loaded videos count as added by hand, so auto-refill never swaps them out.
-            items.forEach(it => manuallyAddedIds.add(it.id));
-            smartQueueActive = true;
-            toast(b.dataset.sqLoad !== undefined ? `Loaded "${saved.name}" (${items.length} videos)` : `Added "${saved.name}" to Up next`, 'green');
-            renderQueueSidebar();
-        };
-    }
-
-    function openQueueSettings() {
-        if (!findVisibleRecommendedContainer()) {
-            toast('Up next appears on a video page, next to "Recommended"');
-            return;
-        }
-        queueSettingsOpen = true;
-        queueCollapsed = false;
-        renderQueueSidebar();
-        document.getElementById('pmv-sq-set')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-
-    function getCurrentVideoId() {
-        // Playlist pages: the active queue row (border-orange-500) wins over currentVideoData (lags a step on
-        // advance) and the poster (its hex is a thumbnail asset id).
-        if (location.pathname.startsWith('/playlists/')) {
-            const active = getActiveQueueVideoId();
-            if (active) return active;
-        }
-        if (State.currentVideoData?.id) return State.currentVideoData.id;
-
-        // /video/ pages: the URL hex (slug id or API _id) is the only reliable id before any API response.
-        // Must precede the poster fallback: a poster hex is a thumbnail asset id, not a video _id.
-        const pageId = location.pathname.match(/^\/video\/(?:[^?#]*_)?([0-9a-f]{24})(?:[?#]|$)/i)?.[1];
-        if (pageId) return State.slugToApiId.get(pageId) || pageId;
-
-        const v = getVideo();
-        if (v?.poster) {
-            const m = v.poster.match(/\/([a-f0-9]{24})/);
-            if (m) return m[1];
-        }
-
-        const link = document.querySelector('a[href*="/videos/"][aria-current="page"], a[href*="/videos/"].active');
-        if (link) {
-            const m = link.href.match(/\/videos\/([a-f0-9]{24})/);
-            if (m) return m[1];
-        }
-
-        return getJsonLdVideoId();
-    }
-
-    // Vue often hydrates from SSR without a client fetch, so fetch here (deduped) to fill
-    // State.currentVideoData; adopted only if it is still the video on screen.
-    function ensureCurrentVideoData(videoId) {
-        if (!videoId || State.currentVideoData?.id === videoId) return;
-        if (lookupOnCooldown(videoId)) return;
-        fetchVideoDeduped(videoId).then(v => {
-            if (!v?._id || State.currentVideoData?.id === v._id) return;
-            if (videoId !== v._id) State.slugToApiId.set(videoId, v._id);
-            const cur = getCurrentVideoId();
-            if (cur !== videoId && cur !== v._id) return;
-            adoptCurrentVideo(v);
-        }).catch(() => noteLookupFailure(videoId));
-    }
 
     // Links use `oldId` when present, else `_id`; API responses and __NUXT_DATA__ carry both, so slug -> _id
     // mappings are learned without per-card lookups. Returns the number of new mappings.
     const HEX24_RE = /^[0-9a-f]{24}$/i;
-    function learnVideoId(id, oldId) {
-        if (typeof id !== 'string' || !HEX24_RE.test(id)) return 0;
-        if (typeof oldId === 'string' && HEX24_RE.test(oldId) && oldId !== id) {
-            if (State.slugToApiId.get(oldId) === id) return 0;
-            State.slugToApiId.set(oldId, id);
-            return 1;
-        }
-        if (State.slugToApiId.has(id)) return 0;
-        State.slugToApiId.set(id, id);
-        return 1;
-    }
 
-    function learnVideoIds(root) {
-        let added = 0, guard = 0;
-        const stack = [root];
-        while (stack.length && guard++ < 300000) {
-            const o = stack.pop();
-            if (!o || typeof o !== 'object') continue;
-            if (Array.isArray(o)) {
-                for (const x of o) if (x && typeof x === 'object') stack.push(x);
-                continue;
-            }
-            if (typeof o._id === 'string' && typeof o.title === 'string'
-                && ('duration' in o || 'previewUrl' in o || 'oldId' in o)) {
-                added += learnVideoId(o._id, o.oldId);
-            }
-            for (const k in o) {
-                const v = o[k];
-                if (v && typeof v === 'object') stack.push(v);
-            }
-        }
-        return added;
-    }
-
-    // Nuxt's payload is devalue's flat array: objects hold indices into it.
-    function learnVideoIdsFromNuxtPayload() {
-        const el = document.getElementById('__NUXT_DATA__');
-        if (!el || el.dataset.pmvLearned) return 0;
-        el.dataset.pmvLearned = '1';
-        let arr;
-        try { arr = JSON.parse(el.textContent); } catch { return 0; }
-        if (!Array.isArray(arr)) return 0;
-        const val = ref => (typeof ref === 'number' ? arr[ref] : ref);
-        // Resolves indices, arrays of indices and devalue's Reactive/Ref wrappers.
-        const res = (ref, depth = 0) => {
-            if (typeof ref !== 'number' || ref < 0 || depth > 4) return typeof ref === 'number' ? undefined : ref;
-            const x = arr[ref];
-            if (Array.isArray(x)) {
-                if (typeof x[0] === 'string' && /^(Reactive|ShallowReactive|Ref|ShallowRef)$/.test(x[0])) return res(x[1], depth + 1);
-                return x.map(r => res(r, depth + 1));
-            }
-            return x;
-        };
-        const FIELDS = ['_id', 'title', 'duration', 'tags', 'top5Tags', 'starsTags', 'bayesianRating', 'width', 'height',
-            'uploaderUsername', 'uploader', 'thumbnailUrl', 'previewUrl', 'uploadDate', 'views', 'description',
-            ...CONTENT_FLAGS.map(([k]) => k)];
-        let added = 0;
-        const videos = [];
-        for (const o of arr) {
-            if (!o || typeof o !== 'object' || Array.isArray(o) || !('_id' in o) || !('title' in o)) continue;
-            if (!('duration' in o || 'previewUrl' in o || 'oldId' in o)) continue;
-            added += learnVideoId(val(o._id), val(o.oldId));
-            // SSR lists (homepage first page) never pass the fetch interceptor; read their metadata here.
-            if (!('tags' in o || 'top5Tags' in o)) continue;
-            const v = {};
-            FIELDS.forEach(k => { if (k in o) v[k] = res(o[k]); });
-            if (typeof v._id === 'string' && typeof v.title === 'string') videos.push(v);
-        }
-        if (videos.length) { try { indexVideoDetails(videos); } catch {} }
-        return added;
-    }
-
-    function getMatches(videoId) {
-        if (!videoId) return [];
-        const ids = State.reverse.get(videoId);
-        if (!ids) return [];
-        return [...ids].map(id => State.playlists.get(id)).filter(Boolean);
-    }
-
-    function getMeta() {
-        // During a fullscreen hand-over the page still shows the previous video; use only fetched data.
-        const pageIsBehind = !!staleFullscreenHref;
-
-        const liveTitle = pageIsBehind ? null :
-            document.querySelector('.min-w-0 h1')?.textContent?.trim() ||
-            document.querySelector('h1')?.textContent?.trim();
-
-        // Creator: orange gradient h3, text nodes only (skips the "Creator" badge).
-        let liveCreator = null;
-        const uploaderH3 = pageIsBehind ? null : document.querySelector('h3.bg-gradient-to-r.from-orange-400');
-        if (uploaderH3) {
-            const text = [...uploaderH3.childNodes]
-                .filter(n => n.nodeType === Node.TEXT_NODE)
-                .map(n => n.textContent).join('').trim();
-            if (text) liveCreator = text;
-        }
-        // Fallback: the "More from X (N)" h3.
-        if (!liveCreator && !pageIsBehind) {
-            const h3s = document.querySelectorAll('h3[class]');
-            for (const h of h3s) {
-                const t = h.textContent.trim();
-                if (t.startsWith('More from ')) {
-                    liveCreator = t.replace(/^More from /, '').replace(/\s*\(\d+\)$/, '').trim() || null;
-                    break;
-                }
-            }
-        }
-
-        const domTags = pageIsBehind ? [] : [...document.querySelectorAll('a[href^="/search?tags="]')]
-            .slice(0, 15)
-            .map(a => (a.getAttribute('title')?.replace(/^Search for '|'$/g, '') ||
-                       a.textContent.replace(/^#/, '')).trim())
-            .filter(Boolean);
-
-        // Performers: /search?stars= or /model/ links; /model/ titles read "View <name>'s profile", so use the text.
-        const domStars = pageIsBehind ? [] : [...document.querySelectorAll('a[href^="/search?stars="], a[href^="/model/"]')]
-            .slice(0, 10)
-            .map(a => (a.querySelector('.truncate')?.textContent || a.textContent || '').replace(/^#/, '').trim())
-            .filter(Boolean);
-
-        let liveDescription = null;
-        const descBlock = pageIsBehind ? null : document.querySelector('div.bg-\\[\\#1A1A1A\\] p.whitespace-pre-wrap, div.bg-\\[\\#1A1A1A\\] p.text-gray-300');
-        if (descBlock) liveDescription = descBlock.textContent.trim() || null;
-
-        let ldCreator = null, ldDescription = null;
-        try {
-            const jsonLd = pageIsBehind ? null : document.querySelector('script[type="application/ld+json"]');
-            if (jsonLd) {
-                const data = JSON.parse(jsonLd.textContent);
-                if (data['@type'] === 'VideoObject') {
-                    ldCreator = data.creator?.name || null;
-                    ldDescription = data.description || null;
-                }
-            }
-        } catch {}
-
-        return {
-            title: liveTitle || State.currentVideoData?.title || document.querySelector('meta[property="og:title"]')?.content || 'Unknown',
-            creator: liveCreator || State.currentVideoData?.creator || ldCreator || 'Unknown',
-            tags: domTags.length ? domTags : (State.currentVideoData?.tags || []).slice(0, 15),
-            starsTags: domStars.length ? domStars : (State.currentVideoData?.starsTags || []).slice(0, 10),
-            description: liveDescription || ldDescription || State.currentVideoData?.description || null,
-        };
-    }
 
     // --- Video helpers ---
 
@@ -7909,78 +7946,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return img.getAttribute('src') ? img.src : '';
     }
 
-    // API frames if available; else the page strip, unless fullscreen is ahead of the page (previous video's).
-    function timelineFrames() {
-        const data = State.currentVideoData;
-        const id = getCurrentVideoId();
-        if (data?.id && data.id === id && data.timelineThumbnails?.length) {
-            return data.timelineThumbnails
-                .filter(t => t?.url)
-                .map(t => ({ src: t.url, time: Number.isFinite(t.captureTime) ? t.captureTime : null }));
-        }
-        if (staleFullscreenHref) return [];
-        return [...document.querySelectorAll('.timeline-thumbnail-item')].map(item => {
-            const img = item.querySelector('img');
-            const label = item.querySelector('div:last-child')?.textContent?.trim() || img?.alt?.replace('Thumbnail at ', '') || '';
-            return { src: pageImgSrc(img), time: parseTimestamp(label) };
-        }).filter(x => x.src);
-    }
-
-    function buildThumbs() {
-        const data = timelineFrames().slice(0, 10).map(f => ({ ...f, label: formatThumbTime(f.time) }));
-        if (!data.length) return null;
-
-        const wrap = document.createElement('div');
-        wrap.style.cssText = 'display:flex;gap:8px;margin-top:12px;overflow-x:auto;overflow-y:hidden;padding-bottom:4px;max-width:100%;';
-
-        data.forEach(item => {
-            const box = document.createElement('button');
-            box.type = 'button';
-            box.style.cssText = 'flex:0 0 150px;border:0;padding:0;margin:0;background:transparent;cursor:pointer;position:relative;';
-
-            const thumb = document.createElement('img');
-            thumb.src = item.src;
-            thumb.draggable = false;
-            thumb.loading = 'eager';
-            thumb.style.cssText = 'width:150px;aspect-ratio:16/9;object-fit:cover;border-radius:8px;display:block;background:#111;';
-
-            box.onclick = e => {
-                e.stopPropagation();
-                const v = getVideo();
-                if (v && item.time !== null) v.currentTime = item.time;
-            };
-
-            box.appendChild(thumb);
-            if (item.label) {
-                const lbl = document.createElement('div');
-                lbl.textContent = item.label;
-                lbl.style.cssText = 'position:absolute;right:4px;bottom:4px;font-size:10px;color:white;background:rgba(0,0,0,.65);padding:2px 5px;border-radius:4px;pointer-events:none;';
-                box.appendChild(lbl);
-            }
-            wrap.appendChild(box);
-        });
-
-        return wrap;
-    }
-
-    function closeHud() {
-        clearTimeout(State.hudTimeout);
-        clearTimeout(State.hudHardTimeout);
-        State.hudHardTimeout = null;
-        State.hud?.remove();
-        State.hud = null;
-    }
-
-    function startHudTimer(ms) {
-        clearTimeout(State.hudTimeout);
-        State.hudTimeout = setTimeout(() => {
-            if (!State.hud) return;
-            State.hud.style.opacity = '0';
-            State.hud.style.transition = 'opacity 0.25s';
-            setTimeout(closeHud, 250);
-        }, ms);
-    }
-
     // --- Native action buttons ---
     // Cloned into the HUD to stay reachable; one detector for every page with this row.
 
@@ -8053,45 +8018,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return a && performance.now() - a.at < 500 ? a.rect : null;
     }
 
-    function buildNativeActionBarClone() {
-        // Skipped while fullscreen is ahead of the page: those buttons belong to the previous video.
-        if (staleFullscreenHref) return null;
-        const nativeActionBar = findNativeActionBar();
-        if (!nativeActionBar) return null;
-
-        const cloneBar = document.createElement('div');
-        cloneBar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;';
-        [...nativeActionBar.children].forEach(child => {
-            if (child.id === 'pmv-page-playlists' || child.dataset?.pmvPlBtn) return;
-            if (child.tagName !== 'BUTTON' && child.tagName !== 'A') return;
-
-            const clone = child.cloneNode(true);
-            // Strip Vue attributes to avoid duplicate handlers.
-            clone.removeAttribute('data-v-18f75d28');
-            clone.addEventListener('click', e => {
-                e.stopPropagation();
-                // Our own buttons (⊘, Tags) open their menus at the clone, not the hidden original.
-                forwardedAnchor = { rect: clone.getBoundingClientRect(), at: performance.now() };
-                child.click();
-                startHudTimer(4000);
-                // Snapshot clone: re-sync classes once Vue patched the original (again later for slow API toggles).
-                const sync = () => {
-                    if (!clone.isConnected) return;
-                    clone.className = child.className;
-                    if (child.title) clone.title = child.title;
-                    if (child.dataset.on !== undefined) clone.dataset.on = child.dataset.on;
-                    const label = child.getAttribute('aria-label');
-                    if (label) clone.setAttribute('aria-label', label);
-                };
-                setTimeout(sync, 80);
-                setTimeout(sync, 1500);
-            });
-            clone.style.cssText = (clone.style.cssText || '') + ';pointer-events:auto;';
-            cloneBar.appendChild(clone);
-        });
-
-        return cloneBar.children.length ? cloneBar : null;
-    }
 
     // Stand-ins while fullscreen is ahead of the page: PUT /api/videos/<id>/like|dislike|favorite {action: "like"|"unlike"|...}
     // for the video playing. Initial state from /api/videos/<id> (isLiked/isDisliked/isFavorited), via refreshHudAfterHandover.
@@ -8110,76 +8036,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
           icon: lucide(['M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z']) },
     ];
 
-    function buildApiActionBar(videoId) {
-        if (!videoId) return null;
-        const cvd = State.currentVideoData?.id === videoId ? State.currentVideoData : null;
-        const st = { liked: !!cvd?.isLiked, disliked: !!cvd?.isDisliked, favorited: !!cvd?.isFavorited };
-        const writeBack = () => {
-            const d = State.currentVideoData;
-            if (d?.id !== videoId) return;
-            d.isLiked = st.liked; d.isDisliked = st.disliked; d.isFavorited = st.favorited;
-        };
-
-        const bar = document.createElement('div');
-        bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;';
-        const buttons = {};
-        const paint = () => API_BTNS.forEach(b => {
-            const el = buttons[b.key];
-            el.className = `${API_BTN_BASE} ${st[b.key] ? b.cls : API_BTN_OFF}`;
-            el.title = b.title(st[b.key]);
-        });
-
-        API_BTNS.forEach(b => {
-            const el = document.createElement('button');
-            el.type = 'button';
-            el.innerHTML = b.icon;
-            el.style.cssText = 'pointer-events:auto;';
-            buttons[b.key] = el;
-            el.addEventListener('click', async e => {
-                e.stopPropagation();
-                startHudTimer(4000);
-                if (el.disabled) return;
-                const before = { ...st };
-                const turnOn = !st[b.key];
-                st[b.key] = turnOn;
-                if (turnOn && b.key === 'liked') st.disliked = false;
-                if (turnOn && b.key === 'disliked') st.liked = false;
-                paint();
-                el.disabled = true;
-                try {
-                    const res = await fetch(`/api/videos/${videoId}/${b.endpoint}`, {
-                        method: 'PUT',
-                        headers: { 'content-type': 'application/json', accept: 'application/json' },
-                        credentials: 'include',
-                        body: JSON.stringify({ action: turnOn ? b.on : b.off }),
-                    });
-                    if (!res.ok) throw res.status;
-                    const d = (await res.json().catch(() => null))?.data;
-                    if (d && b.key !== 'favorited') {
-                        if (typeof d.userHasLiked === 'boolean') st.liked = d.userHasLiked;
-                        if (typeof d.userHasDisliked === 'boolean') st.disliked = d.userHasDisliked;
-                    }
-                    writeBack();
-                } catch (err) {
-                    Object.assign(st, before);
-                    toast(`${b.endpoint[0].toUpperCase() + b.endpoint.slice(1)} failed${typeof err === 'number' ? ` (${err})` : ''}`, 'red');
-                } finally {
-                    el.disabled = false;
-                    paint();
-                }
-            });
-            bar.appendChild(el);
-        });
-        paint();
-        // ⊘ and Tags for the video actually playing, first as under the video.
-        try {
-            const extra = [];
-            if (rejectPlaylistId && State.playlists.has(rejectPlaylistId)) extra.push(rejectPageButton(videoId));
-            extra.push(tagBarButton(videoId), tagBarButton(videoId, 'stars'));
-            extra.reverse().forEach(el => { el.style.pointerEvents = 'auto'; bar.insertBefore(el, bar.firstChild); });
-        } catch {}
-        return bar;
-    }
 
     // --- Next-video mini-HUD ---
     // Mounts in document.fullscreenElement, not body: nothing outside it is visible in fullscreen.
@@ -8789,6 +8645,265 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
     });
 
+    // --- Next-video notification ---
+    function getQueueRowVisibleTitle(itemRoot) {
+        const titleEl = itemRoot.querySelector('.flex-1.min-w-0 p, .flex-1.min-w-0 span, .flex-1.min-w-0');
+        return titleEl?.firstChild?.nodeValue?.trim() ||
+               titleEl?.childNodes?.[0]?.textContent?.trim() ||
+               titleEl?.textContent?.trim() || '';
+    }
+
+    function resolveQueueItemVideoId(itemRoot) {
+        // Visible title, not img.alt: Vue recycles nodes on virtual scroll, so alt lags.
+        const visibleTitle = getQueueRowVisibleTitle(itemRoot);
+        if (visibleTitle) return State.titleIndex.get(visibleTitle.toLowerCase()) || null;
+        return null;
+    }
+
+    // N key: read the visible Up next preview synchronously, before Vue re-renders it.
+    // The filter overlay (#pmvnf-upnext-overlay) wins: the native button still shows the filtered-out video.
+    function getUpNextVideoInfo() {
+        if (!isPlaylistPage()) return null;
+        const upNextRoot = State.queueUpNextEl || findQueueParts()?.upNext;
+        if (!upNextRoot) return null;
+
+        const overlay = upNextRoot.querySelector('#pmvnf-upnext-overlay');
+        if (overlay) {
+            const title = overlay.querySelector('span')?.textContent?.trim() || '';
+            if (!title) return null;
+            const thumbnail = overlay.querySelector('img')?.src || '';
+            const videoId = getVideoIdFromThumbUrl(thumbnail) || State.titleIndex.get(title.toLowerCase()) || null;
+            return { key: videoId || thumbnail || title, title, creator: State.videoMeta.get(videoId)?.uploaderDisplay || '', thumbnail };
+        }
+
+        // .flex-1.min-w-0 holds two <p>'s: title, then creator.
+        const textWrap = upNextRoot.querySelector('.flex-1.min-w-0');
+        const [titleEl, creatorEl] = textWrap ? textWrap.querySelectorAll('p') : [];
+        const title = titleEl?.textContent?.trim() || '';
+        if (!title) return null;
+        const thumbnail = upNextRoot.querySelector('img')?.src || '';
+        const videoId = getVideoIdFromThumbUrl(thumbnail) || State.titleIndex.get(title.toLowerCase()) || null;
+        return { key: videoId || thumbnail || title, title, creator: creatorEl?.textContent?.trim() || '', thumbnail };
+    }
+
+    function maybeShowNextVideoFromUpNext() {
+        const info = getUpNextVideoInfo();
+        if (!info) return;
+        showNextVideoNotificationWithInfo(info, 'n-key-upnext');
+    }
+
+    // Single gate for the Mini-HUD; `key` dedupes (video id, else thumbnail URL or title).
+    function showNextVideoNotificationWithInfo(info, source) {
+        if (!document.fullscreenElement) return;
+        if (!info?.title || !info.key || info.key === State.lastNextHudVideoId) return;
+        State.lastNextHudVideoId = info.key;
+        showNextVideoHUD({ title: info.title, creator: info.creator, thumbnail: info.thumbnail });
+    }
+
+    function showNextVideoNotificationFor(videoId, fallbackTitle, source) {
+        if (!videoId) return;
+        const meta = State.videoMeta.get(videoId);
+        showNextVideoNotificationWithInfo({
+            key: videoId,
+            title: meta?.title || fallbackTitle || '',
+            creator: meta?.uploaderDisplay || '',
+            thumbnail: meta?.thumbnailUrl || '',
+        }, source);
+    }
+
+    // Fallback if the console message disappears: the active queue row (border-orange-500).
+    function maybeShowNextVideoNotification() {
+        if (!document.fullscreenElement || !isPlaylistPage()) return;
+        const row = getActiveQueueRow();
+        if (!row) return;
+        const videoId = resolveQueueItemVideoId(row);
+        if (!videoId) return;
+        showNextVideoNotificationFor(videoId, getQueueRowVisibleTitle(row), 'dom-fallback');
+    }
+
+    // --- HUD building blocks ---
+    // API frames if available; else the page strip, unless fullscreen is ahead of the page (previous video's).
+    function timelineFrames() {
+        const data = State.currentVideoData;
+        const id = getCurrentVideoId();
+        if (data?.id && data.id === id && data.timelineThumbnails?.length) {
+            return data.timelineThumbnails
+                .filter(t => t?.url)
+                .map(t => ({ src: t.url, time: Number.isFinite(t.captureTime) ? t.captureTime : null }));
+        }
+        if (staleFullscreenHref) return [];
+        return [...document.querySelectorAll('.timeline-thumbnail-item')].map(item => {
+            const img = item.querySelector('img');
+            const label = item.querySelector('div:last-child')?.textContent?.trim() || img?.alt?.replace('Thumbnail at ', '') || '';
+            return { src: pageImgSrc(img), time: parseTimestamp(label) };
+        }).filter(x => x.src);
+    }
+
+    function buildThumbs() {
+        const data = timelineFrames().slice(0, 10).map(f => ({ ...f, label: formatThumbTime(f.time) }));
+        if (!data.length) return null;
+
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;gap:8px;margin-top:12px;overflow-x:auto;overflow-y:hidden;padding-bottom:4px;max-width:100%;';
+
+        data.forEach(item => {
+            const box = document.createElement('button');
+            box.type = 'button';
+            box.style.cssText = 'flex:0 0 150px;border:0;padding:0;margin:0;background:transparent;cursor:pointer;position:relative;';
+
+            const thumb = document.createElement('img');
+            thumb.src = item.src;
+            thumb.draggable = false;
+            thumb.loading = 'eager';
+            thumb.style.cssText = 'width:150px;aspect-ratio:16/9;object-fit:cover;border-radius:8px;display:block;background:#111;';
+
+            box.onclick = e => {
+                e.stopPropagation();
+                const v = getVideo();
+                if (v && item.time !== null) v.currentTime = item.time;
+            };
+
+            box.appendChild(thumb);
+            if (item.label) {
+                const lbl = document.createElement('div');
+                lbl.textContent = item.label;
+                lbl.style.cssText = 'position:absolute;right:4px;bottom:4px;font-size:10px;color:white;background:rgba(0,0,0,.65);padding:2px 5px;border-radius:4px;pointer-events:none;';
+                box.appendChild(lbl);
+            }
+            wrap.appendChild(box);
+        });
+
+        return wrap;
+    }
+
+    function closeHud() {
+        clearTimeout(State.hudTimeout);
+        clearTimeout(State.hudHardTimeout);
+        State.hudHardTimeout = null;
+        State.hud?.remove();
+        State.hud = null;
+    }
+
+    function startHudTimer(ms) {
+        clearTimeout(State.hudTimeout);
+        State.hudTimeout = setTimeout(() => {
+            if (!State.hud) return;
+            State.hud.style.opacity = '0';
+            State.hud.style.transition = 'opacity 0.25s';
+            setTimeout(closeHud, 250);
+        }, ms);
+    }
+
+    function buildNativeActionBarClone() {
+        // Skipped while fullscreen is ahead of the page: those buttons belong to the previous video.
+        if (staleFullscreenHref) return null;
+        const nativeActionBar = findNativeActionBar();
+        if (!nativeActionBar) return null;
+
+        const cloneBar = document.createElement('div');
+        cloneBar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;';
+        [...nativeActionBar.children].forEach(child => {
+            if (child.id === 'pmv-page-playlists' || child.dataset?.pmvPlBtn) return;
+            if (child.tagName !== 'BUTTON' && child.tagName !== 'A') return;
+
+            const clone = child.cloneNode(true);
+            // Strip Vue attributes to avoid duplicate handlers.
+            clone.removeAttribute('data-v-18f75d28');
+            clone.addEventListener('click', e => {
+                e.stopPropagation();
+                // Our own buttons (⊘, Tags) open their menus at the clone, not the hidden original.
+                forwardedAnchor = { rect: clone.getBoundingClientRect(), at: performance.now() };
+                child.click();
+                startHudTimer(4000);
+                // Snapshot clone: re-sync classes once Vue patched the original (again later for slow API toggles).
+                const sync = () => {
+                    if (!clone.isConnected) return;
+                    clone.className = child.className;
+                    if (child.title) clone.title = child.title;
+                    if (child.dataset.on !== undefined) clone.dataset.on = child.dataset.on;
+                    const label = child.getAttribute('aria-label');
+                    if (label) clone.setAttribute('aria-label', label);
+                };
+                setTimeout(sync, 80);
+                setTimeout(sync, 1500);
+            });
+            clone.style.cssText = (clone.style.cssText || '') + ';pointer-events:auto;';
+            cloneBar.appendChild(clone);
+        });
+
+        return cloneBar.children.length ? cloneBar : null;
+    }
+
+    function buildApiActionBar(videoId) {
+        if (!videoId) return null;
+        const cvd = State.currentVideoData?.id === videoId ? State.currentVideoData : null;
+        const st = { liked: !!cvd?.isLiked, disliked: !!cvd?.isDisliked, favorited: !!cvd?.isFavorited };
+        const writeBack = () => {
+            const d = State.currentVideoData;
+            if (d?.id !== videoId) return;
+            d.isLiked = st.liked; d.isDisliked = st.disliked; d.isFavorited = st.favorited;
+        };
+
+        const bar = document.createElement('div');
+        bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;';
+        const buttons = {};
+        const paint = () => API_BTNS.forEach(b => {
+            const el = buttons[b.key];
+            el.className = `${API_BTN_BASE} ${st[b.key] ? b.cls : API_BTN_OFF}`;
+            el.title = b.title(st[b.key]);
+        });
+
+        API_BTNS.forEach(b => {
+            const el = document.createElement('button');
+            el.type = 'button';
+            el.innerHTML = b.icon;
+            el.style.cssText = 'pointer-events:auto;';
+            buttons[b.key] = el;
+            el.addEventListener('click', async e => {
+                e.stopPropagation();
+                startHudTimer(4000);
+                if (el.disabled) return;
+                const before = { ...st };
+                const turnOn = !st[b.key];
+                st[b.key] = turnOn;
+                if (turnOn && b.key === 'liked') st.disliked = false;
+                if (turnOn && b.key === 'disliked') st.liked = false;
+                paint();
+                el.disabled = true;
+                try {
+                    const res = await fetch(`/api/videos/${videoId}/${b.endpoint}`, {
+                        method: 'PUT',
+                        headers: { 'content-type': 'application/json', accept: 'application/json' },
+                        credentials: 'include',
+                        body: JSON.stringify({ action: turnOn ? b.on : b.off }),
+                    });
+                    if (!res.ok) throw res.status;
+                    const d = (await res.json().catch(() => null))?.data;
+                    if (d && b.key !== 'favorited') {
+                        if (typeof d.userHasLiked === 'boolean') st.liked = d.userHasLiked;
+                        if (typeof d.userHasDisliked === 'boolean') st.disliked = d.userHasDisliked;
+                    }
+                    writeBack();
+                } catch (err) {
+                    Object.assign(st, before);
+                    toast(`${b.endpoint[0].toUpperCase() + b.endpoint.slice(1)} failed${typeof err === 'number' ? ` (${err})` : ''}`, 'red');
+                } finally {
+                    el.disabled = false;
+                    paint();
+                }
+            });
+            bar.appendChild(el);
+        });
+        paint();
+        // ⊘ and Tags for the video actually playing, first as under the video.
+        try {
+            const extra = [];
+            if (rejectPlaylistId && State.playlists.has(rejectPlaylistId)) extra.push(rejectPageButton(videoId));
+            extra.push(tagBarButton(videoId), tagBarButton(videoId, 'stars'));
+            extra.reverse().forEach(el => { el.style.pointerEvents = 'auto'; bar.insertBefore(el, bar.firstChild); });
+        } catch {}
+        return bar;
+    }
     // --- Native playlist button highlight ---
 
     function findNativePlaylistButton() {
@@ -8812,7 +8927,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (btn) {
             const inAny = getMatches(videoId).length > 0;
             const rgb = isRejected(videoId) ? REJECT_RGB : '100,255,0';
-            btn.dataset.pmvPlaylistButton = '1';
+            if (btn.dataset.pmvPlaylistButton !== '1') btn.dataset.pmvPlaylistButton = '1';
             btn.style.transition = 'color 120ms ease, border-color 120ms ease';
             if (inAny) {
                 btn.style.color = `rgb(${rgb})`;
@@ -8947,8 +9062,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         (document.head || document.documentElement).appendChild(st);
     }
     function styleRejectPageBtn(btn, on) {
-        btn.dataset.on = on ? '1' : '';
-        btn.title = on ? 'Rejected — click to remove from the reject list' : 'Reject (move to the reject list, remove from every other playlist)';
+        const flag = on ? '1' : '';
+        const title = on ? 'Rejected — click to remove from the reject list' : 'Reject (move to the reject list, remove from every other playlist)';
+        if (btn.dataset.on !== flag) btn.dataset.on = flag;
+        if (btn.title !== title) btn.title = title;
     }
     function rejectPageButton(videoId) {
         ensureRejectBtnStyle();
@@ -10400,7 +10517,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             b.innerHTML = native.innerHTML;
         }
     }
-    setInterval(() => { try { ensureSavedSearchShortcut(); } catch {} }, 1000);
+    setInterval(() => { if (!document.hidden) { try { ensureSavedSearchShortcut(); } catch {} } }, 1000);
 
     const isHomePath = () => location.pathname === '/' || location.pathname === '';
     function homeListCount() { return document.querySelectorAll('[data-video-id]').length; }
@@ -10455,8 +10572,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
     // Capture before the route changes (homepage still mounted), on link clicks and regularly.
     (() => {
-        const push = history.pushState;
-        history.pushState = function (...a) { try { captureHomeState(); } catch {} return push.apply(this, a); };
+        PMVX.beforeRoute(() => { try { captureHomeState(); } catch {} });
         document.addEventListener('click', e => { if (e.target.closest?.('a[href]')) { try { captureHomeState(); } catch {} } }, true);
         setInterval(() => { if (isHomePath() && !document.hidden) { try { captureHomeState(); } catch {} } }, 2000);
         window.addEventListener('pagehide', () => { try { captureHomeState(); } catch {} });
@@ -10937,13 +11053,17 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return b;
     }
 
+    // Writes only what changed: every write is a DOM mutation that would wake the page observer again.
     function styleRejectCardBtn(btn, on) {
         const armed = !on && btn.dataset.armed === '1';
-        btn.dataset.on = on ? '1' : '';
-        btn.textContent = armed ? '\u2298 Reject?' : '\u2298';
-        btn.title = armed ? 'Click again to reject'
+        const flag = on ? '1' : '';
+        const text = armed ? '\u2298 Reject?' : '\u2298';
+        const title = armed ? 'Click again to reject'
             : on ? 'Remove from reject list'
             : 'Reject (move to the reject list, remove from every other playlist)';
+        if (btn.dataset.on !== flag) btn.dataset.on = flag;
+        if (btn.textContent !== text) btn.textContent = text;
+        if (btn.title !== title) btn.title = title;
     }
 
     function disarmRejectBtn(btn) {
@@ -11008,7 +11128,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
 
     // Badge passes call this for existing buttons; it leaves an armed button alone.
     function refreshRejectCardBtn(btn, on) {
-        btn.dataset.on = on ? '1' : '';
+        if (btn.dataset.on !== (on ? '1' : '')) btn.dataset.on = on ? '1' : '';
         if (on) disarmRejectBtn(btn);
         styleRejectCardBtn(btn, on);
     }
@@ -11195,70 +11315,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         });
     }
 
-    function getQueueRowVisibleTitle(itemRoot) {
-        const titleEl = itemRoot.querySelector('.flex-1.min-w-0 p, .flex-1.min-w-0 span, .flex-1.min-w-0');
-        return titleEl?.firstChild?.nodeValue?.trim() ||
-               titleEl?.childNodes?.[0]?.textContent?.trim() ||
-               titleEl?.textContent?.trim() || '';
-    }
-
-    function resolveQueueItemVideoId(itemRoot) {
-        // Visible title, not img.alt: Vue recycles nodes on virtual scroll, so alt lags.
-        const visibleTitle = getQueueRowVisibleTitle(itemRoot);
-        if (visibleTitle) return State.titleIndex.get(visibleTitle.toLowerCase()) || null;
-        return null;
-    }
-
-    // N key: read the visible Up next preview synchronously, before Vue re-renders it.
-    // The filter overlay (#pmvnf-upnext-overlay) wins: the native button still shows the filtered-out video.
-    function getUpNextVideoInfo() {
-        if (!isPlaylistPage()) return null;
-        const upNextRoot = State.queueUpNextEl || findQueueParts()?.upNext;
-        if (!upNextRoot) return null;
-
-        const overlay = upNextRoot.querySelector('#pmvnf-upnext-overlay');
-        if (overlay) {
-            const title = overlay.querySelector('span')?.textContent?.trim() || '';
-            if (!title) return null;
-            const thumbnail = overlay.querySelector('img')?.src || '';
-            const videoId = getVideoIdFromThumbUrl(thumbnail) || State.titleIndex.get(title.toLowerCase()) || null;
-            return { key: videoId || thumbnail || title, title, creator: State.videoMeta.get(videoId)?.uploaderDisplay || '', thumbnail };
-        }
-
-        // .flex-1.min-w-0 holds two <p>'s: title, then creator.
-        const textWrap = upNextRoot.querySelector('.flex-1.min-w-0');
-        const [titleEl, creatorEl] = textWrap ? textWrap.querySelectorAll('p') : [];
-        const title = titleEl?.textContent?.trim() || '';
-        if (!title) return null;
-        const thumbnail = upNextRoot.querySelector('img')?.src || '';
-        const videoId = getVideoIdFromThumbUrl(thumbnail) || State.titleIndex.get(title.toLowerCase()) || null;
-        return { key: videoId || thumbnail || title, title, creator: creatorEl?.textContent?.trim() || '', thumbnail };
-    }
-
-    function maybeShowNextVideoFromUpNext() {
-        const info = getUpNextVideoInfo();
-        if (!info) return;
-        showNextVideoNotificationWithInfo(info, 'n-key-upnext');
-    }
-
-    // Single gate for the Mini-HUD; `key` dedupes (video id, else thumbnail URL or title).
-    function showNextVideoNotificationWithInfo(info, source) {
-        if (!document.fullscreenElement) return;
-        if (!info?.title || !info.key || info.key === State.lastNextHudVideoId) return;
-        State.lastNextHudVideoId = info.key;
-        showNextVideoHUD({ title: info.title, creator: info.creator, thumbnail: info.thumbnail });
-    }
-
-    function showNextVideoNotificationFor(videoId, fallbackTitle, source) {
-        if (!videoId) return;
-        const meta = State.videoMeta.get(videoId);
-        showNextVideoNotificationWithInfo({
-            key: videoId,
-            title: meta?.title || fallbackTitle || '',
-            creator: meta?.uploaderDisplay || '',
-            thumbnail: meta?.thumbnailUrl || '',
-        }, source);
-    }
 
     // Primary trigger: the site logs "Switching playlist video" {newVideoId, newVideo} on every index
     // change, before any media/HLS loading, so it doesn't depend on readyState or DOM classes.
@@ -11277,15 +11333,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         };
     })();
 
-    // Fallback if the console message disappears: the active queue row (border-orange-500).
-    function maybeShowNextVideoNotification() {
-        if (!document.fullscreenElement || !isPlaylistPage()) return;
-        const row = getActiveQueueRow();
-        if (!row) return;
-        const videoId = resolveQueueItemVideoId(row);
-        if (!videoId) return;
-        showNextVideoNotificationFor(videoId, getQueueRowVisibleTitle(row), 'dom-fallback');
-    }
 
     function addQueueBadges() {
         if (State.quietMode || !State.ready) return;
@@ -11323,7 +11370,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             targetRow.appendChild(check);
         });
     }
-
 
     // --- Recommended sidebar ---
     // Badges and playlist filter on /video/ pages.
@@ -11581,6 +11627,66 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     const VI_CARD = 'group bg-[#0F0F0F] rounded-lg overflow-hidden border border-[#2A2A2A] hover:border-orange-500/40 transition-all duration-300 hover:shadow-lg hover:shadow-orange-500/10';
     const VI_GRID = 'grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4';
 
+
+    function addMoreFromBadges() {
+        try { learnVideoIdsFromNuxtPayload(); } catch {}
+        [...document.querySelectorAll('h3')]
+            .filter(h => /^More from/i.test(h.textContent.trim()))
+            .forEach(h3 => {
+                const container = h3.parentElement?.parentElement;
+                if (!container) return;
+                container.querySelectorAll('a[href*="/video/"]').forEach(card => {
+                    const slugId = getVideoIdFromHref(card.getAttribute('href'));
+                    if (!slugId) return;
+                    const row = card.querySelector('[class*="gap-1"][class*="flex-wrap"]');
+                    if (!row) return;
+
+                    placeRecAddQueueButton(card, slugId, row);
+
+                    if (!State.ready) return;
+                    const apiId = knownApiIdForCard(card, slugId);
+                    const key = apiId || slugId;
+                    if (card.dataset.pmvMfChecked === key) return;
+
+                    if (apiId) {
+                        card.dataset.pmvMfChecked = key;
+                        row.querySelectorAll('[data-pmv-rec-badge]').forEach(el => el.remove());
+                        const badge = playlistCheckBadgeEl(apiId);
+                        applyInPlaylistTint(card, !!badge, isRejected(apiId));
+                        if (badge) row.appendChild(badge);
+                    } else {
+                        armMoreFromHoverResolve(card, row, slugId);
+                    }
+                });
+            });
+    }
+
+    // Unresolved cards resolve on hover: one deduped request after a delay; bulk lookups hit the rate limit.
+    function armMoreFromHoverResolve(card, row, slugId) {
+        if (card.dataset.pmvMfArmed) return;
+        card.dataset.pmvMfArmed = '1';
+
+        let timer = null;
+        card.addEventListener('pointerenter', () => {
+            timer = setTimeout(async () => {
+                if (card.dataset.pmvMfChecked) return;
+                try {
+                    const v = await fetchVideoDeduped(slugId);
+                    const apiId = v?._id;
+                    if (!apiId || !card.isConnected) return;
+                    State.slugToApiId.set(slugId, apiId);
+                    card.dataset.pmvMfChecked = apiId;
+                    row.querySelectorAll('[data-pmv-rec-badge]').forEach(el => el.remove());
+                    const badge = playlistCheckBadgeEl(apiId);
+                    applyInPlaylistTint(card, !!badge, isRejected(apiId));
+                    if (badge) row.appendChild(badge);
+                } catch {}
+            }, 350);
+        });
+        card.addEventListener('pointerleave', () => clearTimeout(timer));
+    }
+
+    // --- More about this video ---
     function viVideoCard(v) {
         const r = Number(v.bayesianRating);
         const hue = Number.isFinite(r) ? Math.max(0, Math.min(120, r * 1.2)) : 0;
@@ -11683,65 +11789,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         const key = `${vinfo.open ? 1 : 0}${vinfo.loading ? 1 : 0}${vinfo.data ? 1 : 0}${vinfo.error ? 1 : 0}`;
         if (box.dataset.vid !== vid || box.dataset.state !== key) renderVideoInfo(box, key);
     }
-
-    function addMoreFromBadges() {
-        try { learnVideoIdsFromNuxtPayload(); } catch {}
-        [...document.querySelectorAll('h3')]
-            .filter(h => /^More from/i.test(h.textContent.trim()))
-            .forEach(h3 => {
-                const container = h3.parentElement?.parentElement;
-                if (!container) return;
-                container.querySelectorAll('a[href*="/video/"]').forEach(card => {
-                    const slugId = getVideoIdFromHref(card.getAttribute('href'));
-                    if (!slugId) return;
-                    const row = card.querySelector('[class*="gap-1"][class*="flex-wrap"]');
-                    if (!row) return;
-
-                    placeRecAddQueueButton(card, slugId, row);
-
-                    if (!State.ready) return;
-                    const apiId = knownApiIdForCard(card, slugId);
-                    const key = apiId || slugId;
-                    if (card.dataset.pmvMfChecked === key) return;
-
-                    if (apiId) {
-                        card.dataset.pmvMfChecked = key;
-                        row.querySelectorAll('[data-pmv-rec-badge]').forEach(el => el.remove());
-                        const badge = playlistCheckBadgeEl(apiId);
-                        applyInPlaylistTint(card, !!badge, isRejected(apiId));
-                        if (badge) row.appendChild(badge);
-                    } else {
-                        armMoreFromHoverResolve(card, row, slugId);
-                    }
-                });
-            });
-    }
-
-    // Unresolved cards resolve on hover: one deduped request after a delay; bulk lookups hit the rate limit.
-    function armMoreFromHoverResolve(card, row, slugId) {
-        if (card.dataset.pmvMfArmed) return;
-        card.dataset.pmvMfArmed = '1';
-
-        let timer = null;
-        card.addEventListener('pointerenter', () => {
-            timer = setTimeout(async () => {
-                if (card.dataset.pmvMfChecked) return;
-                try {
-                    const v = await fetchVideoDeduped(slugId);
-                    const apiId = v?._id;
-                    if (!apiId || !card.isConnected) return;
-                    State.slugToApiId.set(slugId, apiId);
-                    card.dataset.pmvMfChecked = apiId;
-                    row.querySelectorAll('[data-pmv-rec-badge]').forEach(el => el.remove());
-                    const badge = playlistCheckBadgeEl(apiId);
-                    applyInPlaylistTint(card, !!badge, isRejected(apiId));
-                    if (badge) row.appendChild(badge);
-                } catch {}
-            }, 350);
-        });
-        card.addEventListener('pointerleave', () => clearTimeout(timer));
-    }
-
     // --- Notifications ---
     // Playlist indicator per notification. /notifications has only a "/video/<hex>" link (no thumbnails, no data-video-id);
     // resolved without API calls via slugToApiId, reverse index, titleIndex (playlist videos only: a hit = in a playlist).
@@ -12231,7 +12278,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         }
     }
 
-
     // --- Cached player repair ---
     // Nuxt's KeepAlive doesn't remount a reactivated page's player, and the media sweep emptied its
     // <video> while detached; reloadSource() restores it (up to two nudges). Production Vue hides
@@ -12333,7 +12379,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         updateNativePlaylistButtons();
         if (State.ready) { try { ensureRejectBarButton(getCurrentVideoId()); } catch {} }
     }, 2000);
-
 
     // --- Context menu ---
     // Playlist menu for a video, opened by the "+" button on cards.
@@ -13203,6 +13248,288 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     // Playlist pages: the playlist owns "next" (the site's N). Elsewhere the next Up next item, else the first
     // Recommended card that is neither current nor rejected. The synthetic N bypasses our key dispatcher.
     let dispatchingSyntheticNext = false;
+
+
+    // Tag-popup after ✕: tag the rejected video, with the calls of the site's Vote on Tags modal:
+    //   GET  /api/videos/<id>/tags/stats    -> data.tags [{ tag, userVote }]
+    //   POST /api/videos/<id>/tags/suggest  { tag, tagType: 'general' }                      new tag, +1 vote
+    //   POST /api/videos/<id>/tags/vote     { tag, voteType: 'upvote', tagType: 'general' }  existing tag
+    // Voting again on an upvoted tag removes the vote, so that case is skipped.
+    const TAG_AFTER_REJECT_KEY = 'pmv_tag_after_reject_v1';
+    const TAG_RECENT_KEY = 'pmv_tag_recent_v1';
+    const TAG_MAX_LEN = 50; // the site's limit for general tags
+    const TAG_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"></path><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"></circle></svg>';
+    const STAR_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/></svg>';
+    // Tags and stars/models share the endpoints, told apart by tagType; site length limits 50 and 100.
+    const TAG_KINDS = {
+        general: { recentKey: TAG_RECENT_KEY, max: TAG_MAX_LEN, stats: 'tags', meta: 'tags', noun: 'tag', icon: TAG_SVG, pre: '#' },
+        stars: { recentKey: 'pmv_star_recent_v1', max: 100, stats: 'stars', meta: 'starsTags', noun: 'model', icon: STAR_SVG, pre: '' },
+    };
+    const tagKind = k => TAG_KINDS[k] || TAG_KINDS.general;
+
+    // The site's vocabulary per kind for autocomplete, loaded once.
+    const popularTagsP = {};
+
+
+    // Toggle a mapped playlist (press again within 3 s to confirm removal); the reject list uses rejectCurrentVideo.
+    async function handlePlaylistHotkey(playlistId) {
+        if (isRejectList(playlistId)) return rejectCurrentVideo();
+        const videoId = getCurrentVideoId();
+        if (!videoId) { toast('No video'); return; }
+        const plName = getPlaylistDisplayName(State.playlists.get(playlistId)?.name) || playlistId;
+        const isMember = getMatches(videoId).some(p => p.id === playlistId);
+
+        if (isMember) {
+            if (State.pendingRemove && State.pendingRemoveVideoId === videoId && State.pendingRemovePlaylistId === playlistId) {
+                State.pendingRemove = false;
+                clearTimeout(State.pendingRemoveTimeout);
+                const ok = await removeFromPlaylist(videoId, playlistId);
+                updateNativePlaylistButtons();
+                toast(ok ? '✕ ' + plName : 'Remove failed', ok ? 'red' : null);
+                return;
+            }
+            State.pendingRemove = true;
+            State.pendingRemoveVideoId = videoId;
+            State.pendingRemovePlaylistId = playlistId;
+            toast(`Already in "${plName}" - press again to remove`);
+            State.pendingRemoveTimeout = setTimeout(() => { State.pendingRemove = false; }, 3000);
+            return;
+        }
+
+        const wasRejected = isRejected(videoId);
+        const ok = await addToPlaylist(videoId, playlistId);
+        updateNativePlaylistButtons(true);
+        if (wasRejected) scheduleBadges();
+        if (!ok) { toast('Add failed'); return; }
+        toast('✓ ' + plName + (wasRejected ? ' (removed from reject list)' : ''), 'green');
+    }
+
+    // false = the binding declined the key; decided synchronously, as it settles whether the site's handler runs.
+    function runBinding(binding) {
+        if (!binding) return false;
+        if (binding.action === 'playlist') {
+            handlePlaylistHotkey(binding.playlistId).catch(() => {});
+            return true;
+        }
+        if (binding.action?.startsWith('builtin:')) {
+            const fn = BUILTIN_ACTIONS[binding.action.slice(8)];
+            if (!fn) return false;
+            const result = fn.run();
+            if (result === false) return false;
+            if (result && typeof result.catch === 'function') result.catch(() => {});
+            return true;
+        }
+        return false;
+    }
+
+    // Bound keys are exclusive: capture phase on window + stopImmediatePropagation hides them from the site
+    // (F, space, J, arrows, 0-9, N). Ctrl/Alt/Cmd chords are never hotkeys; run() returning false declines.
+    window.addEventListener('keydown', e => {
+        if (e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
+        if (dispatchingSyntheticNext) return;
+        // The hotkey editor takes letters itself (pressing a key selects it).
+        if (document.getElementById('pmv-keyeditor')) return;
+        // The fullscreen-resume prompt after a fresh page load takes the next key itself.
+        if (document.getElementById('pmvx-fs-resume')) return;
+        const tag = e.target?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+        const binding = keybindings[e.key.toLowerCase()];
+        if (!binding) return;
+        if (runBinding(binding) === false) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+    }, true);
+
+    // --- Player keys ---
+    // The site binds its player keys (F, space, J, arrows, 0-9) in onMounted; after a router.push hop they can
+    // stop working, so they are reimplemented on the <video> (bubble phase; stand down on preventDefault).
+    // Volume keys omitted: the HUD holds volume at 100%.
+    function playerFullscreenTarget() {
+        const video = getVideo();
+        if (!video) return null;
+        // Fullscreen the site's wrapper (.hls-player-wrapper), not the <video>, so its fullscreenchange bookkeeping and controls hold.
+        return video.closest('.hls-player-wrapper')
+            || video.closest('[class*="player"], [class*="video-container"]')
+            || video.parentElement || video;
+    }
+
+    function toggleVideoFullscreen() {
+        if (document.fullscreenElement) {
+            try { document.exitFullscreen(); } catch {}
+            return;
+        }
+        const target = playerFullscreenTarget();
+        try { target?.requestFullscreen?.().catch(() => {}); } catch {}
+    }
+
+    function seekVideoBy(seconds) {
+        const video = getVideo();
+        if (!video) return;
+        const end = Number.isFinite(video.duration) ? video.duration : null;
+        const next = video.currentTime + seconds;
+        video.currentTime = Math.max(0, end === null ? next : Math.min(end, next));
+    }
+
+    // key -> built-in action; mirrors the site's bindings.
+    const PLAYER_KEY_DEFAULTS = {
+        ' ': 'playPause',
+        k: 'playPause',
+        f: 'fullscreen',
+        j: 'skipBack10',
+        arrowleft: 'seekBack5',
+        a: 'seekBack5',
+        arrowright: 'seekForward5',
+        d: 'seekForward5',
+    };
+
+    function playerKeyRows() {
+        const shown = key => key === ' ' ? 'Space'
+            : key === 'arrowleft' ? '←'
+            : key === 'arrowright' ? '→'
+            : key.toUpperCase();
+        const byAction = new Map();
+        Object.entries(PLAYER_KEY_DEFAULTS).forEach(([key, action]) => {
+            if (!byAction.has(action)) byAction.set(action, []);
+            byAction.get(action).push(shown(key));
+        });
+        const rows = [...byAction.entries()]
+            .map(([action, keys]) => [keys.join(' / '), BUILTIN_ACTIONS[action]?.label || action]);
+        rows.push(['0 - 9', 'Seek to 0-90%']);
+        return rows;
+    }
+
+    // If the site's own switch disables its shortcuts, these stand down too.
+    function siteShortcutsDisabled() {
+        try {
+            return JSON.parse(localStorage.getItem(SITE_PREFS_KEY) || 'null')?.disableKeyboardShortcuts === true;
+        } catch { return false; }
+    }
+
+    function playerKeysApply(e) {
+        if (e.ctrlKey || e.altKey || e.metaKey) return false;
+        if (document.getElementById('pmv-keyeditor')) return false;
+        const tag = e.target?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return false;
+        if (keybindings[e.key.toLowerCase()]) return false;   // a custom binding wins
+        // Only where the page has a player; card hover previews are <video> too.
+        if (!/^\/(video|playlists)\//.test(location.pathname)) return false;
+        if (siteShortcutsDisabled()) return false;
+        return !!getVideo();
+    }
+
+    // Fullscreen is taken in the capture phase: the site's F can fail after an in-page hop (a stale handler
+    // calls preventDefault on a detached wrapper). stopImmediatePropagation avoids two racing handlers.
+    document.addEventListener('keydown', e => {
+        if (e.key.toLowerCase() !== 'f' || !playerKeysApply(e)) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        toggleVideoFullscreen();
+    }, true);
+
+    // Other keys only act if nothing else did: a safety net for when the site's handler is gone.
+    window.addEventListener('keydown', e => {
+        if (e.defaultPrevented) return;
+        const key = e.key.toLowerCase();
+        if (key === 'f') return;             // owned above
+        if (!playerKeysApply(e)) return;
+        const video = getVideo();
+
+        if (/^[0-9]$/.test(key)) {
+            if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+            e.preventDefault();
+            video.currentTime = video.duration * (Number(key) / 10);
+            return;
+        }
+
+        const action = BUILTIN_ACTIONS[PLAYER_KEY_DEFAULTS[key]];
+        if (!action) return;
+        // Synchronous: a fullscreen request after an await loses user activation.
+        e.preventDefault();
+        try { action.run(); } catch {}
+    });
+
+    // Binding description shared by the cheat sheet and keyboard editor.
+    function describeBinding(binding) {
+        if (!binding) return null;
+        if (binding.action === 'playlist') {
+            const name = getPlaylistDisplayName(State.playlists.get(binding.playlistId)?.name) || binding.playlistId;
+            return isRejectList(binding.playlistId)
+                ? `"${name}" reject (out of every other playlist, next video)`
+                : `"${name}" toggle (press again within 3 s to remove)`;
+        }
+        if (binding.action?.startsWith('builtin:')) {
+            return BUILTIN_ACTIONS[binding.action.slice(8)]?.label || null;
+        }
+        return null;
+    }
+
+    // --- Hotkey cheat sheet ---
+    // Built from `keybindings`, so it stays correct after remaps.
+    function toggleHotkeyCheatSheet() {
+        const existing = document.getElementById('pmv-hotkeys');
+        if (existing) { existing.remove(); return; }
+
+        const rows = Object.entries(keybindings)
+            .map(([key, binding]) => ({ key, desc: describeBinding(binding) }))
+            .filter(r => r.desc)
+            .sort((a, b) => a.key.localeCompare(b.key))
+            .map(r => `<tr><td style="color:rgb(100,255,0);padding-right:16px;">${r.key.toUpperCase()}</td><td>${r.desc}</td></tr>`)
+            .join('');
+
+        const box = document.createElement('div');
+        box.id = 'pmv-hotkeys';
+        box.style.cssText = `
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(20,20,20,0.97); border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 12px; padding: 18px 22px; z-index: 999999;
+            color: rgba(255,255,255,0.85); font-size: 13px;
+            font-family:inherit;font-variant-numeric:tabular-nums; line-height: 1.9;
+            min-width: 340px; backdrop-filter: blur(10px);
+        `;
+        box.innerHTML = `
+            <div style="font-size:14px;font-weight:700;margin-bottom:10px;color:white;">⌨ Hotkeys</div>
+            <table style="border-collapse:collapse;width:100%;">
+                ${rows}
+                <tr><td colspan="2" style="color:rgba(255,255,255,0.4);padding-top:8px;">Player (only when the site leaves the key alone):</td></tr>
+                ${playerKeyRows().map(([keys, label]) => `<tr><td style="color:rgb(100,255,0);padding-right:16px;">${escHtml(keys)}</td><td>${escHtml(label)}</td></tr>`).join('')}
+                <tr><td colspan="2" style="color:rgba(255,255,255,0.4);padding-top:8px;">In the playlist filter box (playlist pages):</td></tr>
+                <tr><td style="color:rgb(100,255,0);">Enter</td><td>Apply filter</td></tr>
+                <tr><td style="color:rgb(100,255,0);">Escape</td><td>Clear filter</td></tr>
+                <tr><td colspan="2" style="color:rgba(255,255,255,0.4);padding-top:8px;">Anywhere:</td></tr>
+                <tr><td style="color:rgb(100,255,0);">Ctrl/Cmd+K</td><td>Search (videos, playlists) + open Up next</td></tr>
+            </table>
+            <div style="margin-top:14px;font-size:11px;color:rgba(255,255,255,0.3);">
+                Bind hotkeys to your own key/playlist: the site's full Settings page (/settings) → PMVH Extended → Assign hotkeys.<br>
+                Press ? again, or click outside this window, to close.
+            </div>
+        `;
+        document.body.appendChild(box);
+        setTimeout(() => document.addEventListener('click', function close(e) {
+            if (!box.contains(e.target)) { box.remove(); document.removeEventListener('click', close); }
+        }), 0);
+    }
+
+    // Only the bottom strip opens the HUD on mousemove (the right edge is the queue sidebar's); "i" works anywhere.
+    const HUD_BOTTOM_ZONE_PX = 300;
+
+    document.addEventListener('mousemove', e => {
+        if (!document.fullscreenElement || State.quietMode) return;
+        // Not over the open queue sidebar (380px wide, much larger than its 24px trigger strip).
+        if (State.queueSidebarVisible && State.queueOverlayEl?.matches(':hover')) return;
+        // Over a seek bar (the site's or the HUD's strip) the Seekbar-preview wins; the panel closes there.
+        const target = e.target instanceof Element ? e.target : null;
+        if (target && (target.closest(SCRUB_BAR_SELECTOR) || target.closest('#pmv-scrub-zone'))) {
+            if (State.hud) closeHud();
+            return;
+        }
+        const inBottomZone = e.clientY > window.innerHeight - HUD_BOTTOM_ZONE_PX;
+        const inQueueEdgeZone = isPlaylistPage() && e.clientX > window.innerWidth - QUEUE_EDGE_ZONE_PX;
+        if (!inBottomZone || inQueueEdgeZone) return;
+        if (State.hud) { if (!State.hud.matches(':hover')) startHudTimer(1400); return; }
+        if (!State.quietMode) showHud();
+    });
+
+    // --- Reject ---
     function skipToNextVideo(currentId) {
         if (isPlaylistPage()) {
             dispatchingSyntheticNext = true;
@@ -13264,30 +13591,18 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return true;
     }
 
-    // Tag-popup after ✕: tag the rejected video, with the calls of the site's Vote on Tags modal:
-    //   GET  /api/videos/<id>/tags/stats    -> data.tags [{ tag, userVote }]
-    //   POST /api/videos/<id>/tags/suggest  { tag, tagType: 'general' }                      new tag, +1 vote
-    //   POST /api/videos/<id>/tags/vote     { tag, voteType: 'upvote', tagType: 'general' }  existing tag
-    // Voting again on an upvoted tag removes the vote, so that case is skipped.
-    const TAG_AFTER_REJECT_KEY = 'pmv_tag_after_reject_v1';
-    const TAG_RECENT_KEY = 'pmv_tag_recent_v1';
-    const TAG_MAX_LEN = 50; // the site's limit for general tags
-    const TAG_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"></path><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"></circle></svg>';
     function tagAfterReject() { try { return localStorage.getItem(TAG_AFTER_REJECT_KEY) !== '0'; } catch { return true; } }
+
     function setTagAfterReject(on) { try { localStorage.setItem(TAG_AFTER_REJECT_KEY, on ? '1' : '0'); } catch {} }
-    const STAR_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/></svg>';
-    // Tags and stars/models share the endpoints, told apart by tagType; site length limits 50 and 100.
-    const TAG_KINDS = {
-        general: { recentKey: TAG_RECENT_KEY, max: TAG_MAX_LEN, stats: 'tags', meta: 'tags', noun: 'tag', icon: TAG_SVG, pre: '#' },
-        stars: { recentKey: 'pmv_star_recent_v1', max: 100, stats: 'stars', meta: 'starsTags', noun: 'model', icon: STAR_SVG, pre: '' },
-    };
-    const tagKind = k => TAG_KINDS[k] || TAG_KINDS.general;
+
+    // --- Tag popup (quick tag manager) ---
     function recentTags(kind = 'general') {
         try {
             const a = JSON.parse(localStorage.getItem(tagKind(kind).recentKey) || '[]');
             return Array.isArray(a) ? a.filter(t => typeof t === 'string' && t).slice(0, 8) : [];
         } catch { return []; }
     }
+
     function rememberTag(tag, kind = 'general') {
         try {
             const a = [tag, ...recentTags(kind).filter(t => t.toLowerCase() !== tag.toLowerCase())].slice(0, 8);
@@ -13295,8 +13610,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         } catch {}
     }
 
-    // The site's vocabulary per kind for autocomplete, loaded once.
-    const popularTagsP = {};
     function popularTags(kind = 'general') {
         const type = kind === 'stars' ? 'stars' : 'general';
         if (!popularTagsP[type]) {
@@ -13611,265 +13924,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         popularTags(kind).then(v => { vocab = v || []; if (pop.isConnected && input.value) paintSug(); });
         return pop;
     }
-
-    // Toggle a mapped playlist (press again within 3 s to confirm removal); the reject list uses rejectCurrentVideo.
-    async function handlePlaylistHotkey(playlistId) {
-        if (isRejectList(playlistId)) return rejectCurrentVideo();
-        const videoId = getCurrentVideoId();
-        if (!videoId) { toast('No video'); return; }
-        const plName = getPlaylistDisplayName(State.playlists.get(playlistId)?.name) || playlistId;
-        const isMember = getMatches(videoId).some(p => p.id === playlistId);
-
-        if (isMember) {
-            if (State.pendingRemove && State.pendingRemoveVideoId === videoId && State.pendingRemovePlaylistId === playlistId) {
-                State.pendingRemove = false;
-                clearTimeout(State.pendingRemoveTimeout);
-                const ok = await removeFromPlaylist(videoId, playlistId);
-                updateNativePlaylistButtons();
-                toast(ok ? '✕ ' + plName : 'Remove failed', ok ? 'red' : null);
-                return;
-            }
-            State.pendingRemove = true;
-            State.pendingRemoveVideoId = videoId;
-            State.pendingRemovePlaylistId = playlistId;
-            toast(`Already in "${plName}" - press again to remove`);
-            State.pendingRemoveTimeout = setTimeout(() => { State.pendingRemove = false; }, 3000);
-            return;
-        }
-
-        const wasRejected = isRejected(videoId);
-        const ok = await addToPlaylist(videoId, playlistId);
-        updateNativePlaylistButtons(true);
-        if (wasRejected) scheduleBadges();
-        if (!ok) { toast('Add failed'); return; }
-        toast('✓ ' + plName + (wasRejected ? ' (removed from reject list)' : ''), 'green');
-    }
-
-    // false = the binding declined the key; decided synchronously, as it settles whether the site's handler runs.
-    function runBinding(binding) {
-        if (!binding) return false;
-        if (binding.action === 'playlist') {
-            handlePlaylistHotkey(binding.playlistId).catch(() => {});
-            return true;
-        }
-        if (binding.action?.startsWith('builtin:')) {
-            const fn = BUILTIN_ACTIONS[binding.action.slice(8)];
-            if (!fn) return false;
-            const result = fn.run();
-            if (result === false) return false;
-            if (result && typeof result.catch === 'function') result.catch(() => {});
-            return true;
-        }
-        return false;
-    }
-
-    // Bound keys are exclusive: capture phase on window + stopImmediatePropagation hides them from the site
-    // (F, space, J, arrows, 0-9, N). Ctrl/Alt/Cmd chords are never hotkeys; run() returning false declines.
-    window.addEventListener('keydown', e => {
-        if (e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
-        if (dispatchingSyntheticNext) return;
-        // The hotkey editor takes letters itself (pressing a key selects it).
-        if (document.getElementById('pmv-keyeditor')) return;
-        // The fullscreen-resume prompt after a fresh page load takes the next key itself.
-        if (document.getElementById('pmvx-fs-resume')) return;
-        const tag = e.target?.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
-        const binding = keybindings[e.key.toLowerCase()];
-        if (!binding) return;
-        if (runBinding(binding) === false) return;
-        e.preventDefault();
-        e.stopImmediatePropagation();
-    }, true);
-
-    // --- Player keys ---
-    // The site binds its player keys (F, space, J, arrows, 0-9) in onMounted; after a router.push hop they can
-    // stop working, so they are reimplemented on the <video> (bubble phase; stand down on preventDefault).
-    // Volume keys omitted: the HUD holds volume at 100%.
-    function playerFullscreenTarget() {
-        const video = getVideo();
-        if (!video) return null;
-        // Fullscreen the site's wrapper (.hls-player-wrapper), not the <video>, so its fullscreenchange bookkeeping and controls hold.
-        return video.closest('.hls-player-wrapper')
-            || video.closest('[class*="player"], [class*="video-container"]')
-            || video.parentElement || video;
-    }
-
-    function toggleVideoFullscreen() {
-        if (document.fullscreenElement) {
-            try { document.exitFullscreen(); } catch {}
-            return;
-        }
-        const target = playerFullscreenTarget();
-        try { target?.requestFullscreen?.().catch(() => {}); } catch {}
-    }
-
-    function seekVideoBy(seconds) {
-        const video = getVideo();
-        if (!video) return;
-        const end = Number.isFinite(video.duration) ? video.duration : null;
-        const next = video.currentTime + seconds;
-        video.currentTime = Math.max(0, end === null ? next : Math.min(end, next));
-    }
-
-    // key -> built-in action; mirrors the site's bindings.
-    const PLAYER_KEY_DEFAULTS = {
-        ' ': 'playPause',
-        k: 'playPause',
-        f: 'fullscreen',
-        j: 'skipBack10',
-        arrowleft: 'seekBack5',
-        a: 'seekBack5',
-        arrowright: 'seekForward5',
-        d: 'seekForward5',
-    };
-
-    function playerKeyRows() {
-        const shown = key => key === ' ' ? 'Space'
-            : key === 'arrowleft' ? '←'
-            : key === 'arrowright' ? '→'
-            : key.toUpperCase();
-        const byAction = new Map();
-        Object.entries(PLAYER_KEY_DEFAULTS).forEach(([key, action]) => {
-            if (!byAction.has(action)) byAction.set(action, []);
-            byAction.get(action).push(shown(key));
-        });
-        const rows = [...byAction.entries()]
-            .map(([action, keys]) => [keys.join(' / '), BUILTIN_ACTIONS[action]?.label || action]);
-        rows.push(['0 - 9', 'Seek to 0-90%']);
-        return rows;
-    }
-
-    // If the site's own switch disables its shortcuts, these stand down too.
-    function siteShortcutsDisabled() {
-        try {
-            return JSON.parse(localStorage.getItem(SITE_PREFS_KEY) || 'null')?.disableKeyboardShortcuts === true;
-        } catch { return false; }
-    }
-
-    function playerKeysApply(e) {
-        if (e.ctrlKey || e.altKey || e.metaKey) return false;
-        if (document.getElementById('pmv-keyeditor')) return false;
-        const tag = e.target?.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return false;
-        if (keybindings[e.key.toLowerCase()]) return false;   // a custom binding wins
-        // Only where the page has a player; card hover previews are <video> too.
-        if (!/^\/(video|playlists)\//.test(location.pathname)) return false;
-        if (siteShortcutsDisabled()) return false;
-        return !!getVideo();
-    }
-
-    // Fullscreen is taken in the capture phase: the site's F can fail after an in-page hop (a stale handler
-    // calls preventDefault on a detached wrapper). stopImmediatePropagation avoids two racing handlers.
-    document.addEventListener('keydown', e => {
-        if (e.key.toLowerCase() !== 'f' || !playerKeysApply(e)) return;
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        toggleVideoFullscreen();
-    }, true);
-
-    // Other keys only act if nothing else did: a safety net for when the site's handler is gone.
-    window.addEventListener('keydown', e => {
-        if (e.defaultPrevented) return;
-        const key = e.key.toLowerCase();
-        if (key === 'f') return;             // owned above
-        if (!playerKeysApply(e)) return;
-        const video = getVideo();
-
-        if (/^[0-9]$/.test(key)) {
-            if (!Number.isFinite(video.duration) || video.duration <= 0) return;
-            e.preventDefault();
-            video.currentTime = video.duration * (Number(key) / 10);
-            return;
-        }
-
-        const action = BUILTIN_ACTIONS[PLAYER_KEY_DEFAULTS[key]];
-        if (!action) return;
-        // Synchronous: a fullscreen request after an await loses user activation.
-        e.preventDefault();
-        try { action.run(); } catch {}
-    });
-
-    // Binding description shared by the cheat sheet and keyboard editor.
-    function describeBinding(binding) {
-        if (!binding) return null;
-        if (binding.action === 'playlist') {
-            const name = getPlaylistDisplayName(State.playlists.get(binding.playlistId)?.name) || binding.playlistId;
-            return isRejectList(binding.playlistId)
-                ? `"${name}" reject (out of every other playlist, next video)`
-                : `"${name}" toggle (press again within 3 s to remove)`;
-        }
-        if (binding.action?.startsWith('builtin:')) {
-            return BUILTIN_ACTIONS[binding.action.slice(8)]?.label || null;
-        }
-        return null;
-    }
-
-    // --- Hotkey cheat sheet ---
-    // Built from `keybindings`, so it stays correct after remaps.
-    function toggleHotkeyCheatSheet() {
-        const existing = document.getElementById('pmv-hotkeys');
-        if (existing) { existing.remove(); return; }
-
-        const rows = Object.entries(keybindings)
-            .map(([key, binding]) => ({ key, desc: describeBinding(binding) }))
-            .filter(r => r.desc)
-            .sort((a, b) => a.key.localeCompare(b.key))
-            .map(r => `<tr><td style="color:rgb(100,255,0);padding-right:16px;">${r.key.toUpperCase()}</td><td>${r.desc}</td></tr>`)
-            .join('');
-
-        const box = document.createElement('div');
-        box.id = 'pmv-hotkeys';
-        box.style.cssText = `
-            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            background: rgba(20,20,20,0.97); border: 1px solid rgba(255,255,255,0.15);
-            border-radius: 12px; padding: 18px 22px; z-index: 999999;
-            color: rgba(255,255,255,0.85); font-size: 13px;
-            font-family:inherit;font-variant-numeric:tabular-nums; line-height: 1.9;
-            min-width: 340px; backdrop-filter: blur(10px);
-        `;
-        box.innerHTML = `
-            <div style="font-size:14px;font-weight:700;margin-bottom:10px;color:white;">⌨ Hotkeys</div>
-            <table style="border-collapse:collapse;width:100%;">
-                ${rows}
-                <tr><td colspan="2" style="color:rgba(255,255,255,0.4);padding-top:8px;">Player (only when the site leaves the key alone):</td></tr>
-                ${playerKeyRows().map(([keys, label]) => `<tr><td style="color:rgb(100,255,0);padding-right:16px;">${escHtml(keys)}</td><td>${escHtml(label)}</td></tr>`).join('')}
-                <tr><td colspan="2" style="color:rgba(255,255,255,0.4);padding-top:8px;">In the playlist filter box (playlist pages):</td></tr>
-                <tr><td style="color:rgb(100,255,0);">Enter</td><td>Apply filter</td></tr>
-                <tr><td style="color:rgb(100,255,0);">Escape</td><td>Clear filter</td></tr>
-                <tr><td colspan="2" style="color:rgba(255,255,255,0.4);padding-top:8px;">Anywhere:</td></tr>
-                <tr><td style="color:rgb(100,255,0);">Ctrl/Cmd+K</td><td>Search (videos, playlists) + open Up next</td></tr>
-            </table>
-            <div style="margin-top:14px;font-size:11px;color:rgba(255,255,255,0.3);">
-                Bind hotkeys to your own key/playlist: the site's full Settings page (/settings) → PMVH Extended → Assign hotkeys.<br>
-                Press ? again, or click outside this window, to close.
-            </div>
-        `;
-        document.body.appendChild(box);
-        setTimeout(() => document.addEventListener('click', function close(e) {
-            if (!box.contains(e.target)) { box.remove(); document.removeEventListener('click', close); }
-        }), 0);
-    }
-
-    // Only the bottom strip opens the HUD on mousemove (the right edge is the queue sidebar's); "i" works anywhere.
-    const HUD_BOTTOM_ZONE_PX = 300;
-
-    document.addEventListener('mousemove', e => {
-        if (!document.fullscreenElement || State.quietMode) return;
-        // Not over the open queue sidebar (380px wide, much larger than its 24px trigger strip).
-        if (State.queueSidebarVisible && State.queueOverlayEl?.matches(':hover')) return;
-        // Over a seek bar (the site's or the HUD's strip) the Seekbar-preview wins; the panel closes there.
-        const target = e.target instanceof Element ? e.target : null;
-        if (target && (target.closest(SCRUB_BAR_SELECTOR) || target.closest('#pmv-scrub-zone'))) {
-            if (State.hud) closeHud();
-            return;
-        }
-        const inBottomZone = e.clientY > window.innerHeight - HUD_BOTTOM_ZONE_PX;
-        const inQueueEdgeZone = isPlaylistPage() && e.clientX > window.innerWidth - QUEUE_EDGE_ZONE_PX;
-        if (!inBottomZone || inQueueEdgeZone) return;
-        if (State.hud) { if (!State.hud.matches(':hover')) startHudTimer(1400); return; }
-        if (!State.quietMode) showHud();
-    });
-
     // --- Init ---
 
     function init() {
@@ -13907,7 +13961,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
             }).catch(e => {
             });
         }
-
 
 
     }
@@ -14491,9 +14544,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         lastApiPage  = 1;
         setTimeout(injectButtons, 800);
     }
-    const _push = history.pushState.bind(history);
-    history.pushState = function (...a) { _push(...a); setTimeout(onNav, 0); };
-    window.addEventListener('popstate', onNav);
+    PMVX.onRoute(onNav);
 
     let retryTimer = null, retryCount = 0;
     function scheduleRetry() {
@@ -15270,7 +15321,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     // Vue may re-render the header: re-find the box and catch a missed open/close.
     findContainer();
     syncOpen();
-    setInterval(() => { findContainer(); syncOpen(); }, 1000);
+    setInterval(() => { if (!document.hidden) { findContainer(); syncOpen(); } }, 1000);
     document.addEventListener('click', e => { if (e.target?.closest?.('.search-trigger')) setTimeout(() => { findContainer(); syncOpen(); }, 0); }, true);
 })();
 
@@ -15510,7 +15561,9 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     // --- Menu ---
     let pop = null, anchor = null, cur = null, el = {};
 
+    let openWatch = null;
     function close() {
+        clearInterval(openWatch); openWatch = null;
         if (!pop) return;
         pop.remove(); pop = null; anchor = null; el = {};
         if (cur) cur.seq++;
@@ -15564,6 +15617,8 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         cur = { kind, item, href: item.href || a.getAttribute('href'), musicMode: item.song ? 'song' : 'artist', src: null, page: 0, total: null, star: null,
                 seen: new Set(), shown: 0, seq: 0, loading: false, more: true, error: false };
         pop = mk('div'); pop.id = 'pmvst'; pop.dataset.kind = kind;
+        // While open: close when its chip is gone, keep the filter state current.
+        openWatch = setInterval(() => { if (anchor && !anchor.isConnected) close(); else if (pop) renderFilter(); }, 500);
         pop.setAttribute('data-pmvx-tag-menu', '1');
 
         const head = mk('div', 'pmvst-head');
@@ -15763,6 +15818,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     }
 
     // --- Wiring ---
+    let lastToggle = { el: null, at: 0 };
     window.addEventListener('click', e => {
         if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
         if (e.target?.closest?.('#pmvst')) return;
@@ -15771,6 +15827,11 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         // Also keeps the card's link from navigating.
         e.preventDefault();
         e.stopImmediatePropagation();
+        // After client-side navigation the site re-dispatches a click on the same chip within the same tick:
+        // count one toggle per chip per 300 ms, or the second click closes the menu right away.
+        const now = performance.now();
+        if (c.el === lastToggle.el && now - lastToggle.at < 300) { e.preventDefault(); e.stopImmediatePropagation(); return; }
+        lastToggle = { el: c.el, at: now };
         if (pop && anchor === c.el) { close(); return; }
         open(c.el, c.kind, c.item);
     }, true);
@@ -15785,13 +15846,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     window.addEventListener('scroll', e => { if (pop && !pop.contains(e.target)) place(); }, { passive: true, capture: true });
     // Filter changes elsewhere (panel, other tab) show in the open menu.
     window.addEventListener('storage', () => renderFilter());
-    // Close on navigation, or when its chip is gone.
-    let lastPath = location.pathname;
-    setInterval(() => {
-        if (location.pathname !== lastPath) { lastPath = location.pathname; close(); }
-        else if (pop && anchor && !anchor.isConnected) close();
-        else if (pop) renderFilter();
-    }, 500);
+    PMVX.onRoute((path, prev) => { if (path !== prev) close(); });
 })();
 
 });
