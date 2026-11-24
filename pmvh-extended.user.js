@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PMVH Extended for PMVHaven
 // @namespace    https://github.com/shooptydoopty-glitch/pmvh-extended
-// @version      1.2.73
+// @version      1.2.87
 // @description  Playlist tools for PMVHaven: playlist buttons and badges everywhere, a fullscreen HUD, an Up next queue, filters for videos and playlists, remappable hotkeys, a command palette and a seekbar preview.
 // @author       shooptydoopty-glitch
 // @license      MIT
@@ -18,15 +18,11 @@
 (function () {
 'use strict';
 
-// ---------------------------------------------------------------------
-// Core
-// ---------------------------------------------------------------------
-// Shared namespace for the modules below (cache state, watch history,
-// cross-module hooks). Kept off `window` on purpose.
+// --- Core ---
+// Shared namespace for cross-module state and hooks; kept off `window` on purpose.
 const PMVX = {};
 
-// The script runs at document-start so the fetch interceptors see the
-// site's first API calls; modules that touch the DOM wait for <body>.
+// Runs at document-start so the fetch interceptors see the first API calls; DOM code waits for <body>.
 function whenBody(fn) {
     if (document.body) { fn(); return; }
     const root = document.documentElement;
@@ -39,10 +35,8 @@ function whenBody(fn) {
     mo.observe(root, { childList: true });
 }
 
-// ---------------------------------------------------------------------
-// Performance mode (Settings): how often pages are rescanned, visual
-// effects, and how many background requests run at once.
-// ---------------------------------------------------------------------
+// --- Performance mode (Settings): how often pages are rescanned, visual ---
+// effects and concurrent background requests.
 const PERF_KEY = 'pmv_perf_v1';
 const PERF_MODES = {
     smooth:   { scanMs: 0,   effects: true,  lookups: 3 },
@@ -59,8 +53,7 @@ PMVX.setPerfMode = mode => {
     applyEffectsMode();
 };
 
-// Without effects: no backdrop blur, transitions or animations in the
-// script's UI, and none of the site's own blur and pulsing badges either.
+// No effects: no blur, transitions or animations in our UI, nor the site's blur and pulsing badges.
 function applyEffectsMode() {
     const id = 'pmvx-reduced-effects';
     const existing = document.getElementById(id);
@@ -81,9 +74,8 @@ function applyEffectsMode() {
 }
 applyEffectsMode();
 
-// Videos the user just acted on (saved, removed, rejected). Filters keep showing them until the
-// filter is applied again or the page changes, so an action never makes a card vanish under the
-// cursor. Each filter module calls clearActed() when the user re-applies it.
+// Acted-on videos stay visible until a filter is re-applied (clearActed) or the page changes,
+// so a card never vanishes under the cursor.
 let actedPath = location.pathname;
 PMVX.acted = new Set();
 function actedFresh() {
@@ -93,8 +85,7 @@ PMVX.markActed = id => { if (!id) return; actedFresh(); PMVX.acted.add(id); };
 PMVX.isActed = id => { actedFresh(); return !!id && PMVX.acted.has(id); };
 PMVX.clearActed = () => PMVX.acted.clear();
 
-// Filter terms: "=term" matches only as a whole word ("=ch" hits "ch" and "big ch", not
-// "challenge"); any other term matches anywhere in the text. Texts and terms are lower case.
+// "=term" matches a whole word only ("=ch" not "challenge"); other terms match anywhere. Lower case.
 const termWordRes = new Map();
 PMVX.termMatch = (hay, term) => {
     if (!hay || !term) return false;
@@ -110,15 +101,12 @@ PMVX.termMatch = (hay, term) => {
     }
     return hay.includes(term);
 };
-// Smart quotes from macOS / iOS keyboards count as plain quotes.
 PMVX.plainQuotes = s => String(s ?? '').replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"').replace(/[\u2018\u2019\u201A\u201B]/g, "'");
 PMVX.termLabel = term => (term && term.length > 1 && term[0] === '=') ? term.slice(1) : term;
 PMVX.isWordTerm = term => !!term && term.length > 1 && term[0] === '=';
 
-// Card filters register a check here; true while any of them can hide cards on this page.
-// Where an in/not-in-playlist filter would hide (nearly) everything: a playlist's own page and
-// the favourites views (profile Favorites tab, the homepage Favorites pill or content chip).
-// Checked per card, so the DOM lookup is cached for 250 ms.
+// Playlist pages and favourites views, where in/not-in-playlist filters would hide nearly everything.
+// Called per card, so cached for 250 ms.
 let pfxAt = 0, pfxVal = false;
 PMVX.playlistFilterExempt = () => {
     const now = performance.now();
@@ -137,12 +125,10 @@ PMVX.playlistFilterExempt = () => {
     pfxVal = v;
     return v;
 };
-// The playlist whose page this is (its own videos are always "in" it), or null.
 PMVX.currentPlaylistPageId = () => location.pathname.match(/^\/playlists\/([a-f0-9]{24})/i)?.[1] || null;
 
 PMVX.apiTaps = [];
-// Content flags [API key, label]: the site's own moderation list first (Nudity = hasExplicitContent),
-// then three that only some lists carry. Order matters: the flag cache stores them as bits.
+// [API key, label]. Order matters: the flag cache stores them as bits.
 PMVX.contentFlags = [
     ['hasExplicitContent', 'Nudity'], ['hasGayContent', 'Gay'], ['hasTransContent', 'Trans'],
     ['hasExtremeContent', 'Extreme'], ['hasVoiceOver', 'Voice-over'], ['isRemix', 'Remix'],
@@ -152,7 +138,7 @@ PMVX.contentFlags = [
 PMVX.filterChecks = [];
 PMVX.anyCardFilterActive = () => PMVX.filterChecks.some(fn => { try { return !!fn(); } catch { return false; } });
 
-// Coalesces calls into one run per frame, spaced at least `scanMs` apart.
+// One run per frame, at least `scanMs` apart.
 PMVX.scheduler = fn => {
     let pending = false, last = 0;
     return () => {
@@ -169,26 +155,23 @@ PMVX.scheduler = fn => {
 (function () {
     'use strict';
 
-    // ---------------------------------------------------------------------
-    // State
-    // ---------------------------------------------------------------------
+    // --- State ---
 
     const NF = {
         input: null, // native Vue filter input
-        ownInput: null, // own input bar
+        ownInput: null,
         pollTimer: null,
         lastOwnValue: '',
         lastNativeValue: '',
         vuePatchApplied: false,
-        defaultTerms: '', // always applied (see DEFAULT_TERMS_KEY)
+        defaultTerms: '',
     };
 
-    // Button state of the filter panel.
     const BTN = {
         playlistMode: 'all',   // 'all' | 'in' | 'out'
         selectedPlaylistIds: [], // counted by playlistMode; empty = any playlist
         savedSearch: null, // { excludeTags, minRating, aspectFilter }
-        savedSearches: null, // cached server list
+        savedSearches: null,
         savedSearchName: '',
         ratingMin: 0, // independent of savedSearch.minRating
         ratingMax: 100,
@@ -197,8 +180,7 @@ PMVX.scheduler = fn => {
         flags: {}, // content flag key -> 'out' (hide) | 'in' (only these)
     };
 
-    // Staged values: panel controls only change these; onOwnInput() (Enter / Filter button)
-    // commits them to BTN.*.
+    // Staged values; onOwnInput() (Enter / Filter button) commits them to BTN.*.
     let pendingPlaylistMode = BTN.playlistMode;
     let pendingSelectedPlaylistIds = BTN.selectedPlaylistIds.slice();
     let pendingSavedSearch = BTN.savedSearch;
@@ -208,9 +190,7 @@ PMVX.scheduler = fn => {
     let pendingDurationMin = BTN.durationMin;
     let pendingDurationMax = BTN.durationMax;
     let pendingFlags = { ...BTN.flags };
-    // Default terms are staged the same way and committed in onOwnInput().
     let pendingDefaultTerms = '';
-    // Assigned in buildOwnInput(); declared here so onOwnInput() can call them.
     let updatePlBtn = () => {};
     let updateSsBtn = () => {};
     let updateRatBtn = () => {};
@@ -219,18 +199,13 @@ PMVX.scheduler = fn => {
     let updateDefaultsBtn = () => {};
 
 
-    // ---------------------------------------------------------------------
-    // Persisted filter settings
-    // ---------------------------------------------------------------------
-    // Button filters and typed text are stored in localStorage; only serializable fields are written.
+    // --- Persisted filter settings ---
     const SETTINGS_KEY = 'pmvnf_filter_settings_v1';
-    // Shared by all text filters (rows, Up next, /playlists): when on, terms also match
-    // the description. Default on.
+    // Shared by all text filters: terms also match the description. Default on.
     const DESC_KEY = 'pmvnf_match_desc_v1';
     function matchDescEnabled() { try { return localStorage.getItem(DESC_KEY) !== '0'; } catch { return true; } }
 
-    // Shared with the other modules (whichever loads first defines them): one JSON parse
-    // per response, and the URLs the core interceptor does not index.
+    // Shared with other modules: one JSON parse per response; URLs the core interceptor skips.
     const pmvResJson = PMVX.resJson || (PMVX.resJson = res => {
         if (!res.__pmvJson) {
             try { res.__pmvJson = res.clone().json(); }
@@ -284,7 +259,6 @@ PMVX.scheduler = fn => {
             if (typeof s.durationMax === 'number') BTN.durationMax = s.durationMax < 0 ? Infinity : s.durationMax;
             if (s.flags && typeof s.flags === 'object') BTN.flags = { ...s.flags };
         } catch {}
-        // Align pending values with the loaded state so the UI shows no unapplied changes.
         pendingPlaylistMode = BTN.playlistMode;
         pendingSelectedPlaylistIds = BTN.selectedPlaylistIds.slice();
         pendingSavedSearch = BTN.savedSearch;
@@ -298,7 +272,6 @@ PMVX.scheduler = fn => {
 
     loadSettings();
 
-    // Content flags (the same list as the site-wide filter; hud.js fills PMVX.contentFlags).
     const sameFlags = (a, b) => { const ka = Object.keys(a).filter(k => a[k]), kb = Object.keys(b).filter(k => b[k]); return ka.length === kb.length && ka.every(k => a[k] === b[k]); };
     const flagKeysActive = () => Object.keys(BTN.flags).filter(k => BTN.flags[k]);
     // True when a known flag rules the video out; an unknown flag never does.
@@ -313,10 +286,8 @@ PMVX.scheduler = fn => {
         return false;
     }
 
-    // ---------------------------------------------------------------------
-    // Default filter terms
-    // ---------------------------------------------------------------------
-    // Staged like the other controls; same syntax as the search bar, always prepended (see getEffectiveFilterValue).
+    // --- Default filter terms ---
+    // Same syntax as the search bar; always prepended to the typed text.
     const DEFAULT_TERMS_KEY = 'pmvnf_default_terms_v1';
 
     function loadDefaultTerms() {
@@ -333,14 +304,12 @@ PMVX.scheduler = fn => {
     loadDefaultTerms();
     pendingDefaultTerms = NF.defaultTerms;
 
-    // Merges default terms and typed text into one string for parseTokens().
-    // Never sent to Vue's own input.
+    // Input for parseTokens(). Never sent to Vue's own input.
     function getEffectiveFilterValue(ownValue) {
         return (NF.defaultTerms + ' ' + ownValue).trim();
     }
 
-    // In/out check: membership of the selected playlists, or of any playlist when none is selected.
-    // The playlist whose page this is does not count: every row is in it.
+    // In selected playlists (or any when none selected); this page's playlist never counts.
     function inSelectedPlaylists(memberOf) {
         const here = PMVX.currentPlaylistPageId();
         const ids = BTN.selectedPlaylistIds.filter(id => id !== here);
@@ -350,14 +319,11 @@ PMVX.scheduler = fn => {
         return false;
     }
 
-    // Saved state is only restored into the controls on load. Filtering starts once Enter or
-    // Filter is pressed in the current session (onOwnInput()), so remembered filters never auto-apply.
+    // Saved state only fills the controls; filtering starts after Enter/Filter in this session.
     let sessionFilterArmed = false;
 
-    // On/off switch: off shows every row but keeps all filter settings; sorting is unaffected.
-    // Persisted across reloads.
+    // Off shows every row but keeps the settings; applying turns it on, a stored "off" is dropped.
     const ENABLED_KEY = 'pmvnf_enabled_v1';
-    // There is no on/off switch any more (applying turns it on); an old "off" is not kept.
     NF.enabled = true;
     try { localStorage.removeItem(ENABLED_KEY); } catch {}
     function filterLive() { return sessionFilterArmed && NF.enabled; }
@@ -373,11 +339,8 @@ PMVX.scheduler = fn => {
         applyFilter(NF.lastOwnValue, /* force= */ true);
     }
 
-    // True if any filter (text, default terms, playlist, saved search, ranges) is active.
-    // Use this, not NF.lastOwnValue, for re-evaluation decisions, or button-only filters are missed.
+    // Gate re-evaluation on hasAnyActiveFilter(), not NF.lastOwnValue, or button-only filters are missed.
     PMVX.filterChecks.push(() => location.pathname.startsWith('/playlists/') && hasAnyActiveFilter());
-    // Queue rows on a playlist page: the site's [role="button"] rows. Anything in the sidebar, a nav or
-    // the script's own UI is not a row, so a stray role="button" elsewhere cannot hijack the filter.
     function queueRows() {
         return [...document.querySelectorAll('[role="button"]')].filter(r => !r.closest('aside, nav, [id^="pmv"]'));
     }
@@ -394,10 +357,7 @@ PMVX.scheduler = fn => {
         );
     }
 
-    // ---------------------------------------------------------------------
-    // Playlist data
-    // ---------------------------------------------------------------------
-    // Read from the core's in-memory state when available, else from its localStorage cache.
+    // --- Playlist data ---
 
     const CACHE_KEY = 'pmv_firefox_playlist_cache_v1';
 
@@ -420,13 +380,10 @@ PMVX.scheduler = fn => {
 
     function parseSavedSearch(ss) {
         const raw = ss.filters || ss.params || ss.query || ss;
-        // Lowercase tags.
         const rawTags = raw.excludeTags ?? raw.exclude_tags ?? [];
         const excludeTags = (typeof rawTags === 'string' ? rawTags.split(',') : rawTags)
             .map(t => t.trim().toLowerCase()).filter(Boolean);
-        // aspect: array like ["16:9","21:9"] or a string.
         const hasAspect = Array.isArray(raw.aspect) ? raw.aspect.length > 0 : !!(raw.aspect);
-        // Gay/trans: include* === 'exclude'.
         const excludeGay   = raw.includeGay   === 'exclude' || raw.excludeGay   === true;
         const excludeTrans = raw.includeTrans  === 'exclude' || raw.excludeTrans === true;
         const minRating = raw.minRating ? Number(raw.minRating) : 0;
@@ -435,7 +392,6 @@ PMVX.scheduler = fn => {
     }
 
     function loadPlaylistCache() {
-        // 1. Live in-memory state of the core.
         try {
             const s = PMVX.state;
             if (s?.playlists?.size) {
@@ -445,7 +401,7 @@ PMVX.scheduler = fn => {
             }
         } catch {}
 
-        // 2. localStorage cache (core not ready yet).
+        // Fallback: localStorage cache (core not ready yet).
         try {
             const raw = localStorage.getItem(CACHE_KEY);
             if (!raw) return false;
@@ -468,7 +424,6 @@ PMVX.scheduler = fn => {
         } catch { return false; }
     }
 
-    // Core cache-ready event.
     window.addEventListener('pmv:cache-ready', () => {
         loadPlaylistCache();
         if (hasAnyActiveFilter()) {
@@ -476,7 +431,6 @@ PMVX.scheduler = fn => {
         }
     });
 
-    // localStorage cache updated.
     window.addEventListener('storage', e => {
         if (e.key !== CACHE_KEY) return;
         loadPlaylistCache();
@@ -486,9 +440,7 @@ PMVX.scheduler = fn => {
         }
     });
 
-    // The core writes clicked tags into the default terms and fires this event (storage events
-    // don't reach the writing window). A tag added before the filter is armed counts as pressing
-    // Filter; a removal only refilters when armed. Unapplied panel edits are replaced.
+    // Core wrote clicked tags to the default terms (no storage event here); an added tag arms the filter.
     window.addEventListener('pmv:nf-default-terms', e => {
         loadDefaultTerms();
         pendingDefaultTerms = NF.defaultTerms;
@@ -499,7 +451,6 @@ PMVX.scheduler = fn => {
         else if (e.detail?.added && NF.input) onOwnInput(NF.lastOwnValue);
     });
 
-    // Prefer live state from the core.
     function getLivePlaylists() {
         try {
             const s = PMVX.state;
@@ -508,19 +459,16 @@ PMVX.scheduler = fn => {
         return { playlists: playlistsMap, reverse: reverseMap };
     }
 
-    // ---------------------------------------------------------------------
-    // Video ID from a row
-    // ---------------------------------------------------------------------
-    // Row thumbnails carry a media (asset) ID that is not the video _id, so index lookups come first.
+    // --- Video ID from a row ---
+    // Thumbnails carry an asset ID, not the video _id: index lookups first.
 
     function getRowVideoId(row) {
-        // Explicit data attribute.
         if (row.dataset.videoId) return row.dataset.videoId;
 
-        // 1. ID already resolved by the core (data-pmv-queue-checked).
+        // 1. ID resolved by the core.
         if (row.dataset.pmvQueueChecked) {
             const id = row.dataset.pmvQueueChecked;
-            // Trust only IDs known to belong to a playlist; otherwise it may be an asset ID.
+            // Trust only playlist-known IDs; others may be asset IDs.
             const { reverse } = getLivePlaylists();
             if (reverse?.has(id)) return id;
         }
@@ -528,7 +476,7 @@ PMVX.scheduler = fn => {
         const img = row.querySelector('img[src]');
         const huds = PMVX.state;
 
-        // 2. Visible title via titleIndex; more reliable than img.alt, which lags when Vue recycles nodes.
+        // 2. Visible title via titleIndex (img.alt lags when Vue recycles nodes).
         const titleEl = row.querySelector('.flex-1.min-w-0 p, .flex-1.min-w-0 span, .flex-1.min-w-0');
         const visibleTitle = (titleEl?.firstChild?.nodeValue?.trim() ||
                               titleEl?.childNodes?.[0]?.textContent?.trim() ||
@@ -537,19 +485,19 @@ PMVX.scheduler = fn => {
             return huds.titleIndex.get(visibleTitle);
         }
 
-        // 3. titleIndex via alt text (layouts without a title node).
+        // 3. titleIndex via alt text.
         const alt = img?.alt?.trim().toLowerCase();
         if (alt && huds?.titleIndex?.has(alt)) {
             return huds.titleIndex.get(alt);
         }
 
-        // 4. thumbnailIndex (exact URL match).
+        // 4. thumbnailIndex (exact URL).
         if (img?.src && huds?.thumbnailIndex) {
             const clean = img.src.split('?')[0];
             if (huds.thumbnailIndex.has(clean)) return huds.thumbnailIndex.get(clean);
         }
 
-        // 5. Hex from the thumbnail URL, only if it belongs to a playlist (otherwise an asset ID).
+        // 5. Thumbnail URL hex, only if it is in a playlist.
         const { reverse } = getLivePlaylists();
         if (img?.src) {
             const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
@@ -558,7 +506,7 @@ PMVX.scheduler = fn => {
             if (m && reverse?.has(m[1])) return m[1];
         }
 
-        // 6. Href of a video link in the row.
+        // 6. Video link href.
         const link = row.querySelector('a[href*="/video/"]') ||
                      row.closest('a[href*="/video/"]');
         if (link?.href) {
@@ -566,7 +514,7 @@ PMVX.scheduler = fn => {
             if (m) return m[1];
         }
 
-        // 7. Unvalidated hex (possibly an asset ID); last resort for !in/!out.
+        // 7. Unvalidated hex (maybe an asset ID); last resort for !in/!out.
         if (img?.src) {
             const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
                       img.src.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//) ||
@@ -577,24 +525,19 @@ PMVX.scheduler = fn => {
         return null;
     }
 
-    // ---------------------------------------------------------------------
-    // Filter syntax
-    // ---------------------------------------------------------------------
-    //   foo         show only rows matching "foo" (title, tags or performers)
-    //   -foo        hide rows matching "foo"
-    //   "foo bar"   multi-word term (also -"foo bar")
-    //   !in / !out  hide rows in any playlist / in no playlist
-    //   !in:name    hide rows in playlist "name"
-    //   !out:name   hide rows not in playlist "name"
+    // --- Filter syntax ---
+    //   foo / -foo           show only / hide rows matching foo (title, tags, performers)
+    //   "foo bar" / =foo     whole word or phrase only (also -"foo bar")
+    //   !in / !out           hide rows in any / in no playlist
+    //   !in:name / !out:name hide rows in / not in playlist "name" (partial name)
+    //   !seen / !unseen      show only watched / unwatched
 
-    // Tokenizer: quoted substrings (optionally prefixed with -) form one token;
-    // everything else splits on whitespace.
+    // Quoted substrings (optionally with -) are one token; the rest splits on whitespace.
     function tokenizeRaw(raw) {
         const re = /-?=?"[^"]*"|-?=?'[^']*'|\S+/g;
         return PMVX.plainQuotes(raw).trim().match(re) || [];
     }
-    // "quoted" terms (smart quotes too) and =term match only as a whole word or phrase
-    // (PMVX.termMatch); internally they become "=term".
+    // Quoted (smart quotes too) and =term match only whole words (PMVX.termMatch); stored as "=term".
     function stripTerm(term) {
         if (term[0] === '=') return '=' + stripQuotes(term.slice(1));
         const inner = stripQuotes(term);
@@ -612,8 +555,8 @@ PMVX.scheduler = fn => {
     function parseTokens(raw) {
         const tokens = tokenizeRaw(raw);
         const result = {
-            textExclude: [], // strings that must NOT appear in the text
-            textInclude: [], // strings that MUST appear in the text
+            textExclude: [],
+            textInclude: [],
             playlistFilters: [], // { mode: 'in'|'out', name: string|null }
             seenFilter: null, // 'seen' | 'unseen' | null
         };
@@ -653,13 +596,13 @@ PMVX.scheduler = fn => {
         return Number.isFinite(n) ? n : 0;
     }
 
-    // vid / descOn are passed in by applyFilter() to avoid repeated DOM and localStorage lookups.
+    // vid/descOn come from applyFilter() to save DOM and localStorage lookups.
     function rowPassesFilter(row, tokens, vid = undefined, descOn = undefined) {
         const { textExclude, textInclude, playlistFilters, seenFilter } = tokens;
         const videoId = vid === undefined ? getRowVideoId(row) : vid;
         const matchDesc = descOn === undefined ? matchDescEnabled() : descOn;
 
-        // Text: the row title always, plus tags and performers when known via videoMeta.
+        // Title always; tags and performers when known via videoMeta.
         const meta = videoId ? PMVX.state?.videoMeta?.get(videoId) : null;
         const text = (row.querySelector('h4')?.textContent || row.textContent || '').toLowerCase();
         const haystacks = [text, ...(meta?.tags || []), ...(meta?.starsTags || [])];
@@ -677,17 +620,15 @@ PMVX.scheduler = fn => {
 
             for (const pf of playlistFilters) {
                 if (pf.name) {
-                    // Partial name match.
                     let matchedId = null;
                     playlists.forEach((p, id) => {
                         if (p.name.toLowerCase().includes(pf.name)) matchedId = id;
                     });
 
                     const inThat = matchedId ? memberOf.has(matchedId) : false;
-                    if (pf.mode === 'in'  &&  inThat) return false; // it's in there, hide it
-                    if (pf.mode === 'out' && !inThat) return false; // it's not in there, hide it
+                    if (pf.mode === 'in'  &&  inThat) return false;
+                    if (pf.mode === 'out' && !inThat) return false;
                 } else {
-                    // No name: any playlist.
                     const inAny = memberOf.size > 0;
                     if (pf.mode === 'in'  &&  inAny) return false;
                     if (pf.mode === 'out' && !inAny) return false;
@@ -695,21 +636,18 @@ PMVX.scheduler = fn => {
             }
         }
 
-        // Meta-based checks.
-
-        // !seen / !unseen use local playback history; an unknown ID is never filtered out.
+        // Local playback history; an unknown ID is never filtered out.
         if (seenFilter && videoId && typeof PMVX.isWatched === 'function') {
             const isWatched = PMVX.isWatched(videoId);
             if (seenFilter === 'seen' && !isWatched) return false;
             if (seenFilter === 'unseen' && isWatched) return false;
         }
 
-        // Rating range; an unknown rating is never filtered out.
+        // An unknown rating or duration never filters a row out.
         if ((BTN.ratingMin > 0 || BTN.ratingMax < 100) && meta && meta.bayesianRating > 0) {
             if (meta.bayesianRating < BTN.ratingMin || meta.bayesianRating > BTN.ratingMax) return false;
         }
 
-        // Duration range; an unknown duration is never filtered out.
         if ((BTN.durationMin > 0 || Number.isFinite(BTN.durationMax)) && meta) {
             const dur = toDurationSeconds(meta.duration);
             if (dur > 0 && (dur < BTN.durationMin || dur > BTN.durationMax)) return false;
@@ -730,7 +668,6 @@ PMVX.scheduler = fn => {
                 if (ss.aspectFilter && meta.width && meta.height) {
                     const ratio = meta.width / meta.height;
                     const allowedAspects = BTN.savedSearch._rawAspect || [];
-                    // The ratio must fall within one of the aspects.
                     const aspectOk = allowedAspects.length === 0 || allowedAspects.some(a => {
                         if (a === '16:9') return ratio >= 1.7  && ratio <= 1.8;
                         if (a === '21:9') return ratio >= 2.3  && ratio <= 2.45;
@@ -742,7 +679,6 @@ PMVX.scheduler = fn => {
             }
         }
 
-        // Playlist mode button.
         if (BTN.playlistMode !== 'all') {
             const { reverse } = getLivePlaylists();
             const memberOf = videoId ? (reverse.get(videoId) || new Set()) : new Set();
@@ -755,20 +691,16 @@ PMVX.scheduler = fn => {
     }
 
 
-    // ---------------------------------------------------------------------
-    // Up next preview helpers
-    // ---------------------------------------------------------------------
+    // --- Up next preview helpers ---
     // The preview is a <button> after the "Up Next" label <p>, not a [role="button"] div.
 
     function findUpNextButton() {
-        // The label <p> sits directly above the preview button.
         const labels = document.querySelectorAll('p');
         for (const p of labels) {
             const txt = (p.textContent || '').trim();
             if (/^up\s*next$/i.test(txt)) {
                 const btn = p.nextElementSibling;
                 if (btn?.tagName === 'BUTTON') return btn;
-                // Or via the parent's next button.
                 const wrap = p.parentElement;
                 const wrapBtn = wrap?.querySelector('button');
                 if (wrapBtn) return wrapBtn;
@@ -778,7 +710,6 @@ PMVX.scheduler = fn => {
     }
 
     function upNextWrapper(btn) {
-        // Styleable wrapper around the box.
         return btn?.closest('div.mt-3, div[class*="bg-[#181818]"]') || btn?.parentElement;
     }
 
@@ -796,13 +727,13 @@ PMVX.scheduler = fn => {
         const alt = img?.alt?.trim().toLowerCase();
         if (alt && huds?.titleIndex?.has(alt)) return huds.titleIndex.get(alt);
 
-        // 2. thumbnailIndex exact URL match.
+        // 2. thumbnailIndex (exact URL).
         if (img?.src && huds?.thumbnailIndex) {
             const clean = img.src.split('?')[0];
             if (huds.thumbnailIndex.has(clean)) return huds.thumbnailIndex.get(clean);
         }
 
-        // 3. Hex from the URL, only if in the reverse map (excludes asset IDs).
+        // 3. URL hex, only if in a playlist (else an asset ID).
         const { reverse } = getLivePlaylists();
         if (img?.src) {
             const m = img.src.match(/\/thumbnails\/([a-f0-9]{24})\//) ||
@@ -853,7 +784,6 @@ PMVX.scheduler = fn => {
                 }
             }
         }
-        // Meta-based button filters.
         const vid2 = getUpNextVideoId(btn);
         const meta2 = vid2 ? PMVX.state?.videoMeta?.get(vid2) : null;
 
@@ -905,9 +835,7 @@ PMVX.scheduler = fn => {
         return true;
     }
 
-    // ---------------------------------------------------------------------
-    // Applying the filter
-    // ---------------------------------------------------------------------
+    // --- Applying the filter ---
 
     let lastAppliedValue = null;
     let lastAppliedDataVersion = -1;
@@ -933,8 +861,7 @@ PMVX.scheduler = fn => {
             || flagKeysActive().length > 0
         );
 
-        // Auto-fetch: if the active filter needs videoMeta that is incomplete, start the Fetch all
-        // cycle in the background; it re-applies the filter when done.
+        // Filter needs incomplete videoMeta: Fetch all runs in the background and re-applies.
         const needsMeta = hasOwnFilter && (
             !!(BTN.savedSearch && (BTN.savedSearch.minRating || BTN.savedSearch.aspectFilter))
             || BTN.ratingMin > 0 || BTN.ratingMax < 100
@@ -945,22 +872,25 @@ PMVX.scheduler = fn => {
         );
         autoFetchAllIfNeeded(effectiveValue, hasOwnFilter, needsMeta);
 
-        // Content flags the playlist data does not carry: fetched in bulk, then the rows are judged again.
+        // Flags missing from playlist data: fetched in bulk, then rows re-judged.
         if (hasOwnFilter && flagKeysActive().length && typeof PMVX.fetchFlags === 'function') {
             const ids = queueRows().map(r => getRowVideoId(r)).filter(Boolean);
             PMVX.fetchFlags(ids, flagKeysActive(), () => applyFilter(NF.lastOwnValue, true));
         }
+        // Playlist data has only 5 tags and no models per video: fetch full meta, then re-judge.
+        if (hasOwnFilter && (tokens.textInclude.length || tokens.textExclude.length) && typeof PMVX.fetchFullMeta === 'function') {
+            const ids = queueRows().map(r => getRowVideoId(r)).filter(Boolean);
+            PMVX.fetchFullMeta(ids, () => applyFilter(NF.lastOwnValue, true));
+        }
 
-        // All queue rows.
         const rows = queueRows();
         let shown = 0, hidden = 0;
         let activeHidden = false;
 
-        // Dedup: the page=1 limit bump can make Vue's pagination return videos already in the
-        // enlarged first page. Only the first row per video ID counts; later duplicates are hidden,
-        // except the playing row.
+        // Dedup: the page=1 limit bump makes Vue's pagination repeat first-page videos.
+        // Only the first row per video ID shows (the playing row always).
         const seenVideoIds = new Set();
-        const descOn = matchDescEnabled(); // once per pass
+        const descOn = matchDescEnabled();
 
         rows.forEach(row => {
             const isActive = row.classList.contains('border-orange-500');
@@ -990,7 +920,7 @@ PMVX.scheduler = fn => {
             const visible = rowPassesFilter(row, tokens, rowVid, descOn);
 
             if (!visible && PMVX.isActed(rowVid)) {
-                // Just saved/removed/rejected: stays until the filter is applied again.
+                // Just saved/removed/rejected: stays until the next apply.
                 row.style.display = '';
                 shown++;
                 return;
@@ -1002,12 +932,10 @@ PMVX.scheduler = fn => {
             if (isActive && !visible) activeHidden = true;
         });
 
-        // Up next: display-only override, see overrideUpNext().
-
         updateCounter(hasOwnFilter ? `${shown}/${shown + hidden}` : '');
 
-        // If the playing video is hidden, trigger N to advance, but only when a visible row exists
-        // further on; otherwise every skip lands on a filtered video and chains up to SKIP_CHAIN_MAX skips.
+        // Playing video hidden: press N, but only if a visible row follows;
+        // else each skip lands on a filtered video (chains up to SKIP_CHAIN_MAX).
         if (activeHidden) {
             if (shown === 0) {
                 updateCounter("No videos match the filter — auto-skip stopped");
@@ -1020,15 +948,12 @@ PMVX.scheduler = fn => {
             return;
         }
 
-        // Up next box: display-only override with the first visible row after the active one;
-        // Vue's pointer is untouched.
+        // Up next box: display-only override with the first visible row after the active one; Vue's pointer is untouched.
         overrideUpNext(tokens);
     }
 
-    // ---------------------------------------------------------------------
-    // Up next override
-    // ---------------------------------------------------------------------
-    // Replaces the Up next title/thumbnail with the first visible row after the active one, leaving Vue's playback pointer alone.
+    // --- Up next override ---
+    // Up next box shows the first visible row after the active one; Vue's playback pointer is untouched.
 
     let upNextOverrideActive = false;
 
@@ -1046,9 +971,8 @@ PMVX.scheduler = fn => {
                           BTN.ratingMin > 0 || BTN.ratingMax < 100 ||
                           BTN.durationMin > 0 || Number.isFinite(BTN.durationMax));
 
-        // Also override when only a sort is active: Vue's up next follows its own unsorted order.
+        // Override also for a sort alone: Vue's up next follows its own unsorted order.
         if (!hasFilter && !sortedRowIds) {
-            // Neither filter nor sort: restore the original.
             upWrap.style.removeProperty('display');
             const overlay = upWrap.querySelector('#pmvnf-upnext-overlay');
             if (overlay) overlay.remove();
@@ -1056,11 +980,10 @@ PMVX.scheduler = fn => {
             return;
         }
 
-        // With a sort active Vue's up next is always wrong, so override regardless of upNextPassesFilter.
+        // With a sort, Vue's up next is always wrong.
         if (!sortedRowIds) {
             const upNextPasses = upNextPassesFilter(upBtn, tokens);
             if (upNextPasses) {
-                // Up next is visible: no override needed.
                 const overlay = upWrap.querySelector('#pmvnf-upnext-overlay');
                 if (overlay) overlay.remove();
                 upWrap.style.removeProperty('display');
@@ -1069,8 +992,6 @@ PMVX.scheduler = fn => {
             }
         }
 
-        // Next row by sort order (+ filter) when sorting, otherwise the first visible row after
-        // the active one in DOM order.
         let nextVisible;
         if (sortedRowIds) {
             nextVisible = getSortAwareNextRow();
@@ -1084,17 +1005,14 @@ PMVX.scheduler = fn => {
         }
 
         if (!nextVisible) {
-            // Nothing visible left: hide the box.
             upWrap.style.display = 'none';
             upNextOverrideActive = false;
             return;
         }
 
-        // Take title and thumbnail from the visible row.
         const nextTitle = nextVisible.querySelector('h4, p')?.textContent?.trim() || '';
         const nextImg   = nextVisible.querySelector('img[src]');
 
-        // Create or update the overlay on the box.
         let overlay = upWrap.querySelector('#pmvnf-upnext-overlay');
         if (!overlay) {
             overlay = document.createElement('div');
@@ -1125,12 +1043,9 @@ PMVX.scheduler = fn => {
         upNextOverrideActive = true;
     }
 
-    // ---------------------------------------------------------------------
-    // Vue input patch
-    // ---------------------------------------------------------------------
-    // Vue's v-model only reacts to InputEvents, so the native input is written via a dispatched event.
-    // Always sends '' to Vue: its native filter only matches titles and would remove rows that match here
-    // via a tag or performer. All text matching happens in applyFilter()/rowPassesFilter().
+    // --- Vue input patch ---
+    // Vue's v-model only reacts to InputEvents, so the value is set via a dispatched event.
+    // Never pass text tokens: Vue matches titles only and would drop tag/performer matches.
 
     function syncToVue(ownValue) {
         if (!NF.input) return;
@@ -1139,7 +1054,6 @@ PMVX.scheduler = fn => {
 
         if (NF.input.value === vueValue) return;
 
-        // Set the value and dispatch an InputEvent so Vue's listener fires.
         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
             window.HTMLInputElement.prototype, 'value'
         )?.set;
@@ -1154,14 +1068,12 @@ PMVX.scheduler = fn => {
         NF.input.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
-    const DURATION_SLIDER_MAX_MIN = 60; // duration slider upper end in minutes (= no limit)
+    const DURATION_SLIDER_MAX_MIN = 60; // minutes; top end = no limit
 
 
-    // ---------------------------------------------------------------------
-    // Fetch all
-    // ---------------------------------------------------------------------
-    // Loads the whole playlist via fetchAll=true (PMVX.forceFetchAllNext, read by the core's fetch interceptor),
-    // then reports metadata coverage; tag/performer filtering needs videoMeta for every row.
+    // --- Fetch all ---
+    // Loads the whole playlist (PMVX.forceFetchAllNext -> fetchAll=true in the core's interceptor);
+    // tag/performer filtering needs videoMeta for every row.
     let manualFetchAllRunning = false;
 
     async function runManualFetchAll(statusEl, btnEl) {
@@ -1171,7 +1083,6 @@ PMVX.scheduler = fn => {
         statusEl.textContent = 'loading…';
         statusEl.style.color = 'rgba(255,255,255,0.4)';
 
-        // Shared cycle (runFetchAllCycle).
         const { ok, waitedMs } = await runFetchAllCycle({ maxWaitMs: 20000 });
         if (!ok) {
             statusEl.textContent = 'no queue found';
@@ -1181,7 +1092,6 @@ PMVX.scheduler = fn => {
             return;
         }
 
-        // Metadata coverage: rows with a videoMeta entry.
         const { total, withMeta, unknownId } = getMetaCoverage();
 
         if (total > 0 && withMeta === total) {
@@ -1192,25 +1102,21 @@ PMVX.scheduler = fn => {
             statusEl.style.color = 'rgb(253,186,116)';
         }
 
-        // Re-apply with the new metadata.
         applyFilter(NF.lastOwnValue, true);
 
         btnEl.disabled = false;
         manualFetchAllRunning = false;
     }
 
-    // ---------------------------------------------------------------------
-    // Sorting
-    // ---------------------------------------------------------------------
-    // Client-side via CSS order from cached metadata (rating, upload date, views); only loaded rows are sorted.
-    // DOM order and Vue's playlist index are untouched. Rows loaded later have no order until sorting is
-    // reapplied; the deeplink catch-up and Up next assume DOM order == playlist order.
+    // --- Sorting ---
+    // CSS order from cached metadata, loaded rows only; DOM order and Vue's index stay intact
+    // (the deeplink catch-up and Up next assume DOM order == playlist order).
 
-    let sortedRowIds = null; // video IDs in applied sort order
-    let currentSortMode = null; // last applied sort key
-    let ratingSortAscending = false; // only used by mode 'rating'
+    let sortedRowIds = null; // video IDs in sort order
+    let currentSortMode = null;
+    let ratingSortAscending = false; // mode 'rating' only
 
-    // Next row according to the active sort (filtered); used by triggerNextKey()/attachNIntercept().
+    // Next visible row by the active sort; for triggerNextKey()/attachNIntercept().
     function getSortAwareNextRow() {
         if (!sortedRowIds) return null;
         const rows = queueRows();
@@ -1220,8 +1126,8 @@ PMVX.scheduler = fn => {
         const startPos = activeId ? sortedRowIds.indexOf(activeId) : -1;
         for (let i = startPos + 1; i < sortedRowIds.length; i++) {
             const r = byId.get(sortedRowIds[i]);
-            if (!r) continue; // not (yet) in the DOM, e.g. a row scrolled out of view
-            if (rowShouldBeHidden(r)) continue; // the filter still excludes it
+            if (!r) continue; // not in the DOM (yet)
+            if (rowShouldBeHidden(r)) continue;
             return r;
         }
         return null;
@@ -1243,8 +1149,8 @@ PMVX.scheduler = fn => {
         const rows = Array.from(list.querySelectorAll(':scope > [role="button"]'));
         if (!rows.length) return;
 
-        // Only the CSS `order` property is set, never the DOM order: moving nodes would trigger the
-        // childList MutationObserver (re-running the filter), and Vue re-renders would undo the reorder.
+        // Only CSS order, never DOM order: moving nodes would re-trigger the childList observer
+        // (re-filtering), and Vue re-renders would undo it.
         list.style.display = 'flex';
         list.style.flexDirection = 'column';
 
@@ -1264,8 +1170,7 @@ PMVX.scheduler = fn => {
         currentSortMode = mode;
         saveSortSettings();
 
-        // Rows without metadata get the highest order values (bottom). Rows added later default to
-        // order:0 until sorting is reapplied.
+        // No metadata: bottom. Rows added later stay at order:0 until re-sorted.
         [...withMeta.map(x => x.row), ...withoutMeta].forEach((r, i) => {
             r.style.order = String(i + 1);
         });
@@ -1276,7 +1181,6 @@ PMVX.scheduler = fn => {
         }
     }
 
-    // Clears the CSS order override, restoring Vue's DOM order.
     function resetSort() {
         const list = queueRows()[0]?.parentElement;
         if (list) {
@@ -1288,8 +1192,7 @@ PMVX.scheduler = fn => {
         saveSortSettings();
     }
 
-    // Persists sort mode and direction into the SETTINGS_KEY blob (merged). Declared here because
-    // the sort state does not exist yet when loadSettings() runs; restoreSortSettings() loads it later.
+    // Merged into the SETTINGS_KEY blob; restoreSortSettings() reads it after loadSettings().
     function saveSortSettings() {
         try {
             const raw = localStorage.getItem(SETTINGS_KEY);
@@ -1300,16 +1203,10 @@ PMVX.scheduler = fn => {
         } catch {}
     }
 
-    // ---------------------------------------------------------------------
-    // Playlist-page filter panel
-    // ---------------------------------------------------------------------
-    // - The native filter input stays in the DOM (syncToVue() writes to it) but is hidden; an own search
-    //   field and Filters button take its place, with active chips below.
-    // - The panel is a drawer over the queue (absolute in the sidebar card, own scroll), so it never
-    //   pushes or clips the queue.
-    // - Playlist, saved search and sort use dropdowns in the site's custom-select style; default terms
-    //   are visible chips.
-    // - Chips are composed back into the token string parseTokens() consumes.
+    // --- Playlist-page filter panel ---
+    // The native input stays hidden in the DOM (syncToVue() writes to it); own search field + Filters replace it.
+    // The panel is a drawer over the queue (absolute in the sidebar card, own scroll): it never pushes it.
+    // Chips are composed back into the token string for parseTokens().
     const UI = { pos: [], neg: [], raw: [], seen: null, dpos: [], dneg: [], draw: [], open: false };
     const UI_OPEN_KEY = 'pmvnf_panel_open_v1';
     try { UI.open = localStorage.getItem(UI_OPEN_KEY) === '1'; } catch {}
@@ -1483,8 +1380,7 @@ PMVX.scheduler = fn => {
     const SVG_CHECK = '<svg class="ck" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
     const SVG_SEARCH = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>';
 
-    // Dropdown in the site's custom-select style. items(): [{value,title,sub}]; multi toggles values,
-    // single picks one and closes. The list is position:fixed because the scrolling panel would clip an absolute one.
+    // Site-style custom select; items(): [{value,title,sub}]. position:fixed: the scrolling panel would clip it.
     let openDd = null;
     function closeDd() { if (openDd) { openDd.list.remove(); openDd.btn.dataset.open = '0'; openDd = null; } }
     document.addEventListener('click', e => { if (openDd && !openDd.list.contains(e.target) && !openDd.btn.contains(e.target)) closeDd(); }, true);
@@ -1580,9 +1476,8 @@ PMVX.scheduler = fn => {
 
     let refreshPendingMarks = () => {};
 
-    // Sort dropdown replacing the native "Added" button in the Shuffle/Loop/Auto row. The native button is
-    // hidden, not removed: the arrow forwards clicks to it for the site's own order. Modes: Added (site order),
-    // Rating, Upload date; the arrow toggles direction. Applies immediately. Re-attached from startObserver().
+    // Replaces the native "Added" sort button, kept hidden: the arrow clicks it for the site's own order.
+    // Applies immediately; re-attached from startObserver().
     const SORT_ITEMS = () => [
         { value: 'native', title: 'Added', sub: 'Site order' },
         { value: 'rating', title: 'Rating', sub: 'By rating' },
@@ -1627,7 +1522,7 @@ PMVX.scheduler = fn => {
         sortSel.el.id = 'pmvnf-sort';
         const r0 = sortSel.render;
         sortSel.render = () => { r0(); sortSel.el.dataset.active = currentSortMode ? '1' : '0'; };
-        // Compact segment [arrow | Added] to fit the Shuffle/Loop/Auto row.
+        // Compact [arrow | Added] segment for the Shuffle/Loop/Auto row.
         const seg = mk('div', 'pmvnf-sortseg'); seg.id = 'pmvnf-sortseg';
         sortDirBtn = mk('button'); sortDirBtn.type = 'button'; sortDirBtn.id = 'pmvnf-sortdir';
         sortDirBtn.onclick = () => applySortChoice(sortMode(), !sortAsc());
@@ -1638,7 +1533,7 @@ PMVX.scheduler = fn => {
         if (added) row.insertBefore(seg, added); else row.appendChild(seg);
     }
 
-    // Fetch all footer under the queue list (not in the drawer). Re-attached when missing.
+    // Fetch all footer under the queue list, not in the drawer.
     function injectQueueFooter() {
         if (document.getElementById('pmvnf-qfoot')) return;
         const list = queueRows()[0]?.closest('.overflow-y-auto');
@@ -1661,11 +1556,10 @@ PMVX.scheduler = fn => {
 
         const nativeWrapper = NF.input.parentElement;         // .mt-3.relative
         const header = nativeWrapper?.parentElement;           // .p-4.border-b (sidebar header)
-        const card = header?.parentElement;                    // .bg-[#1A1A1A].rounded-lg.overflow-hidden.flex.flex-col
+        const card = header?.parentElement;                    // .bg-[#1A1A1A] sidebar card
         if (nativeWrapper) nativeWrapper.setAttribute('data-pmvnf-native-hidden', '1');
         if (card) card.setAttribute('data-pmvnf-card', '1');
 
-        // Top row: search field and Filters button, chips below.
         const wrap = mk('div'); wrap.id = 'pmvnf-wrap';
         const top = mk('div', 'pmvnf-top');
         const search = mk('div', 'pmvnf-search');
@@ -1690,14 +1584,13 @@ PMVX.scheduler = fn => {
 
         if (header) header.insertBefore(wrap, nativeWrapper.nextSibling); else document.body.prepend(wrap);
 
-        // Drawer.
         const panel = mk('div'); panel.id = 'pmvnf-panel';
         panel.dataset.open = UI.open ? '1' : '0';
         const body = mk('div', 'pmvnf-body');
         panel.appendChild(body);
         (card || document.body).appendChild(panel);
-        // The drawer fills the card below the header. A filter that leaves only a few rows shrinks the
-        // card, so while the drawer is open the card keeps a minimum height (header + DRAWER_MIN).
+        // While the drawer is open the card keeps a minimum height (header + drawer),
+        // else a filter leaving few rows would shrink it.
         const placePanel = () => {
             if (!card || !header) return;
             const top = Math.max(0, Math.round(header.getBoundingClientRect().bottom - card.getBoundingClientRect().top));
@@ -1720,10 +1613,13 @@ PMVX.scheduler = fn => {
             if (v) loadSavedSearchList();
             else closeDd();
         };
-        toggle.onclick = () => applyAll();
+        // Filters is also the switch: active with nothing staged → off (settings kept); else apply.
+        toggle.onclick = () => {
+            if (!anyPending() && toggle.dataset.active === '1') { setFilterEnabled(false); return; }
+            applyAll();
+        };
         chev.onclick = () => setOpen(!UI.open);
 
-        // Chips (shared renderer).
         const drawChips = (host, kind, list, extraCls = '') => {
             host.textContent = '';
             list.forEach((term, i) => {
@@ -1733,7 +1629,7 @@ PMVX.scheduler = fn => {
                 const word = !isRaw && PMVX.isWordTerm(term);
                 const txt = mk('span', 'txt', isRaw ? term : '#' + (word ? `"${PMVX.termLabel(term)}"` : term));
                 c.appendChild(txt);
-                // Click the term: whole word only ("term") on/off.
+                // Click the term: toggle whole-word match.
                 if (!isRaw) {
                     txt.style.cursor = 'pointer';
                     txt.title = word ? 'Whole word only — click to match it anywhere in the text' : 'Matches anywhere in the text — click to match it only as a whole word';
@@ -1747,9 +1643,10 @@ PMVX.scheduler = fn => {
         };
         const renderTagChips = () => {
             topChips.textContent = '';
-            const a = mk('div', 'pmvnf-chips'), b = mk('div', 'pmvnf-chips'), c = mk('div', 'pmvnf-chips');
-            drawChips(a, 'pos', UI.pos); drawChips(b, 'neg', UI.neg); drawChips(c, 'raw', UI.raw);
-            [...a.children, ...b.children, ...c.children].forEach(el => topChips.appendChild(el));
+            // Only the search field's terms here; excluded ones are in the drawer's Exclude section.
+            const a = mk('div', 'pmvnf-chips'), c = mk('div', 'pmvnf-chips');
+            drawChips(a, 'pos', UI.pos); drawChips(c, 'raw', UI.raw);
+            [...a.children, ...c.children].forEach(el => topChips.appendChild(el));
             drawChips(negChips, 'neg', UI.neg);
             drawChips(defChips, 'dpos', UI.dpos, 'def');
             const d2 = mk('div'); drawChips(d2, 'dneg', UI.dneg, 'def'); [...d2.children].forEach(el => defChips.appendChild(el));
@@ -1782,7 +1679,6 @@ PMVX.scheduler = fn => {
             return false;
         };
 
-        // Exclude.
         const secNeg = mk('div', 'pmvnf-sec');
         secNeg.appendChild(mk('div', 'pmvnf-lab', 'Exclude'));
         const inpNeg = mk('input'); inpNeg.type = 'text'; inpNeg.spellcheck = false; inpNeg.autocomplete = 'off';
@@ -1792,7 +1688,6 @@ PMVX.scheduler = fn => {
         secNeg.append(inpNeg, negChips, mk('div', 'pmvnf-hint', 'Enter adds · Enter in an empty field applies · Backspace in an empty field removes the last one · "quotes" or a click on a term: whole word only'));
         body.appendChild(secNeg);
 
-        // Default terms (always active).
         const secDef = mk('div', 'pmvnf-sec');
         const labDef = mk('div', 'pmvnf-lab', 'Always');
         const defMark = mk('span', 'r'); labDef.appendChild(defMark);
@@ -1807,7 +1702,6 @@ PMVX.scheduler = fn => {
         body.appendChild(secDef);
         updateDefaultsBtn = () => { defMark.textContent = pendingDefaultTerms !== NF.defaultTerms ? 'not applied' : (NF.defaultTerms ? 'active' : ''); refreshPendingMarks(); };
 
-        // Playlist.
         const secPl = mk('div', 'pmvnf-sec');
         const labPl = mk('div', 'pmvnf-lab', 'Playlist');
         secPl.appendChild(labPl);
@@ -1838,7 +1732,6 @@ PMVX.scheduler = fn => {
         };
         body.appendChild(secPl);
 
-        // Seen.
         const secSeen = mk('div', 'pmvnf-sec');
         secSeen.appendChild(mk('div', 'pmvnf-lab', 'Watched'));
         const seenRow = mk('div', 'pmvnf-chips');
@@ -1850,7 +1743,7 @@ PMVX.scheduler = fn => {
         secSeen.appendChild(seenRow);
         body.appendChild(secSeen);
 
-        // Content flags: off -> hide (⊘) -> only these (✓) -> off; applied with Filters like the rest.
+        // Content flags cycle off -> hide -> only these -> off; staged like the rest.
         const secFlags = mk('div', 'pmvnf-sec');
         secFlags.appendChild(mk('div', 'pmvnf-lab', 'Content'));
         const flagRow = mk('div', 'pmvnf-chips');
@@ -1881,7 +1774,6 @@ PMVX.scheduler = fn => {
         secFlags.append(flagRow, mk('div', 'pmvnf-hint', 'Click: hide (\u2298) \u2192 only these (\u2713) \u2192 off. Flags the playlist data lacks are fetched once; videos whose flag is still unknown stay visible.'));
         body.appendChild(secFlags);
 
-        // Rating / duration.
         const secRat = mk('div', 'pmvnf-sec'); secRat.appendChild(mk('div', 'pmvnf-lab', 'Rating'));
         const ratSlider = mkDualSlider({ min: 0, max: 100,
             getRange: () => [pendingRatingMin, pendingRatingMax], setRange: (a, b) => { pendingRatingMin = a; pendingRatingMax = b; },
@@ -1899,7 +1791,6 @@ PMVX.scheduler = fn => {
         secDur.appendChild(durSlider.el); body.appendChild(secDur);
         updateDurBtn = () => durSlider.render();
 
-        // Saved search (dropdown, loaded lazily).
         const secSs = mk('div', 'pmvnf-sec'); secSs.appendChild(mk('div', 'pmvnf-lab', 'Saved search'));
         let ssList = null;
         const ssSel = mkSelect({
@@ -1917,11 +1808,10 @@ PMVX.scheduler = fn => {
         updateSsBtn = () => { ssSel.render(); ssSel.el.classList.toggle('pending', pendingSavedSearchName !== BTN.savedSearchName); refreshPendingMarks(); };
         const loadSavedSearchList = async () => { if (ssList) return; try { ssList = await fetchSavedSearches(); } catch { ssList = []; } ssSel.render(); };
 
-        // Actions (sticky at the bottom of the drawer).
         const actions = mk('div', 'pmvnf-actions');
         const counter = mk('span'); counter.id = 'pmvnf-counter';
         const closeBtn = mk('button', 'pmvnf-close', 'Close ✕'); closeBtn.type = 'button'; closeBtn.onclick = () => setOpen(false);
-        // Copies the site-wide filter (header) into this one; staged like any edit, Filters applies it.
+        // Copies the site-wide header filter into this one, staged until Filters.
         const syncBtn = mk('button', 'pmvnf-close', 'Sync from site filter'); syncBtn.type = 'button';
         syncBtn.title = 'Copy the site-wide filter (terms, watched, playlist, rating, max length, content flags) into this one \u2014 then press Filters';
         syncBtn.onclick = () => {
@@ -1964,7 +1854,8 @@ PMVX.scheduler = fn => {
             badge.textContent = n ? String(n) : '';
             toggle.dataset.active = n && filterLive() ? '1' : '0';
             toggle.title = pend ? 'Apply changes'
-                : (n && !NF.enabled ? 'Filter is off \u2014 click to apply and turn it on'
+                : (n && filterLive() ? 'Filter on \u2014 click to turn it off (settings are kept)'
+                : n && !NF.enabled ? 'Filter is off \u2014 click to apply and turn it on'
                 : (n && !sessionFilterArmed ? 'Remembered from your last visit — not active yet, click to apply' : 'Apply filters'));
         };
 
@@ -1976,14 +1867,12 @@ PMVX.scheduler = fn => {
         attachOwnInputKeyIntercept();
     }
 
-    // Document-level capture handler for Enter/Escape in the own input. Reads NF.ownInput on each
-    // event so it survives panel rebuilds.
+    // Document-level capture; reads NF.ownInput per event so it survives panel rebuilds.
     let ownInputKeyInterceptActive = false;
     function attachOwnInputKeyIntercept() {
         if (ownInputKeyInterceptActive) return;
         ownInputKeyInterceptActive = true;
         document.addEventListener('keydown', e => {
-            // Chip inputs of the panel: Enter adds a chip (or applies when empty), Backspace removes, Escape clears.
             if (e.target?.dataset?.pmvnfKind && typeof NF.onOwnKey === 'function') {
                 if (NF.onOwnKey(e)) { e.stopImmediatePropagation(); e.preventDefault(); }
                 return;
@@ -2008,19 +1897,15 @@ PMVX.scheduler = fn => {
     }
 
 
-    // ---------------------------------------------------------------------
-    // Main flow
-    // ---------------------------------------------------------------------
+    // --- Main flow ---
 
     function onOwnInput(value) {
-        // First Enter/Filter press arms filtering (see sessionFilterArmed).
+        // First Enter/Filter press arms filtering.
         sessionFilterArmed = true;
         PMVX.clearActed();
-        // Applying implies the filter switch turns on.
         if (!NF.enabled) setFilterEnabled(true, { refilter: false });
         try { NF.renderPower?.(); } catch {}
 
-        // Commit staged playlist-mode / saved-search button values only on Enter/Filter.
         BTN.playlistMode = pendingPlaylistMode;
         BTN.selectedPlaylistIds = pendingSelectedPlaylistIds.slice();
         BTN.savedSearch = pendingSavedSearch;
@@ -2043,18 +1928,17 @@ PMVX.scheduler = fn => {
         updateDurBtn();
         updateDefaultsBtn();
         try { refreshPendingMarks(); } catch {}
-        watchVideoList(); // reattach if Vue replaced the container
+        watchVideoList(); // self-heal if Vue replaced the container
 
-        saveSettings(); // persist filter settings
+        saveSettings();
         syncToVue(value);
 
-        // Wait a tick so Vue's DOM update lands before applyFilter runs.
+        // Two frames so Vue's DOM update lands first.
         requestAnimationFrame(() => {
             requestAnimationFrame(() => applyFilter(value, true));
         });
     }
 
-    // Poll the native input; re-run the filter when the user types there.
     function pollNative() {
         // Self-heal: reattach the observer if Vue replaced the queue container.
         watchVideoList();
@@ -2063,14 +1947,13 @@ PMVX.scheduler = fn => {
         const v = NF.input.value;
         if (v !== NF.lastNativeValue) {
             NF.lastNativeValue = v;
-            // The native filter handles text; apply button filters on top of its result.
+            // Native input changed: re-apply our filters on top of Vue's result.
             if (hasAnyActiveFilter()) {
                 requestAnimationFrame(() => applyFilter(NF.lastOwnValue, true));
             }
         }
     }
 
-    // Re-apply our filter layer after Vue adds or hides rows.
     let listObserver = null;
     let watchedListContainer = null;
 
@@ -2078,26 +1961,22 @@ PMVX.scheduler = fn => {
         const list = queueRows()[0]?.parentElement;
         if (!list) return;
 
-        // Reattach if Vue replaced the container (the old observer would watch a detached node).
+        // Reattach if Vue replaced the container (old observer watches a detached node).
         if (listObserver && watchedListContainer === list && document.contains(list)) return;
         if (listObserver) listObserver.disconnect();
         watchedListContainer = list;
 
-        // Coalesced per frame (and spaced by the performance mode); avoids feedback loops.
-        // force: new rows have no display state yet and the cache guard would skip them.
+        // Coalesced per frame; force: new rows have no display state and the cache guard would skip them.
         const scheduleListFilter = PMVX.scheduler(() => {
             if (hasAnyActiveFilter()) applyFilter(NF.lastOwnValue, true);
         });
         listObserver = new MutationObserver(scheduleListFilter);
 
-        // subtree: placeholder rows are hydrated in place, which is a nested mutation.
+        // subtree: placeholder rows are hydrated in place (nested mutation).
         listObserver.observe(list, { childList: true, subtree: true });
     }
 
-    // ---------------------------------------------------------------------
-    // Auto-skip
-    // ---------------------------------------------------------------------
-    // Acts only when a filtered-out video is actually playing.
+    // --- Auto-skip ---
 
     let activeRowObserver = null;
     let skipChainCount = 0;
@@ -2111,7 +1990,6 @@ PMVX.scheduler = fn => {
         return !rowPassesFilter(row, tokens);
     }
 
-    // First visible row after the current active row.
     function findNextVisibleRow() {
         const rows = queueRows();
         const activeIdx = rows.findIndex(r => r.classList.contains('border-orange-500'));
@@ -2121,7 +1999,7 @@ PMVX.scheduler = fn => {
         return null;
     }
 
-    // Intercept the N key and click the first visible row so Vue never activates a filtered video.
+    // Intercept N and click the next visible row so Vue never activates a filtered video.
     let nInterceptActive = false;
     function attachNIntercept() {
         if (nInterceptActive) return;
@@ -2131,7 +2009,7 @@ PMVX.scheduler = fn => {
             if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
 
             if (sortedRowIds) {
-                // With a sort active, Vue's DOM-order "next" is wrong: always click the correct row.
+                // With a sort, Vue's DOM-order next is wrong: always click ours.
                 const nextRow = getSortAwareNextRow();
                 if (!nextRow) return; // end of sort order: native N
                 e.stopImmediatePropagation();
@@ -2140,24 +2018,22 @@ PMVX.scheduler = fn => {
                 return;
             }
 
-            // No sort: intercept only when a filter is active and Vue's next row would be filtered.
+            // No sort: intercept only if Vue's next row is filtered.
             if (!hasAnyActiveFilter()) return;
 
             const nextRow = findNextVisibleRow();
-            if (!nextRow) return; // no visible next: native N
+            if (!nextRow) return;
 
-            // Would Vue's own next row be filtered?
             const rows = queueRows();
             const activeIdx = rows.findIndex(r => r.classList.contains('border-orange-500'));
             const vueNext = rows[activeIdx + 1];
 
-            if (!vueNext || !rowShouldBeHidden(vueNext)) return; // fine: don't intercept
+            if (!vueNext || !rowShouldBeHidden(vueNext)) return;
 
-            // Block N and click the correct row.
             e.stopImmediatePropagation();
             e.preventDefault();
             nextRow.click();
-        }, true); // capture phase: before Vue
+        }, true); // capture: before Vue
     }
 
     function triggerNextKey() {
@@ -2171,11 +2047,9 @@ PMVX.scheduler = fn => {
             console.warn('[PMVH Extended] Auto-skip stopped: too many consecutive skips');
             return;
         }
-        // With a sort active, click the next row in sort order instead of dispatching a synthetic N.
         if (sortedRowIds) {
             const next = getSortAwareNextRow();
             if (next) { next.click(); return; }
-            // No sort-aware next: fall back to native N.
         }
         document.dispatchEvent(new KeyboardEvent('keydown', {
             key: 'n', code: 'KeyN', keyCode: 78, which: 78, bubbles: true
@@ -2197,13 +2071,11 @@ PMVX.scheduler = fn => {
 
             if (!hasAnyActiveFilter()) return;
             if (!rowShouldBeHidden(active)) {
-                // Active row is visible: update the override.
                 const tokens = parseTokens(NF.lastOwnValue);
                 requestAnimationFrame(() => overrideUpNext(tokens));
                 return;
             }
 
-            // A filtered video became active: skip it.
             skipChainCount = 0;
             triggerNextKey();
         });
@@ -2220,7 +2092,7 @@ PMVX.scheduler = fn => {
 
     function watchUpNext() {
         if (upNextObserver) return;
-        // Watches the body (including characterData). The Up Next box is cached; it is re-searched at most twice a second.
+        // Observes the body (incl. characterData); the box is cached and re-searched at most twice a second.
         let upNextBtn = null;
         let upNextLookAt = 0;
         let upNextRaf = false;
@@ -2253,20 +2125,15 @@ PMVX.scheduler = fn => {
         });
     }
 
-    // ---------------------------------------------------------------------
-    // Deeplink catch-up
-    // ---------------------------------------------------------------------
-    // Scrolls the queue so Vue's own page-based lazy-load reaches ?index=; bounded retries, no own fetch.
-    // Thumbnails of rows far behind the frontier are unloaded (img.src emptied); row nodes stay for Vue's v-for.
-    const CATCHUP_UNLOAD_BUFFER = 100;  // keep the last 100 rows intact
+    // --- Deeplink catch-up ---
+    // Scrolls the queue so Vue's own lazy-load reaches ?index=; bounded, no own fetch.
+    // Thumbnails far behind the target are unloaded; row nodes stay for Vue's v-for.
+    const CATCHUP_UNLOAD_BUFFER = 100;
     let catchUpRunning = false;
 
-    // ---------------------------------------------------------------------
-    // Shared fetch-all cycle
-    // ---------------------------------------------------------------------
-    // Used by deeplink catch-up, the Fetch-all button and the auto-trigger.
-    // Sets the fetchAll flag, scrolls to the absolute bottom (relative scrollBy is unreliable) and polls until
-    // untilPredicate holds or the row count stops growing for 3 checks. Updates no UI.
+    // --- Shared fetch-all cycle ---
+    // Sets fetchAll, scrolls to the absolute bottom (relative scrollBy is unreliable) and polls until
+    // untilPredicate holds or the row count is stable for 3 checks. Updates no UI.
     async function runFetchAllCycle({ untilPredicate = null, maxWaitMs = 20000, pollMs = 400 } = {}) {
         const scrollEl = queueRows()[0]?.closest('.overflow-y-auto');
         if (!scrollEl) return { ok: false, reason: 'no-scroll-container', rowCount: 0, waitedMs: 0 };
@@ -2297,8 +2164,8 @@ PMVX.scheduler = fn => {
             } else {
                 stableTicks = 0;
             }
-            // Kick on growth or after one stalled tick: the core honors the fetchAll flag only on a page=1 request,
-            // and re-kicking while a page fetch is in flight re-dispatches scroll and duplicates rows.
+            // Kick on growth or after one stalled tick: the core honors fetchAll only on a page=1 request,
+            // and re-kicking during a page fetch re-dispatches scroll and duplicates rows.
             if (grew) {
                 kickScroll();
                 ticksSinceKick = 0;
@@ -2315,7 +2182,6 @@ PMVX.scheduler = fn => {
         return { ok: true, rowCount, waitedMs: waited, hitPredicate };
     }
 
-    // Number of DOM rows that have a videoMeta entry (tags/stars) in the shared cache.
     function getMetaCoverage() {
         const rows = queueRows();
         const videoMeta = PMVX.state?.videoMeta;
@@ -2328,8 +2194,7 @@ PMVX.scheduler = fn => {
         return { total: rows.length, withMeta, unknownId };
     }
 
-    // Auto fetch-all when a filter needs videoMeta and the data is incomplete.
-    // Single-flight, and once per filter value (pollNative runs every 300ms).
+    // Single-flight, once per filter value (pollNative runs every 300ms).
     let backgroundFetchAllRunning = false;
     let lastAutoFetchFilterKey = null;
 
@@ -2353,7 +2218,7 @@ PMVX.scheduler = fn => {
 
         const startRowCount = queueRows().length;
 
-        // Force fetchAll=true on Vue's next page fetch (honored by the core): one large fetch instead of many scroll rounds.
+        // fetchAll=true on Vue's next page fetch: one large fetch instead of many scroll rounds.
         const { ok, rowCount, waitedMs } = await runFetchAllCycle({
             untilPredicate: count => count > urlIndex,
             maxWaitMs: 16000,
@@ -2375,7 +2240,7 @@ PMVX.scheduler = fn => {
         catchUpRunning = false;
     }
 
-    // Hide and unload (img.src='') rows more than CATCHUP_UNLOAD_BUFFER ahead of the target; row nodes stay for Vue's v-for.
+    // Rows more than CATCHUP_UNLOAD_BUFFER before the target: hidden, img.src emptied.
     function hideAndUnloadOutsideWindow(targetIdx) {
         const rows = queueRows();
         const cutoff = Math.max(0, targetIdx - CATCHUP_UNLOAD_BUFFER);
@@ -2395,8 +2260,7 @@ PMVX.scheduler = fn => {
         found.dataset.pmvNfPatch = '1';
         NF.input = found;
 
-        // Deeplink: ?index=N needs a DOM row at position N, but an SSR load embeds only a first batch
-        // and does no client fetch the core could enlarge.
+        // ?index=N needs DOM row N, but an SSR load embeds only a first batch and no client fetch.
         try {
             const urlIndex = parseInt(new URLSearchParams(location.search).get('index') || '', 10);
             const rowCount = queueRows().length;
@@ -2415,10 +2279,9 @@ PMVX.scheduler = fn => {
         NF.pollTimer = setInterval(pollNative, 300);
     }
 
-    // SPA navigation watcher; waits for document.body if it does not exist yet.
+    // SPA navigation watcher; at document-start it waits for the body.
     function startObserver() {
         if (!document.body) {
-            // document-start: no body yet, wait for DOMContentLoaded.
             document.addEventListener('DOMContentLoaded', startObserver, { once: true });
             return;
         }
@@ -2434,13 +2297,12 @@ PMVX.scheduler = fn => {
         domObserver.observe(document.body, { childList: true, subtree: true });
     }
 
-    // Init, retrying so a slow Vue mount is still caught.
     function boot() {
         loadPlaylistCache();
         attachNativeInput();
         checkForStuckHugePlaylist();
 
-        // Retry every 500ms until the wrap is inserted (max 10s)
+        // Retry every 500ms (max 10s) for a slow Vue mount.
         let tries = 0;
         const retryTimer = setInterval(() => {
             if (document.querySelector('#pmvnf-wrap') || ++tries > 20) {
@@ -2451,12 +2313,11 @@ PMVX.scheduler = fn => {
         }, 500);
     }
 
-    // Detect a playlist that never finishes loading (the site's own frontend can stall on very large playlists)
-    // and explain it instead of leaving a silent spinner.
+    // The site can stall on very large playlists: explain it instead of a silent spinner.
     function checkForStuckHugePlaylist() {
         if (!location.pathname.startsWith('/playlists/')) return;
         setTimeout(() => {
-            if (queueRows()[0]) return; // loaded fine
+            if (queueRows()[0]) return;
             if (!document.body.innerText.includes('Loading playlist')) return;
             if (document.getElementById('pmvnf-stuck-notice')) return;
             const box = document.createElement('div');
@@ -2479,9 +2340,7 @@ PMVX.scheduler = fn => {
         }, 10000);
     }
 
-    // ---------------------------------------------------------------------
-    // Boot
-    // ---------------------------------------------------------------------
+    // --- Boot ---
     // Defers init in background tabs until they become visible.
     let bootRan = false;
     const safeBoot = () => {
@@ -2498,7 +2357,6 @@ PMVX.scheduler = fn => {
             safeBoot();
         }
     } else {
-        // Background tab: wait until it becomes active.
         document.addEventListener('visibilitychange', function onVis() {
             if (document.visibilityState !== 'visible') return;
             document.removeEventListener('visibilitychange', onVis);
@@ -2506,54 +2364,41 @@ PMVX.scheduler = fn => {
         });
     }
 
-    // SPA navigation: the core dispatches this when the URL changes to /playlists/<id>.
+    // The core dispatches this on client-side navigation to /playlists/<id>.
     window.addEventListener('pmv:playlist-navigate', () => {
-        bootRan = false; // allow safeBoot to run again
+        bootRan = false;
         setTimeout(safeBoot, 100);
     });
 
-    // ---------------------------------------------------------------------
-    // /playlists browse filter
-    // ---------------------------------------------------------------------
-    // Filters playlist cards by the tags of the videos they contain. The list endpoint carries only video IDs,
-    // so each visible card costs one /api/playlists/<id>?fetchAll=true call. Results are cached in localStorage
-    // per playlist id, keyed on video count; the refresh button forces a refetch.
-    //
-    // Syntax:
-    //   -hypno          hide playlists containing >=1 video tagged hypno
-    //   -"two words"    quoted multi-word term
-    //   +anal / anal    keep only playlists containing >=1 video tagged anal
-    //   -trans(0.1)     hide when more than 10% of the videos are tagged trans
-    //   +anal(50%)      keep only when at least 50% of the videos are tagged anal
-    // With the description toggle on (default) a term also matches the playlist description.
-    // Terms match case-insensitively as substrings of a video's tags and starsTags (performers).
-    // Playlists whose detail has not loaded yet stay visible (fail-open) and are re-evaluated on arrival.
+    // --- /playlists browse filter ---
+    // The list endpoint has only video IDs: each card costs one /api/playlists/<id> request, cached per id by video count.
+    // Terms match tags/starsTags (and description, if on) case-insensitively; unloaded cards stay visible (fail-open).
     (function playlistBrowseFilter() {
         const KEY_SETTINGS = 'pmvnf_browse_filter_v1';
-        const KEY_CACHE    = 'pmvnf_browse_tagcache_v2'; // v2: per-video tag indices
-        const CACHE_MAX    = 1500;            // playlists kept in localStorage
+        const KEY_CACHE    = 'pmvnf_browse_tagcache_v2'; // per-video tag indices
+        const CACHE_MAX    = 1500;
         const CONCURRENCY  = 3;
         const BAR_ID       = 'pmvpb-bar';
         const BTN_ID       = 'pmvpb-btn';
         const STYLE_ID     = 'pmvpb-style';
 
         const PB = {
-            raw: '',            // legacy typed text
-            terms: { neg: [], pos: [] }, // chips
+            raw: '',
+            terms: { neg: [], pos: [] },
             overlap: [],        // own playlist ids for overlap
             mineRange: { min: null, max: null }, // fractions; typed !mine overrides
-            open: false,        // panel expanded
+            open: false,
             toggle: null,
             mode: 'hide',       // 'hide' | 'sink'
-            enabled: true,      // off: nothing hidden or sunk
-            autoScan: false,    // fetch playlist tags automatically; off = only on "Scan page"
-            scanIds: new Set(), // playlists the user asked to scan (manual mode)
-            fullIds: new Set(), // playlists to fetch whole next time (✓ refetch), not sampled
-            desc: true,         // also match the description
+            enabled: true,
+            autoScan: false,
+            scanIds: new Set(),
+            fullIds: new Set(), // fetch in full next time (✓ refetch)
+            desc: true,
             tokens: { neg: [], pos: [] },
             listInfo: new Map(),  // id → { count, name }
             tags: new Map(),      // id → { count, at, tags }
-            pending: new Map(),   // id → Promise
+            pending: new Map(),
             failed: new Set(),
             queue: [],
             running: 0,
@@ -2568,9 +2413,7 @@ PMVX.scheduler = fn => {
 
         const isBrowsePage = () => location.pathname.replace(/\/+$/, '') === '/playlists';
 
-        // ---------------------------------------------------------------------
-        // Persistence
-        // ---------------------------------------------------------------------
+        // --- Persistence ---
         function loadSettings() {
             try {
                 const s = JSON.parse(localStorage.getItem(KEY_SETTINGS) || 'null');
@@ -2636,13 +2479,9 @@ PMVX.scheduler = fn => {
             }, 800);
         }
 
-        // ---------------------------------------------------------------------
-        // Parsing
-        // ---------------------------------------------------------------------
-        // Token: [+-]term or [+-]"two words", with an optional threshold: -trans(0.1) hides when more than 10% of
-        // the videos match; +anal(0.5) requires at least 50%. Without one: any/none. Entries: neg {term,max}, pos {term,min}.
-        // !mine(a-b): keep playlists whose share of videos in the ticked own playlists lies in [a, b]; either bound
-        // is optional, values > 1 are percentages, unknown overlap fails open.
+        // --- Parsing ---
+        // Token: [+-]term or [+-]"two words", optional threshold: -trans(0.1) hides above 10%, +anal(0.5) needs >= 50%.
+        // !mine(a-b): share in the ticked own playlists within [a, b]; bounds optional, > 1 = percent, unknown fails open.
         function parseBound(v) {
             if (v == null || v === '') return null;
             let n = parseFloat(v);
@@ -2675,15 +2514,13 @@ PMVX.scheduler = fn => {
             }
             return out;
         }
-        // Off counts as no filter: all cards shown, no tag fetches. Overlap badges stay.
+        // Off = no filter: all cards shown, no tag fetches; overlap badges stay.
         const hasTagFilter = () => PB.enabled && (PB.tokens.neg.length > 0 || PB.tokens.pos.length > 0);
         const activeMineRange = () => PB.tokens.mine || ((PB.mineRange.min != null || PB.mineRange.max != null) ? PB.mineRange : null);
         const hasFilter = () => PB.enabled && (hasTagFilter() || !!activeMineRange());
 
-        // ---------------------------------------------------------------------
-        // Fetch interceptor
-        // ---------------------------------------------------------------------
-        // Records video counts from list pages. Wrapped once; chains with other fetch wrappers.
+        // --- Fetch interceptor ---
+        // Records video counts from list pages; wrapped once, chains with other fetch wrappers.
         if (!PMVX.pbFetchWrapped) {
             PMVX.pbFetchWrapped = true;
             const orig = window.fetch;
@@ -2712,25 +2549,21 @@ PMVX.scheduler = fn => {
             };
         }
 
-        // ---------------------------------------------------------------------
-        // Per-playlist tag loading
-        // ---------------------------------------------------------------------
+        // --- Per-playlist tag loading ---
         function cardId(card) {
             const href = card.getAttribute('href') || '';
             const m = href.match(/\/playlists\/([a-f0-9]{24})/);
             return m ? m[1] : null;
         }
         function cardCount(card) {
-            // The badge in the card's top-left corner is the video count.
+            // Fallback: the card's top-left badge is the video count.
             const info = PB.listInfo.get(cardId(card));
             if (info && Number.isFinite(info.count)) return info.count;
             const t = (card.innerText || '').trim().split('\n')[0];
             const n = parseInt(t, 10);
             return Number.isFinite(n) ? n : null;
         }
-        // A cached playlist is reused until its video count has changed by more than RESCAN_SHARE
-        // (up or down) since the scan, or refresh is pressed. Small additions barely move tag shares;
-        // small playlists still rescan on almost any change (1 of 10 videos is 10%).
+        // A cached entry stays fresh until the video count moves by more than RESCAN_SHARE, or refresh is pressed.
         const RESCAN_SHARE = 0.10;
         function isFresh(entry, count) {
             if (!entry) return false;
@@ -2738,13 +2571,12 @@ PMVX.scheduler = fn => {
             const base = Math.max(1, entry.count);
             return Math.abs(count - entry.count) / base <= RESCAN_SHARE;
         }
-        // Clicking a card's cached marker (an ::after pseudo-element, so nothing is injected into Vue's card)
-        // refetches that playlist; detected by position. Capture phase keeps the router from navigating.
-        const MARKER_HIT = 30; // px square, top-right
+        // Click on the ::after cached marker refetches (hit-tested by position; capture phase blocks the router).
+        const MARKER_HIT = 44; // px square, top-right
         function refreshOne(id) {
             if (!id) return;
             PB.scanIds.add(id);
-            PB.fullIds.add(id); // a manual refetch reads the whole playlist, not a sample
+            PB.fullIds.add(id);
             PB.tags.delete(id);
             PB.failed.delete(id);
             fracMemo.clear();
@@ -2761,8 +2593,7 @@ PMVX.scheduler = fn => {
             e.stopPropagation();
             if (e.type === 'click') refreshOne(cardId(card));
         }
-        // Scan page: fetch tag data for the playlists currently on the page
-        // (cached entries are reused until a playlist's video count changes).
+        // Scan page button: tags for the cards on the page.
         function scanVisible() {
             document.querySelectorAll('.playlists-grid > a[href*="/playlists/"]').forEach(card => {
                 const id = cardId(card);
@@ -2772,10 +2603,9 @@ PMVX.scheduler = fn => {
             });
             applyFilter();
         }
-        function ensureLoaded(id, count) {
+        function ensureLoaded(id, count, force = false) {
             if (!id || PB.pending.has(id) || PB.failed.has(id)) return;
-            if (isFresh(PB.tags.get(id), count)) return;
-            // One in-flight promise per id; the queue drains at CONCURRENCY.
+            if (!force && isFresh(PB.tags.get(id), count)) return;
             let resolve;
             const p = new Promise(r => { resolve = r; });
             PB.pending.set(id, p);
@@ -2801,7 +2631,7 @@ PMVX.scheduler = fn => {
                 });
             }
         }
-        // Quiet: these requests are skipped by the core's indexes (PMVX.quietUrls); the body is parsed once (pmvResJson).
+        // Quiet: skipped by the core's indexes (PMVX.quietUrls); body parsed once (pmvResJson).
         async function getPlaylistJson(url) {
             quietUrls.add(url);
             let res;
@@ -2811,16 +2641,12 @@ PMVX.scheduler = fn => {
             const j = await pmvResJson(res);
             return j?.data || j;
         }
-        // Large playlists are sampled instead of fetched whole: the first page, the last page and a few
-        // evenly spaced pages in between (SAMPLE_PAGE videos each). Tag shares are proportions, so a
-        // spread-out sample estimates them well, and the work stays bounded (at most 6 small requests,
-        // ~300 videos) however long the playlist is. Pages:
-        //   count <= FULL_UNDER        → everything (one fetchAll request)
-        //   otherwise P = ceil(count / SAMPLE_PAGE), middle pages m = clamp(round(log2(count / 100)), 1, 4)
-        //   → pages 1, P and round(1 + i·(P−1)/(m+1)) for i = 1..m
-        // e.g. 400 → 4 pages (200 videos), 1000 → 5 (250), 5000+ → 6 (300).
-        // Clicking ✓ on a card fetches that playlist in full.
+        // Over FULL_UNDER videos, sample SAMPLE_PAGE-video pages: first, last and m = clamp(round(log2(count/100)), 1, 4)
+        // evenly spaced between (round(1 + i·(P−1)/(m+1))); tag shares are proportions, so ≤ 6 requests estimate them well.
+        // e.g. 400 → 4 pages (200 videos), 1000 → 5 (250), 5000+ → 6 (300). Clicking ✓ fetches in full.
         const FULL_UNDER = 300;
+        // Prefix for models in a playlist's tag vocabulary (older entries lack it).
+        const STAR = '\u2605';
         const SAMPLE_PAGE = 50;
         function samplePages(count) {
             const P = Math.ceil(count / SAMPLE_PAGE);
@@ -2838,7 +2664,7 @@ PMVX.scheduler = fn => {
                 details = root?.videoDetails || [];
                 desc = String(root?.description || '');
             } else {
-                // One after another: these run next to other playlists' jobs already.
+                // Sequential: other playlists' jobs already run in parallel.
                 const seen = new Set();
                 let ok = 0, lastErr = null;
                 for (const page of samplePages(count)) {
@@ -2852,7 +2678,7 @@ PMVX.scheduler = fn => {
                             else break;
                         }
                     }
-                    if (!root) continue; // one missing page leaves a smaller sample, not a failed scan
+                    if (!root) continue; // a missing page shrinks the sample, doesn't fail the scan
                     ok++;
                     if (!desc) desc = String(root?.description || '');
                     (root?.videoDetails || []).forEach(v => {
@@ -2873,7 +2699,7 @@ PMVX.scheduler = fn => {
                 (v?.tags || v?.top5Tags || []).forEach(t => { if (t) own.add(String(t).toLowerCase()); });
                 (v?.starsTags || v?.stars || []).forEach(s => {
                     const n = typeof s === 'string' ? s : s?.name;
-                    if (n) own.add(String(n).toLowerCase());
+                    if (n) own.add(STAR + String(n).toLowerCase()); // marked: model lists match only these
                 });
                 const idx = [];
                 own.forEach(t => {
@@ -2885,23 +2711,20 @@ PMVX.scheduler = fn => {
             return { tags: [...vocab.keys()], vids, desc, sampled };
         }
 
-        // ---------------------------------------------------------------------
-        // Evaluation
-        // ---------------------------------------------------------------------
-        // Returns { state: 'pass'|'fail'|'pending', hits }. The description comes from the list response,
-        // so it can decide a card before its tags load.
+        // --- Evaluation ---
+        // Returns { state: 'pass'|'fail'|'pending', hits }; the description (list response) can decide before tags load.
         function descOf(id) {
             if (!PB.desc) return '';
             const d = PB.listInfo.get(id)?.desc ?? PB.tags.get(id)?.desc ?? '';
             return String(d).toLowerCase();
         }
-        // Overlap with the ticked own playlists (cached video id sets x list-response ids); null when unknown.
-        function overlapOf(id) {
-            if (!PB.overlap.length) return null;
+        // Share of videos in the ticked own playlists (all own with allMine); null when unknown.
+        function overlapOf(id, allMine = false) {
+            if (!PB.overlap.length && !allMine) return null;
             const info = PB.listInfo.get(id);
             if (!info || !info.videos) return null;
             const { playlists } = getLivePlaylists();
-            const sel = PB.overlap.map(pid => playlists.get(pid)).filter(Boolean);
+            const sel = PB.overlap.length ? PB.overlap.map(pid => playlists.get(pid)).filter(Boolean) : [...playlists.values()].filter(p => p.id !== id);
             if (!sel.length) return null;
             const per = new Map();
             let n = 0;
@@ -2916,7 +2739,7 @@ PMVX.scheduler = fn => {
             return { n, total, frac: total ? n / total : 0, per };
         }
 
-        // Fraction of videos with a tag/performer containing `term`; memoised per (playlist, fetch time, term).
+        // Share of videos with a tag/performer containing `term`, memoised per (playlist, fetch time, term).
         const fracMemo = new Map();
         function fraction(id, entry, term) {
             const key = id + '|' + (entry.at || 0) + '|' + term;
@@ -2937,8 +2760,62 @@ PMVX.scheduler = fn => {
             return r;
         }
         const pct = f => Math.round(f * 100) + '%';
-        // Every filter a playlist fails on its own (unlike evaluate(), which stops at the first):
-        // keys 'neg:<term>', 'pos:<term>', 'mine'. Unknown data counts for nothing.
+
+        // --- Score: share of a playlist's (sampled) videos that pass your filters, 0–100. ---
+        // A video passes with no exclude term and every require term on its tags (model lists vs its models only).
+        // Terms: site-wide filter (if on) + this page's tag filter, without share thresholds; titles aren't scanned.
+        function scoreTerms() {
+            const out = { exc: [], inc: [], mExc: [], mInc: [] };
+            const s = PMVX.siteFilterSnapshot?.();
+            if (s?.active) {
+                out.exc.push(...(s.exclude || [])); out.inc.push(...(s.include || []));
+                out.mExc.push(...(s.modelsExclude || [])); out.mInc.push(...(s.modelsInclude || []));
+            }
+            if (PB.enabled) {
+                PB.tokens.neg.forEach(t => out.exc.push(t.term));
+                PB.tokens.pos.forEach(t => out.inc.push(t.term));
+            }
+            for (const k in out) out[k] = [...new Set(out[k])];
+            return out;
+        }
+        const scoreActive = () => { const t = scoreTerms(); return !!(t.exc.length || t.inc.length || t.mExc.length || t.mInc.length); };
+        const scoreMemo = new Map();
+        function scoreOf(id, entry) {
+            if (!entry?.vids?.length) return null;
+            const t = scoreTerms();
+            if (!(t.exc.length || t.inc.length || t.mExc.length || t.mInc.length)) return null;
+            const key = id + '|' + (entry.at || 0) + '|' + JSON.stringify(t);
+            if (scoreMemo.has(key)) return scoreMemo.get(key);
+            const marked = entry.tags.some(x => x[0] === STAR);
+            const isModel = x => x[0] === STAR;
+            const label = x => isModel(x) ? x.slice(1) : x;
+            // Vocabulary indices per term; old entries (no model marks) match tag terms on everything.
+            const idx = (term, models) => {
+                const set = new Set();
+                entry.tags.forEach((x, i) => {
+                    if (marked && isModel(x) !== models) return;
+                    if (PMVX.termMatch(label(x), term)) set.add(i);
+                });
+                return set;
+            };
+            const E = t.exc.map(x => idx(x, false)), I = t.inc.map(x => idx(x, false));
+            const ME = t.mExc.map(x => idx(x, true)), MI = t.mInc.map(x => idx(x, true));
+            let pass = 0;
+            for (const v of entry.vids) {
+                const has = set => v.some(i => set.has(i));
+                if (E.some(has) || ME.some(has)) continue;
+                if (!I.every(has) || !MI.every(has)) continue;
+                pass++;
+            }
+            const total = entry.vids.length;
+            const score = Math.round(100 * pass / total);
+            const r = { score, grade: score >= 70 ? 'hi' : score >= 40 ? 'mid' : 'lo',
+                line: `Score ${score}: ${pass} of ${total}${entry.sampled ? ' sampled' : ''} videos pass your filters` };
+            if (scoreMemo.size > 2000) scoreMemo.clear();
+            scoreMemo.set(key, r);
+            return r;
+        }
+        // Every filter a playlist fails on its own (evaluate() stops at the first): 'neg:<term>', 'pos:<term>', 'mine'.
         function failKeys(id) {
             const entry = PB.tags.get(id);
             const desc = descOf(id);
@@ -2963,7 +2840,6 @@ PMVX.scheduler = fn => {
             }
             return out;
         }
-        // Per filter: how many playlists on the page it removes, and how many only it removes.
         PB.removedBy = new Map();
         PB.removedOnly = new Map();
         PB.removedOf = 0;
@@ -2983,10 +2859,9 @@ PMVX.scheduler = fn => {
             const entry = PB.tags.get(id);
             // Stale data is used while the refetch runs.
             const desc = descOf(id);
-            // No tag data (not loaded yet, or the fetch failed): unknown, so never a reason to hide.
+            // No tag data yet (or the fetch failed): unknown, never a reason to hide.
             const pending = hasTagFilter() && !entry;
             const hits = [];
-            // !mine range: independent of tag data, so decided first.
             const mineRange = activeMineRange();
             if (mineRange) {
                 const o = overlapOf(id);
@@ -2999,7 +2874,7 @@ PMVX.scheduler = fn => {
                 }
             }
             for (const { term, max } of PB.tokens.neg) {
-                // A description hit applies to the whole playlist: no threshold.
+                // A description hit covers the whole playlist: no threshold.
                 if (desc && PMVX.termMatch(desc, term)) { hits.push('description: ' + term); continue; }
                 if (!entry) continue;
                 const f = fraction(id, entry, term);
@@ -3021,16 +2896,12 @@ PMVX.scheduler = fn => {
         let applyTimer = null;
         function scheduleApply() {
             clearTimeout(applyTimer);
-            applyTimer = setTimeout(applyFilter, 60);
+            applyTimer = setTimeout(() => { applyFilter(); applyVideoSection(); }, 60);
         }
-        // ---------------------------------------------------------------------
-        // Follow button on playlist cards
-        // ---------------------------------------------------------------------
+        // --- Follow button on playlist cards ---
         //   GET    /api/playlists/followed?limit=…  -> { success, playlists: [...] }
-        //   POST   /api/playlists/<id>/follow       -> { success, isFollowing }
-        //   DELETE /api/playlists/<id>/follow
-        // "+ Follow" shows on hover; "✓ Following" stays visible. Not on your own playlists; nothing
-        // while logged out (the followed list fails to load).
+        //   POST   /api/playlists/<id>/follow       -> { success, isFollowing }; DELETE unfollows
+        // "+ Follow" on hover, "✓ Following" stays; not on own playlists, nothing when logged out (list fails).
         PB.followed = null; // Set of ids once loaded
         let followLoad = null;
         function loadFollowed() {
@@ -3062,7 +2933,7 @@ PMVX.scheduler = fn => {
                     b = document.createElement('button');
                     b.type = 'button';
                     b.className = 'pmvpb-follow';
-                    // The card is a link that may act on mousedown: keep every phase on the button.
+                    // The card link may act on mousedown: keep every phase on the button.
                     ['mousedown', 'mouseup'].forEach(t => b.addEventListener(t, e => { e.preventDefault(); e.stopPropagation(); }));
                     b.addEventListener('click', async e => {
                         e.preventDefault();
@@ -3104,14 +2975,17 @@ PMVX.scheduler = fn => {
                 const id = cardId(card);
                 if (!id) return;
                 const count = cardCount(card);
-                // Marker: tags are cached.
                 const entry = PB.tags.get(id);
                 if (isFresh(entry, count)) card.setAttribute('data-pmvpb-cached', '1');
                 else card.removeAttribute('data-pmvpb-cached');
-                // ≈ instead of ✓: tags come from a sample; clicking it fetches the whole playlist.
+                // ≈ instead of ✓: tags from a sample; clicking it fetches the whole playlist.
                 if (entry?.sampled && card.hasAttribute('data-pmvpb-cached')) card.setAttribute('data-pmvpb-sampled', '1');
                 else card.removeAttribute('data-pmvpb-sampled');
-                // Overlap badge (top-left) when own playlists are ticked.
+                const sc = card.hasAttribute('data-pmvpb-cached') ? scoreOf(id, entry) : null;
+                if (sc) {
+                    if (card.getAttribute('data-pmvpb-score') !== String(sc.score)) card.setAttribute('data-pmvpb-score', String(sc.score));
+                    if (card.getAttribute('data-pmvpb-grade') !== sc.grade) card.setAttribute('data-pmvpb-grade', sc.grade);
+                } else { card.removeAttribute('data-pmvpb-score'); card.removeAttribute('data-pmvpb-grade'); }
                 const ov = overlapOf(id);
                 let ovTitle = '';
                 if (ov) {
@@ -3124,14 +2998,13 @@ PMVX.scheduler = fn => {
                     card.removeAttribute('data-pmvpb-overlap-zero');
                 }
                 const setTitle = (hitTxt) => {
-                    const parts = [hitTxt, ovTitle].filter(Boolean);
+                    const parts = [sc?.line, hitTxt, ovTitle].filter(Boolean);
                     if (parts.length) { card.title = parts.join('\n'); card.dataset.pmvpbTitled = '1'; }
                     else if (card.dataset.pmvpbTitled) { card.removeAttribute('title'); delete card.dataset.pmvpbTitled; }
                 };
-                if (hasTagFilter()) {
+                if (hasTagFilter() || scoreActive()) {
                     const cached = PB.tags.get(id);
                     if (cached && cached.at < PB.sessionStart && isFresh(cached, count)) fromCache++;
-                    // Tag data is fetched per playlist; automatically only when Auto-scan is on.
                     if (PB.autoScan || PB.scanIds.has(id)) ensureLoaded(id, count);
                     else if (!isFresh(cached, count)) notScanned++;
                 }
@@ -3169,12 +3042,11 @@ PMVX.scheduler = fn => {
             PB.removedBy = removedBy; PB.removedOnly = removedOnly; PB.removedOf = evaluated || cards.length;
             paintRemovedCounts();
             updateCounter(cards.length, hidden, pending, fromCache, notScanned);
-            // Hiding shortens the page: nudge infinite scroll for the next page, but only while fewer than 24 cards are visible.
+            // Hiding shortens the page: nudge infinite scroll while fewer than 24 cards show.
             if (hasFilter() && hidden && (cards.length - hidden) < 24) {
                 try { window.dispatchEvent(new Event('scroll')); } catch {}
             }
         }
-        // Summary pills next to the Filters button; the full list is in its tooltip.
         function updateSummary(total, hidden) {
             if (!PB.toggle) return;
             const host = PB.toggle;
@@ -3192,7 +3064,7 @@ PMVX.scheduler = fn => {
                 pill('pl', names.length === 1 ? names[0] : `${names.length} playlists`);
             }
             PB.lastTotal = total; PB.lastHidden = hidden;
-            // Result next to "N playlists total" via a data-* attribute + ::after, which survives Vue re-renders.
+            // Result next to "N playlists total" via data-* + ::after, which survives Vue re-renders.
             const rc = document.querySelector('.playlists-dashboard .results-count');
             if (rc) {
                 const any = PB.terms.neg.length || PB.terms.pos.length || r.min != null || r.max != null;
@@ -3222,10 +3094,7 @@ PMVX.scheduler = fn => {
             PB.counter.textContent = parts.join(' · ');
         }
 
-        // ---------------------------------------------------------------------
-        // Styles
-        // ---------------------------------------------------------------------
-        // Mirrors the site's "More Filters" panel, in the purple of the /playlists page.
+        // --- Styles ---
         function injectStyles() {
             if (document.getElementById(STYLE_ID)) return;
             const st = document.createElement('style');
@@ -3251,6 +3120,11 @@ PMVX.scheduler = fn => {
                     font-family:inherit;font-variant-numeric:tabular-nums; cursor: pointer;
                     box-shadow: 0 0 0 1px rgba(168,85,247,0.5); }
                 .playlists-grid > a[data-pmvpb-cached="1"][data-pmvpb-sampled="1"]::after { content: '\\2248'; }
+                .playlists-grid > a[data-pmvpb-cached="1"][data-pmvpb-score]::after { content: attr(data-pmvpb-score); width: auto; min-width: 18px; padding: 0 6px; border-radius: 9999px; }
+                .playlists-grid > a[data-pmvpb-cached="1"][data-pmvpb-sampled="1"][data-pmvpb-score]::after { content: '\\2248 ' attr(data-pmvpb-score); }
+                .playlists-grid > a[data-pmvpb-grade="hi"]::after { color: rgb(134,239,172) !important; box-shadow: 0 0 0 1px rgba(34,197,94,0.6) !important; }
+                .playlists-grid > a[data-pmvpb-grade="mid"]::after { color: rgb(253,224,71) !important; box-shadow: 0 0 0 1px rgba(234,179,8,0.6) !important; }
+                .playlists-grid > a[data-pmvpb-grade="lo"]::after { color: rgb(252,165,165) !important; box-shadow: 0 0 0 1px rgba(239,68,68,0.6) !important; }
                 .playlists-grid > a[data-pmvpb-overlap]::before {
                     content: attr(data-pmvpb-overlap); position: absolute; top: 6px; left: 6px; z-index: 20;
                     padding: 2px 8px; border-radius: 9999px; line-height: 16px;
@@ -3368,9 +3242,7 @@ PMVX.scheduler = fn => {
             (document.head || document.documentElement).appendChild(st);
         }
 
-        // ---------------------------------------------------------------------
-        // Panel
-        // ---------------------------------------------------------------------
+        // --- Panel ---
         const ICONS = {
             filter: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5H3m9 14H3M14 3v4m2 10v4m5-9h-9m9 7h-5m5-14h-7m-6 5v4m0-2H3"/></svg>',
             list:   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h.01M3 18h.01M3 6h.01M8 12h13M8 18h13M8 6h13"/></svg>',
@@ -3398,12 +3270,10 @@ PMVX.scheduler = fn => {
             const grid = el('div', 'pmvpb-grid');
             panel.appendChild(grid);
 
-            // Tag chips (include / exclude)
             const s1 = el('section');
             const h1 = el('h3'); h1.innerHTML = ICONS.filter + ' Playlist contents';
             s1.appendChild(h1);
 
-            // Suggestions: tags seen in cached playlists, most common first.
             const dl = el('datalist'); dl.id = 'pmvpb-tag-suggest';
             let dlSig = -1;
             const refreshSuggest = () => {
@@ -3500,7 +3370,6 @@ PMVX.scheduler = fn => {
                 });
                 paintRemovedCounts();
             };
-            // Inline share editor for the selected chip: one slider.
             const renderEditor = () => {
                 editorHost.textContent = '';
                 if (!editing) return;
@@ -3530,7 +3399,6 @@ PMVX.scheduler = fn => {
                 const hint = el('div', 'pmvpb-hint', neg
                     ? 'Without a share, a single video with this tag hides the playlist.'
                     : 'Without a share, a single video with this tag is enough.');
-                // Whole word only: "=ch" matches the tag "ch" or "big ch", not "challenge".
                 const isWord = PMVX.isWordTerm(t.term);
                 const wordChip = chip('Whole word', isWord ? 'Only tags containing this as a separate word — click to match anywhere' : 'Match only as a separate word (ch, not challenge)', () => {
                     const next = isWord ? t.term.slice(1) : '=' + t.term;
@@ -3575,7 +3443,6 @@ PMVX.scheduler = fn => {
             renderChips();
             const inp = rowPos.inp;
 
-            // Own playlists (overlap badge)
             const s2 = el('section');
             const h2 = el('h3'); h2.innerHTML = ICONS.list + ' My playlists';
             s2.appendChild(h2);
@@ -3608,7 +3475,6 @@ PMVX.scheduler = fn => {
             };
             renderMineChips();
 
-            // Overlap range (dual slider)
             const s3 = el('section');
             const h3 = el('h3'); h3.innerHTML = ICONS.range + ' Overlap range';
             s3.appendChild(h3);
@@ -3617,7 +3483,6 @@ PMVX.scheduler = fn => {
             const pill = el('div', 'pmvpb-pill');
             const pMin = el('span', null, '0%'); const pSep = el('span', 'sep', '-'); const pMax = el('span', null, 'Any');
             pill.append(pMin, pSep, pMax); pillRow.appendChild(pill);
-            // Same "−N removed" count as the tag chips.
             const rangeCnt = el('span', 'pmvpb-rangecnt');
             rangeCnt.dataset.pmvpbKey = 'mine';
             pillRow.appendChild(rangeCnt);
@@ -3675,8 +3540,7 @@ PMVX.scheduler = fn => {
             return true;
         }
 
-        // The Filters control sits in the site's tab row (right-aligned, tab-styled) as a trailing child after Vue's
-        // v-for fragment. Clicking it toggles the panel; the switch toggles filtering. The page observer re-inserts it if dropped.
+        // Filters control: trailing child of the site's tab row after Vue's v-for fragment; the page observer re-inserts it.
         function setOpen(v) {
             PB.open = v;
             const bar = document.getElementById(BAR_ID);
@@ -3732,7 +3596,6 @@ PMVX.scheduler = fn => {
             try { updateSummary(PB.lastTotal || 0, PB.lastHidden || 0); } catch {}
             return btn;
         }
-        // Notch under the button so the panel reads as unfolding from it.
         function placeCaret() {
             const bar = document.getElementById(BAR_ID), btn = document.getElementById(BTN_ID);
             const caret = bar?.querySelector('.pmvpb-caret');
@@ -3743,7 +3606,6 @@ PMVX.scheduler = fn => {
                 caret.style.left = Math.round(Math.max(16, Math.min(r.width - 32, b.left + b.width / 2 - r.left - 8))) + 'px';
             });
         }
-        // Chips changed: re-derive tokens, persist, re-render, re-filter.
         function applyTerms() {
             PB.tokens = { neg: PB.terms.neg, pos: PB.terms.pos, mine: null };
             saveSettings();
@@ -3758,9 +3620,265 @@ PMVX.scheduler = fn => {
             applyTerms();
         }
 
-        // ---------------------------------------------------------------------
-        // Lifecycle
-        // ---------------------------------------------------------------------
+        // (playlistBrowseFilter continues in 07-video-checker.js, which also closes it.)
+        // (Still inside playlistBrowseFilter from 06-playlists-overview.js: same scope, PB etc.)
+
+        // --- Video pages: "Playlists with this video" ---
+        // Scan button: loads the video ids of the playlists shown (one small request each) for the overlap badge
+        // (ticked own playlists, else all). With a tag filter also tags: ✓/≈ pass, ⊘ fail (dimmed); never hidden here.
+        const VSCAN_ID = 'pmvpb-vscan';
+        const isVideoPage = () => /^\/video\/[^/]+/.test(location.pathname);
+        PB.vactive = false;
+        PB.vscan = null; // ids being scanned from the button, or null
+        PB.idsPending = new Set();
+        // Video ids + count of one playlist: the single-playlist endpoint lists every id even with limit=1.
+        async function loadIds(id) {
+            if (PB.idsPending.has(id)) return;
+            PB.idsPending.add(id);
+            try {
+                const root = await getPlaylistJson(`/api/playlists/${id}?page=1&limit=1`);
+                if (root && Array.isArray(root.videos)) {
+                    PB.listInfo.set(id, {
+                        count: root.validVideoCount ?? root.videos.length,
+                        name: root.name || '',
+                        desc: String(root.description || ''),
+                        videos: root.videos.map(v => typeof v === 'string' ? v : (v?._id || v?.id)).filter(Boolean),
+                    });
+                }
+            } catch { PB.failed.add(id); }
+            finally { PB.idsPending.delete(id); scheduleApply(); }
+        }
+        async function loadIdsAll(ids) {
+            const list = [...ids];
+            const worker = async () => { while (list.length) await loadIds(list.shift()); };
+            await Promise.all(Array.from({ length: Math.min(list.length, Math.max(1, PMVX.perf().lookups)) }, worker));
+        }
+        const hasIds = id => !!PB.listInfo.get(id)?.videos;
+        const isMine = id => getLivePlaylists().playlists.has(id);
+        function overlapLabel() {
+            const { playlists } = getLivePlaylists();
+            const names = PB.overlap.map(id => playlists.get(id)?.name).filter(Boolean);
+            if (!names.length) return 'my playlists';
+            return names.length === 1 ? names[0] : `${names.length} playlists`;
+        }
+        function findVideoSection() {
+            const h = [...document.querySelectorAll('h3')].find(x => /^\s*Playlists with this video\b/i.test(x.textContent || ''));
+            if (!h) return null;
+            const header = h.parentElement;
+            const grid = header?.nextElementSibling;
+            if (!header || !grid || !grid.querySelector(':scope > a[href*="/playlists/"]')) return null;
+            return { header, grid };
+        }
+        function vCardCount(card) {
+            const info = PB.listInfo.get(cardId(card));
+            if (info && Number.isFinite(info.count)) return info.count;
+            const b = card.querySelector('[class~="top-1.5"][class~="right-1.5"]');
+            const n = parseInt((b?.textContent || '').replace(/[^\d]/g, ''), 10);
+            return Number.isFinite(n) ? n : null;
+        }
+        function topTags(entry, n = 6) {
+            const cnt = new Map();
+            entry.vids.forEach(idx => idx.forEach(i => cnt.set(i, (cnt.get(i) || 0) + 1)));
+            const total = entry.vids.length || 1;
+            return [...cnt.entries()].sort((a, b) => b[1] - a[1]).slice(0, n)
+                .map(([i, c]) => `${entry.tags[i]} ${pct(c / total)}`).join(', ');
+        }
+        function vScan() {
+            const sec = findVideoSection();
+            if (!sec) return;
+            const ids = new Set();
+            const cards = [...sec.grid.querySelectorAll(':scope > a[href*="/playlists/"]')];
+            const withTags = hasTagFilter() || scoreActive();
+            // All loaded and fresh: the button reads Rescan and refetches everything.
+            const force = !vTodo(cards);
+            const idJobs = [];
+            cards.forEach(card => {
+                const id = cardId(card);
+                if (!id) return;
+                ids.add(id);
+                PB.failed.delete(id);
+                if (force || !hasIds(id)) idJobs.push(id);
+                if (withTags) {
+                    PB.scanIds.add(id);
+                    ensureLoaded(id, vCardCount(card), force);
+                }
+            });
+            idJobs.forEach(id => PB.idsPending.add(id)); // counted as busy right away
+            PB.vscan = ids;
+            applyVideoSection();
+            idJobs.forEach(id => PB.idsPending.delete(id));
+            loadIdsAll(idJobs);
+        }
+        const setText = (n, t) => { if (n && n.textContent !== t) n.textContent = t; };
+        const setAttr = (n, k, v) => { if (v == null) { if (n.hasAttribute(k)) n.removeAttribute(k); } else if (n.getAttribute(k) !== v) n.setAttribute(k, v); };
+        function ensureVideoButton(header) {
+            let w = document.getElementById(VSCAN_ID);
+            if (w && w.parentElement === header) return w;
+            if (!w) {
+                w = el('div');
+                w.id = VSCAN_ID;
+                const note = el('span', 'note');
+                const b = el('button', 'btn', '⟳ Scan');
+                b.type = 'button';
+                b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); vScan(); });
+                w.append(note, b);
+            }
+            header.appendChild(w);
+            return w;
+        }
+        function vTodo(cards) {
+            const withTags = hasTagFilter() || scoreActive();
+            return cards.filter(c => {
+                const id = cardId(c);
+                if (!id) return false;
+                return !hasIds(id) || (withTags && !isFresh(PB.tags.get(id), vCardCount(c)));
+            }).length;
+        }
+        function applyVideoSection() {
+            if (!PB.vactive) return;
+            const sec = findVideoSection();
+            if (!sec) return;
+            setAttr(sec.grid, 'data-pmvpb-vgrid', '1');
+            const w = ensureVideoButton(sec.header);
+            const btn = w.querySelector('.btn'), note = w.querySelector('.note');
+            const cards = [...sec.grid.querySelectorAll(':scope > a[href*="/playlists/"]')];
+            const filterOn = hasFilter();
+            let failN = 0, known = 0, busy = 0, failedN = 0, ovKnown = 0;
+            cards.forEach(card => {
+                const id = cardId(card);
+                if (!id) return;
+                const count = vCardCount(card);
+                const entry = PB.tags.get(id);
+                const loading = PB.pending.has(id) || PB.idsPending.has(id);
+                if (loading) busy++;
+                if (PB.failed.has(id) && PB.vscan?.has(id)) failedN++;
+                const lines = [];
+                // Overlap pill top-left; the site's count badge shows "mine/total" via data-* + CSS, so Vue keeps the node.
+                const mine = isMine(id);
+                const ov = mine ? null : overlapOf(id, true);
+                const badge = card.querySelector('[class~="top-1.5"][class~="right-1.5"]');
+                if (badge) setAttr(badge, 'data-pmvpb-ov', ov ? `${ov.n}/${ov.total}` : null);
+                if (mine) {
+                    setAttr(card, 'data-pmvpb-voverlap', 'mine');
+                    setAttr(card, 'data-pmvpb-overlap-zero', null);
+                    lines.push('One of your playlists');
+                } else if (ov) {
+                    ovKnown++;
+                    setAttr(card, 'data-pmvpb-voverlap', ov.n && ov.frac < 0.005 ? '<1%' : pct(ov.frac));
+                    setAttr(card, 'data-pmvpb-overlap-zero', ov.n ? null : '1');
+                    const perTxt = [...ov.per.entries()].sort((a, b) => b[1] - a[1]).map(([nm, c]) => `${nm} (${c})`).join(', ');
+                    lines.push(`In ${overlapLabel()}: ${ov.n} of ${ov.total} (${pct(ov.frac)})` + (perTxt ? ' — ' + perTxt : ''));
+                } else {
+                    setAttr(card, 'data-pmvpb-voverlap', null);
+                    setAttr(card, 'data-pmvpb-overlap-zero', null);
+                }
+                let state = null;
+                if (filterOn && (entry || (ov && !hasTagFilter()))) {
+                    known++;
+                    const r = evaluate(id, count);
+                    if (r.state === 'fail') { state = 'fail'; failN++; lines.push('Fails your playlist filter: ' + r.hits.join(', ')); }
+                    else if (r.state === 'pass') { state = entry?.sampled ? 'sampled' : 'pass'; lines.push('Passes your playlist filter'); }
+                }
+                if (entry) {
+                    const tt = topTags(entry);
+                    if (tt) lines.push('Top tags: ' + tt);
+                    if (entry.sampled) lines.push(`Tags sampled from ${entry.sampled.n} of ${entry.sampled.of} videos`);
+                    if (hasTagFilter() && !isFresh(entry, count)) lines.push('Video count changed since the scan — press Scan to refresh');
+                }
+                const sc = entry ? scoreOf(id, entry) : null;
+                if (sc) {
+                    lines.unshift(sc.line);
+                    if (!state) state = entry.sampled ? 'sampled' : 'pass';
+                    setAttr(card, 'data-pmvpb-vscore', (state === 'fail' ? '\u2298 ' : entry.sampled ? '\u2248 ' : '') + sc.score);
+                    setAttr(card, 'data-pmvpb-grade', sc.grade);
+                } else { setAttr(card, 'data-pmvpb-vscore', null); setAttr(card, 'data-pmvpb-grade', null); }
+                setAttr(card, 'data-pmvpb-vstate', loading ? 'busy' : state);
+                if (lines.length) { setAttr(card, 'title', lines.join('\n')); card.dataset.pmvpbTitled = '1'; }
+                else if (card.dataset.pmvpbTitled) { card.removeAttribute('title'); delete card.dataset.pmvpbTitled; }
+            });
+            const total = cards.length;
+            const scanning = PB.vscan && [...PB.vscan].some(id => PB.pending.has(id) || PB.idsPending.has(id));
+            if (PB.vscan && !scanning) PB.vscan = null;
+            setText(btn, scanning ? `Scanning… ${total - busy}/${total}` : (vTodo(cards) ? '⟳ Scan' : '⟳ Rescan'));
+            btn.disabled = !!scanning;
+            setAttr(btn, 'title', `Count how many videos of each playlist are already in ${overlapLabel()} (tick playlists under Filters on the Playlists page to narrow it).`
+                + (hasTagFilter() ? ' Also checks their tags against your playlist filter; playlists over 300 videos are sampled.' : ''));
+            const parts = [];
+            if (ovKnown) parts.push(`overlap with ${overlapLabel()}`);
+            if (known && filterOn) parts.push(failN ? `${failN} of ${known} fail your filter` : `all ${known} pass your filter`);
+            if (failedN) parts.push(`${failedN} failed`);
+            setText(note, parts.join(' · '));
+            setAttr(note, 'data-fail', filterOn && failN ? '1' : null);
+        }
+        function injectVideoStyles() {
+            if (document.getElementById(STYLE_ID + '-v')) return;
+            const st = document.createElement('style');
+            st.id = STYLE_ID + '-v';
+            st.textContent = `
+                #${VSCAN_ID} { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; min-width: 0; }
+                #${VSCAN_ID} .note { color: rgb(156,163,175); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+                #${VSCAN_ID} .note[data-fail="1"] { color: rgb(252,165,165); }
+                #${VSCAN_ID} .btn { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; font: inherit; font-size: 12px; font-weight: 500; line-height: 16px;
+                    background: #2A2A2A; color: #fff; border: 1px solid #3A3A3A; border-radius: 8px; cursor: pointer; white-space: nowrap; transition: background .2s, border-color .2s; }
+                #${VSCAN_ID} .btn:hover { background: #3A3A3A; border-color: rgba(249,115,22,0.4); }
+                #${VSCAN_ID} .btn:disabled { opacity: .6; cursor: default; }
+                [data-pmvpb-vgrid] > a { position: relative; }
+                [data-pmvpb-vgrid] > a[data-pmvpb-voverlap]::before {
+                    content: attr(data-pmvpb-voverlap); position: absolute; top: 6px; left: 6px; z-index: 20;
+                    padding: 2px 8px; border-radius: 9999px; line-height: 16px;
+                    background: linear-gradient(135deg, rgb(168,85,247), rgb(139,92,246)); color: #fff;
+                    font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; pointer-events: none;
+                    text-shadow: 0 1px 1px rgba(0,0,0,0.35); box-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+                [data-pmvpb-vgrid] > a[data-pmvpb-overlap-zero="1"]::before { background: rgba(0,0,0,0.85); color: rgb(209,213,219);
+                    box-shadow: 0 0 0 1px rgba(255,255,255,0.2), 0 1px 4px rgba(0,0,0,0.6); font-weight: 500; }
+                [data-pmvpb-vgrid] [data-pmvpb-ov] { font-size: 0 !important; background: linear-gradient(135deg, rgb(168,85,247), rgb(139,92,246)) !important;
+                    color: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+                [data-pmvpb-vgrid] [data-pmvpb-ov]::after { content: attr(data-pmvpb-ov); margin-left: 4px; font-size: 12px; line-height: 16px; font-weight: 700;
+                    font-variant-numeric: tabular-nums; text-shadow: 0 1px 1px rgba(0,0,0,0.35); }
+                [data-pmvpb-vgrid] > a[data-pmvpb-overlap-zero="1"] [data-pmvpb-ov] { background: rgba(0,0,0,0.85) !important; color: rgb(209,213,219);
+                    box-shadow: 0 0 0 1px rgba(255,255,255,0.2), 0 1px 4px rgba(0,0,0,0.6); }
+                [data-pmvpb-vgrid] > a[data-pmvpb-voverlap="mine"]::before { background: rgba(0,0,0,0.85); color: rgb(192,132,252);
+                    box-shadow: 0 0 0 1px rgba(168,85,247,0.5), 0 1px 4px rgba(0,0,0,0.6); }
+                [data-pmvpb-vgrid] > a[data-pmvpb-vstate]::after {
+                    position: absolute; top: 32px; right: 6px; z-index: 20; width: 18px; height: 18px; line-height: 18px; text-align: center; border-radius: 50%;
+                    background: rgba(0,0,0,0.85); color: rgb(253,186,116); font-size: 11px; font-weight: 700; font-family: inherit; pointer-events: none;
+                    box-shadow: 0 0 0 1px rgba(249,115,22,0.5); }
+                [data-pmvpb-vgrid] > a[data-pmvpb-vstate="pass"]::after { content: '\\2713'; }
+                [data-pmvpb-vgrid] > a[data-pmvpb-vstate="sampled"]::after { content: '\\2248'; }
+                [data-pmvpb-vgrid] > a[data-pmvpb-vstate="busy"]::after { content: '\\2026'; color: rgb(209,213,219); box-shadow: 0 0 0 1px rgba(255,255,255,0.2); }
+                [data-pmvpb-vgrid] > a[data-pmvpb-vstate="fail"]::after { content: '\\2298'; color: rgb(252,165,165); box-shadow: 0 0 0 1px rgba(239,68,68,0.6); }
+                [data-pmvpb-vgrid] > a[data-pmvpb-vscore]:not([data-pmvpb-vstate="busy"])::after { content: attr(data-pmvpb-vscore); width: auto; min-width: 18px; padding: 0 6px; border-radius: 9999px; }
+                [data-pmvpb-vgrid] > a[data-pmvpb-grade="hi"]:not([data-pmvpb-vstate="busy"])::after { color: rgb(134,239,172); box-shadow: 0 0 0 1px rgba(34,197,94,0.6); }
+                [data-pmvpb-vgrid] > a[data-pmvpb-grade="mid"]:not([data-pmvpb-vstate="busy"])::after { color: rgb(253,224,71); box-shadow: 0 0 0 1px rgba(234,179,8,0.6); }
+                [data-pmvpb-vgrid] > a[data-pmvpb-grade="lo"]:not([data-pmvpb-vstate="busy"])::after { color: rgb(252,165,165); box-shadow: 0 0 0 1px rgba(239,68,68,0.6); }
+                [data-pmvpb-vgrid] > a[data-pmvpb-vstate="fail"] { opacity: 0.4; filter: grayscale(0.6); transition: opacity .2s; }
+                [data-pmvpb-vgrid] > a[data-pmvpb-vstate="fail"]:hover { opacity: 0.85; }
+            `;
+            (document.head || document.documentElement).appendChild(st);
+        }
+        const scheduleVideo = PMVX.scheduler(applyVideoSection);
+        function vstart() {
+            if (PB.vactive) return;
+            PB.vactive = true;
+            injectVideoStyles();
+            // Self-heal: Vue re-renders the section (and drops the button) on navigation between videos.
+            PB.vobserver = new MutationObserver(scheduleVideo);
+            PB.vobserver.observe(document.body, { childList: true, subtree: true });
+            window.addEventListener('pmv:cache-ready', scheduleVideo);
+            try { loadPlaylistCache(); } catch {}
+            applyVideoSection();
+        }
+        function vstop() {
+            if (!PB.vactive) return;
+            PB.vactive = false;
+            PB.vobserver?.disconnect();
+            PB.vobserver = null;
+            window.removeEventListener('pmv:cache-ready', scheduleVideo);
+            PB.vscan = null;
+            document.getElementById(VSCAN_ID)?.remove();
+        }
+
+        // --- Lifecycle ---
         function start() {
             if (PB.active) return;
             PB.active = true;
@@ -3795,6 +3913,8 @@ PMVX.scheduler = fn => {
         }
         function onRoute() {
             if (isBrowsePage()) start(); else stop();
+            // Playlist pages too: their expandable video info (hud/13-badges.js) carries the same section.
+            if (isVideoPage() || /^\/playlists\/[0-9a-f]{24}/i.test(location.pathname)) { PB.vscan = null; vstart(); scheduleVideo(); } else vstop();
         }
 
         loadSettings();
@@ -3823,21 +3943,16 @@ whenBody(() => {
     'use strict';
 
 
-    // ---------------------------------------------------------------------
-    // Configuration
-    // ---------------------------------------------------------------------
+    // --- Configuration ---
 
     const CACHE_KEY = 'pmv_firefox_playlist_cache_v1';
     const CACHE_TTL = 12 * 60 * 60 * 1000;
     const WATCHED_KEY = 'pmv_watched_v1';
-    const WATCHED_MAX = 3000; // cap on stored entries
+    const WATCHED_MAX = 3000;
     const QUIET_MS = 2200;
     const SOFT_CLEAN_EVERY_VIDEOS = 4;
 
-    // Per-playlist appearance and button order, stored in localStorage as
-    // pmv_playlist_config_v1 (included in settings export/import):
-    //   { styles: { "<name or id>": { label?, color } }, order: ["<name or id>", ...] }
-    // Names match case-insensitively against the API name.
+    // { styles: { "<name or id>": { label?, color } }, order: ["<name or id>", ...] }; names case-insensitive.
     const PLAYLIST_CONFIG_KEY = 'pmv_playlist_config_v1';
     const playlistConfig = (() => {
         try {
@@ -3846,7 +3961,7 @@ whenBody(() => {
         } catch { return { styles: {}, order: [] }; }
     })();
 
-    // Playlists without an explicit color get a stable one derived from the name, in a muted band.
+    // No explicit color: a stable muted one derived from the name.
     const FALLBACK_COLOR = '78d64c';
     function derivedColor(seed) {
         let h = 0;
@@ -3869,8 +3984,7 @@ whenBody(() => {
         return idx === -1 ? playlistConfig.order.length : idx;
     }
 
-    // Reject list: a playlist chosen in Settings. A video in it is removed from every other list,
-    // adding it elsewhere removes it from the reject list, and "already saved" renders red instead of green.
+    // Reject list (Settings): exclusive with all other lists; "already saved" shows red instead of green.
     const REJECT_KEY = 'pmv_reject_playlist_v1';
     const REJECT_HEX = 'ff5050';
     const REJECT_RGB = '255,80,80';
@@ -3898,14 +4012,12 @@ whenBody(() => {
         return { label: null, color: derivedColor(key || id) };
     }
 
-    // Button text is always lowercase; the full name stays in the title tooltip.
     function getPlaylistDisplayName(name, id) {
         const s = getPlaylistStyle(name, id);
         return (s && s.label) || name || '';
     }
 
-    // Badges stay green unless a playlist has an explicit color by id in pmv_playlist_config_v1.
-    // Auto-derived colors are not used here, so a color keeps its meaning.
+    // Badges stay green unless a color is set by id; derived colors are skipped so a color keeps its meaning.
     function playlistBadgeRgb(name, id) {
         if (isRejectList(id)) return REJECT_RGB;
         const s = id && playlistConfig.styles[id];
@@ -3922,8 +4034,7 @@ whenBody(() => {
         return `${r},${g},${b}`;
     }
 
-    // Blends a color toward neutral gray (Tailwind gray-400) for the inactive state.
-    // Blended in RGB; low alpha over near-black skews saturated hues (yellow) toward olive.
+    // Inactive state: mix toward gray-400 in RGB (low alpha over near-black turns yellow olive).
     const GRAY_RGB = [156, 163, 175];
     function mixToGrayStr(hex, ratio = 0.65) {
         const [r, g, b] = hexToRgbArr(hex);
@@ -3933,9 +4044,7 @@ whenBody(() => {
         return `${mr},${mg},${mb}`;
     }
 
-    // ---------------------------------------------------------------------
-    // State
-    // ---------------------------------------------------------------------
+    // --- State ---
 
     const State = {
         playlists: new Map(),
@@ -3946,7 +4055,7 @@ whenBody(() => {
 
         currentVideoId: null,
         currentVideoData: null,
-        video: null,               // cached <video> element
+        video: null,
 
         hud: null,
         hudTimeout: null,
@@ -3989,12 +4098,12 @@ whenBody(() => {
         videosSinceSoftClean: 0,
         lastSoftCleanVideoId: null,
 
-        thumbnailIndex: new Map(),   // clean URL (no query) → video _id
-        titleIndex: new Map(),       // lowercased title → video _id
-        videoMeta: new Map(),        // video _id → { tags, bayesianRating, width, height, duration, uploader }
-        slugToApiId: new Map(),      // slug ID (from href) → actual API _id
+        thumbnailIndex: new Map(),   // URL without query → _id
+        titleIndex: new Map(),       // lowercased title → _id
+        videoMeta: new Map(),        // _id → { tags, bayesianRating, width, height, duration, uploader }
+        slugToApiId: new Map(),      // slug ID (from href) → API _id
 
-        lastNextHudVideoId: null,    // last video ID shown in the next-video mini-HUD
+        lastNextHudVideoId: null,
         nextHudEl: null,
         nextHudHideTimer: null,
     };
@@ -4002,21 +4111,17 @@ whenBody(() => {
     try { PMVX.state = State; } catch {}
     PMVX.filterChecks.push(() => State.recFilterMode !== 'all');
 
-    // ---------------------------------------------------------------------
-    // Utilities
-    // ---------------------------------------------------------------------
+    // --- Utilities ---
 
 
-    // Strip the query string at write time so lookups need no split().
+    // Stripped at write time so lookups need no split().
     function cleanUrl(u) {
         if (!u) return '';
         const q = u.indexOf('?');
         return q === -1 ? u : u.slice(0, q);
     }
 
-    // ---------------------------------------------------------------------
-    // Cache
-    // ---------------------------------------------------------------------
+    // --- Cache ---
 
     function rebuildReverseIndex() {
         State.reverse.clear();
@@ -4049,7 +4154,7 @@ whenBody(() => {
         }
     }
 
-    // Mutations go through saveCacheSoon(): one localStorage write and one pmv:cache-ready event per burst.
+    // Use saveCacheSoon(): one write and one pmv:cache-ready event per burst.
     let saveCacheTimer = null;
     function saveCacheSoon() {
         clearTimeout(saveCacheTimer);
@@ -4073,7 +4178,6 @@ whenBody(() => {
             };
             localStorage.setItem(CACHE_KEY, JSON.stringify(data));
             State.cacheLoadedAt = data.updatedAt;
-            // Notify the other modules that the cache is ready.
             notifyCacheReady();
         } catch {}
     }
@@ -4082,12 +4186,9 @@ whenBody(() => {
         return State.cacheLoadedAt && Date.now() - State.cacheLoadedAt < CACHE_TTL;
     }
 
-    // ---------------------------------------------------------------------
-    // API
-    // ---------------------------------------------------------------------
+    // --- API ---
 
-    // Own requests are marked "quiet" while in flight so the interceptor does not index their playlist
-    // responses twice. The body is parsed once and shared (pmvResJson).
+    // Own requests are marked quiet so the interceptor doesn't index their playlist responses twice.
     async function api(url, opts) {
         quietUrls.add(url);
         let res;
@@ -4097,15 +4198,11 @@ whenBody(() => {
         return pmvResJson(res);
     }
 
-    // The site's content flags (its own moderation list: Gay, Trans, Nudity, Extreme, VO, Remix, Promo,
-    // Seizure) plus three that only some lists carry. Nudity is hasExplicitContent; SFW is its inverse.
-    // The list lives in core.js (PMVX.contentFlags), shared with the playlist-page filter.
+    // Site moderation flags plus three only some lists carry; Nudity = hasExplicitContent, SFW its inverse.
     const CONTENT_FLAGS = PMVX.contentFlags;
 
-    // Content flags per video, kept across pages and visits (localStorage): id -> [trueBits, knownBits],
-    // bit i = CONTENT_FLAGS[i]. Full video documents (they carry moderationStatus / isReleased) leave the
-    // site's eight moderation flags out when a video was never flagged: those count as known and false.
-    // Partial copies (playlist videoDetails) only add the flags they do carry.
+    // localStorage: id -> [trueBits, knownBits], bit i = CONTENT_FLAGS[i]. Full documents omit never-set
+    // moderation flags (known false); partial copies (playlist videoDetails) add only the flags they carry.
     const FLAG_CACHE_KEY = 'pmvx_flag_cache_v1';
     const FLAG_CACHE_MAX = 15000;
     let flagCache = null;
@@ -4146,7 +4243,17 @@ whenBody(() => {
         saveFlagCache();
     }
 
-    // Returns the number of new thumbnail URLs; the interceptor invalidates queue badges only when > 0.
+    function votedTerms(votes) {
+        const m = new Map();
+        (Array.isArray(votes) ? votes : []).forEach(tv => {
+            if (!tv?.tag) return;
+            const k = String(tv.tag).toLowerCase().trim();
+            m.set(k, (m.get(k) || 0) + (tv.upvotes?.length || 0) - (tv.downvotes?.length || 0));
+        });
+        return [...m].filter(([, score]) => score >= 1).map(([k]) => k);
+    }
+
+    // Returns the number of new thumbnail URLs; queue badges are invalidated only when > 0.
     function indexVideoDetails(details) {
         if (!Array.isArray(details)) return 0;
         let added = 0;
@@ -4157,16 +4264,35 @@ whenBody(() => {
         };
         details.forEach(v => {
             if (!v?._id) return;
-            // Store clean URLs at write time.
             [v.thumbnailUrl, v.rawThumbnailUrl, v.previewUrl].forEach(u => putThumb(u, v._id));
             Object.values(v.thumbnailSizes || {}).forEach(t => putThumb(t?.url, v._id));
             if (v.title) State.titleIndex.set(v.title.trim().toLowerCase(), v._id);
             rememberFlags(v);
-            // Full metadata for the tag filter.
+            // tags/top5Tags hold at most 5 and playlist data has no starsTags; full sets come from tagVotes
+            // (full documents only) and aren't overwritten by later trimmed copies.
+            const full = Array.isArray(v.tagVotes);
+            const prev = State.videoMeta.get(v._id);
+            const baseTags = (v.tags || v.top5Tags || []).map(t => String(t).toLowerCase());
+            const baseStars = (v.starsTags || v.stars || []).map(s => (typeof s === 'string' ? s : (s?.name || '')).toLowerCase()).filter(Boolean);
+            let tags, starsTags;
+            if (full) {
+                const unified = v.tagVotes.some(tv => tv?.tagType);
+                const general = unified ? v.tagVotes.filter(tv => !tv?.tagType || tv.tagType === 'general') : v.tagVotes;
+                const starVotes = Array.isArray(v.starVotes) && v.starVotes.length ? v.starVotes
+                    : (unified ? v.tagVotes.filter(tv => tv?.tagType === 'stars') : []);
+                tags = [...new Set([...baseTags, ...votedTerms(general)])];
+                starsTags = [...new Set([...baseStars, ...votedTerms(starVotes)])];
+            } else if (prev?.full) {
+                tags = [...new Set([...prev.tags, ...baseTags])];
+                starsTags = [...new Set([...prev.starsTags, ...baseStars])];
+            } else {
+                tags = baseTags;
+                starsTags = baseStars;
+            }
             State.videoMeta.set(v._id, {
-                tags: (v.tags || v.top5Tags || []).map(t => t.toLowerCase()),
-                starsTags: (v.starsTags || v.stars || []).map(s => (typeof s === 'string' ? s : (s?.name || '')).toLowerCase()).filter(Boolean),
-                // Music artists, so a filter term can require or exclude an artist (tag menu).
+                full: full || !!prev?.full,
+                tags,
+                starsTags,
                 music: (Array.isArray(v.music) ? v.music : []).map(m => String(m?.artist || '').toLowerCase().trim()).filter(Boolean),
                 bayesianRating: v.bayesianRating || 0,
                 width: v.width || 0,
@@ -4179,15 +4305,13 @@ whenBody(() => {
                 previewUrl: v.previewUrl || '',
                 uploadDate: v.uploadDate || null,
                 views: v.views || 0,
-                // Lower-cased for description matching (in memory only).
                 description: String(v.description || '').toLowerCase(),
             });
         });
         return added;
     }
 
-    // Account id for the playlists API, read from the session (user.id, not the auth userId).
-    // Cached for the page lifetime; logged-out visitors get no playlist features.
+    // Account id from the session (user.id, not auth userId); cached per page, none when logged out.
     let ownerIdPromise = null;
     function getOwnerId() {
         if (!ownerIdPromise) {
@@ -4211,7 +4335,6 @@ whenBody(() => {
             State.thumbnailIndex.clear();
             State.titleIndex.clear();
 
-            // Builds one playlist entry (ids Set + indexing) from a playlist object and its detail response.
             function buildPlaylistEntry(p, detail) {
                 const root = detail?.data || detail;
                 const videos = root?.videos || [];
@@ -4235,16 +4358,14 @@ whenBody(() => {
 
             const nextPlaylists = new Map();
 
-            // The largest playlist is fetched first and merged into State.playlists as soon as it returns,
-            // so lookups are correct while the rest loads or if another fetch fails.
+            // Largest playlist first, merged as soon as it lands so lookups work while the rest loads.
             const sizeOf = p => p.validVideoCount ?? (Array.isArray(p.videos) ? p.videos.length : 0);
             const priorityIdx = list.length
                 ? list.reduce((best, p, i, a) => (sizeOf(p) > sizeOf(a[best]) ? i : best), 0)
                 : -1;
             const restList = priorityIdx === -1 ? list : list.filter((_, i) => i !== priorityIdx);
 
-            // Runs alongside the rest and is merged in memory when it lands. Other modules are notified
-            // early only on a cold start; the single localStorage write happens at the end.
+            // Notifies other modules early only on a cold start; one localStorage write at the end.
             const wasReady = State.ready;
             const priorityDone = priorityIdx === -1 ? Promise.resolve() : (async () => {
                 try {
@@ -4259,8 +4380,7 @@ whenBody(() => {
                 } catch {}
             })();
 
-            // fetchAll=true is required: without it only the first page of videos per playlist is returned,
-            // and later videos read as "not in the playlist". Two at a time next to the priority fetch.
+            // fetchAll=true is required, else only the first page of each playlist comes back. Two at a time.
             const [results] = await Promise.all([
                 settledWithLimit(restList, 2,
                     p => api(`/api/playlists/${p._id}?fetchAll=true`).then(detail => ({ p, detail }))),
@@ -4289,18 +4409,13 @@ whenBody(() => {
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Fetch interceptor
-    // ---------------------------------------------------------------------
+    // --- Fetch interceptor ---
 
     const nativeFetch = window.fetch;
 
-    // ---------------------------------------------------------------------
-    // Rate-limit guard (429)
-    // ---------------------------------------------------------------------
-    // The site rate-limits per IP across all /api/ calls, so a burst of ours also breaks its own requests.
-    // A rate-limited GET waits out Retry-After (or 1s/2s/4s) and retries.
-    // Strictly per request, with no shared cooldown; bulk fetches are throttled by settledWithLimit().
+    // --- Rate-limit guard (429) ---
+    // The site rate-limits per IP across all /api/ calls, so our bursts break its requests too.
+    // Rate-limited GETs wait out Retry-After (or 1s/2s/4s) and retry; bulk work uses settledWithLimit().
     const MAX_429_RETRIES = 3;
     const MAX_RETRY_WAIT_MS = 30000;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -4321,7 +4436,6 @@ whenBody(() => {
         if (!/\/api\//.test(url)) return nativeFetch.apply(thisArg, args);
 
         const method = (args[1]?.method || (args[0] instanceof Request ? args[0].method : 'GET')).toUpperCase();
-        // Only GET is retried; mutations are single deliberate actions.
         if (method !== 'GET') return nativeFetch.apply(thisArg, args);
 
         for (let attempt = 0; ; attempt++) {
@@ -4336,8 +4450,7 @@ whenBody(() => {
         }
     }
 
-    // Runs `fn` over `items`, at most `limit` at a time, to stay under the rate limit.
-    // Result shape matches Promise.allSettled.
+    // Like Promise.allSettled, but at most `limit` at a time (rate limit).
     async function settledWithLimit(items, limit, fn) {
         const results = new Array(items.length);
         let next = 0;
@@ -4352,7 +4465,6 @@ whenBody(() => {
         return results;
     }
 
-    // One parse per response, shared by all handlers (the other modules define the same helper).
     const pmvResJson = PMVX.resJson || (PMVX.resJson = res => {
         if (!res.__pmvJson) {
             try { res.__pmvJson = res.clone().json(); }
@@ -4361,15 +4473,12 @@ whenBody(() => {
         }
         return res.__pmvJson;
     });
-    // URLs of own in-flight requests (see api()), also used by the /playlists filter for lookups
-    // of other users' playlists that must not be indexed.
+    // Own in-flight URLs; the /playlists filter also adds lookups that must not be indexed.
     const quietUrls = PMVX.quietUrls || (PMVX.quietUrls = new Set());
 
-    // Shared in-flight registry for single-video lookups (/api/videos/<id>). Go through
-    // fetchVideoDeduped() instead of calling api() directly so concurrent callers share one request
-    // and one retry budget. The site's own video GETs are registered here too.
+    // Shared in-flight single-video lookups, the site's own GETs included. Use fetchVideoDeduped()
+    // so concurrent callers share one request and retry budget; recentVideos answers repeats.
     const pendingVideoApiFetches = new Map();
-    // Recently finished lookups are answered from here without a new request.
     const RECENT_VIDEO_TTL_MS = 30000;
     const recentVideos = new Map(); // requested id -> { v, at }
     function rememberVideo(reqId, v) {
@@ -4384,7 +4493,7 @@ whenBody(() => {
             }
         }
     }
-    // A like / dislike / favourite changes the video's data, so cached entries for it are dropped.
+    // Likes, dislikes and favourites change the video data, so drop its cached entries.
     function forgetVideo(id) {
         for (const [k, x] of recentVideos) if (k === id || x.v._id === id) recentVideos.delete(k);
     }
@@ -4396,9 +4505,8 @@ whenBody(() => {
     }
 
     window.fetch = async function (...args) {
-        // Playlist index hijack: Vue falls back to index 0 when the initial load (page=1&limit=50)
-        // has fewer items than ?index=. Raise the limit so the response contains at least index+1 real items.
-        // Do not change: prevents the player from jumping back to index 0.
+        // Index-limit bump: Vue falls back to index 0 when page 1 has fewer items than ?index=,
+        // so raise the limit past it. Do not change.
         try {
             const rawUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
             const pm = rawUrl.match(/(\/api\/playlists\/[a-f0-9]{24})\?(.*)$/);
@@ -4408,7 +4516,6 @@ whenBody(() => {
                     const index = parseInt(new URLSearchParams(location.search).get('index') || '0', 10);
                     const currentLimit = parseInt(params.get('limit'), 10);
                     if (Number.isFinite(index) && index >= currentLimit) {
-                        // Extra buffer for the sidebar.
                         const newLimit = index + 50;
                         const newUrl = `${pm[1]}?page=1&limit=${newLimit}`;
                         if (typeof args[0] === 'string') args[0] = newUrl;
@@ -4416,9 +4523,8 @@ whenBody(() => {
                         else if (args[0]?.url) args[0] = { ...args[0], url: newUrl };
                     }
                 }
-                // One-shot fetchAll force, set by the playlist-page filter right before it triggers Vue's own
-                // next-page fetch, so Vue processes the response as its own data. Consumed immediately.
-                // The URL is only rewritten for page=1: later pages append to rendered rows and would duplicate them.
+                // One-shot fetchAll, set by the playlist-page filter before it triggers Vue's next-page fetch so Vue
+                // treats the response as its own. Only page=1 is rewritten; later pages would duplicate rows.
                 if (PMVX.forceFetchAllNext && !params.get('fetchAll')) {
                     PMVX.forceFetchAllNext = false;
                     if (params.get('page') === '1') {
@@ -4440,8 +4546,8 @@ whenBody(() => {
             const method0 = (args[1]?.method || (args[0] instanceof Request ? args[0].method : 'GET')).toUpperCase();
             const mut = method0 !== 'GET' && u0.match(/\/api\/videos\/([a-f0-9]{24})\//);
             if (mut) forgetVideo(mut[1]);
-            // The page saves watch progress for the video it holds; after an in-place hand-over that is
-            // the earlier one, while the time and duration come from the one playing. Save it for that.
+            // After an in-place hand-over the page saves progress under the earlier video with the playing
+            // one's time; re-target it to the playing video.
             if (staleFullscreenId && method0 === 'PUT' && /\/api\/users\/watch-progress$/.test(u0) && typeof args[1]?.body === 'string') {
                 try {
                     const body = JSON.parse(args[1].body);
@@ -4450,17 +4556,16 @@ whenBody(() => {
                     }
                 } catch {}
             }
-            // The site's own favourite toggles keep the card hearts in step.
+            // The site's own favourite toggles update the card hearts.
             if (mut && /\/favorite$/.test(u0) && typeof args[1]?.body === 'string') {
                 try { const a = JSON.parse(args[1].body).action; if (a) noteFavourite(mut[1], a === 'favorite'); } catch {}
             }
-            // Own lookups (marked quiet) register themselves.
             if (m0 && method0 === 'GET' && !quietUrls.has(u0) && !pendingVideoApiFetches.has(m0[1])) {
                 let resolve;
                 const p = new Promise(r => { resolve = r; });
                 videoDeferred = { id: m0[1], p, resolve };
                 pendingVideoApiFetches.set(m0[1], p);
-                // Never leave waiters on a response that fails to parse: they get null.
+                // Waiters get null if the response never parses.
                 setTimeout(() => {
                     resolve(null);
                     if (pendingVideoApiFetches.get(m0[1]) === p) pendingVideoApiFetches.delete(m0[1]);
@@ -4481,22 +4586,19 @@ whenBody(() => {
 
         try {
             const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-            // One parse shared by all handlers below.
             const jsonP = /\/api\//.test(url) ? pmvResJson(res) : null;
 
-            // Extension point: PMVX.apiTaps listeners get (url, json) of every API response.
+            // PMVX.apiTaps: listeners get (url, json) of every API response.
             if (jsonP && PMVX.apiTaps.length) {
                 jsonP.then(json => PMVX.apiTaps.forEach(fn => { try { fn(url, json); } catch {} })).catch(() => {});
             }
 
-            // Learn slug to _id mappings from any API response.
             if (jsonP) {
                 jsonP.then(json => {
                     if (learnVideoIds(json)) scheduleBadges();
                 }).catch(() => {});
             }
 
-            // Single-video response: cache the full video metadata.
             if (jsonP && /\/api\/videos\/[a-f0-9]{24}$/.test(url)) {
                 const urlId = url.match(/\/api\/videos\/([a-f0-9]{24})$/)[1];
                 jsonP.then(json => {
@@ -4507,11 +4609,10 @@ whenBody(() => {
                     settleVideoDeferred(v);
                     if (urlId !== v._id) State.slugToApiId.set(urlId, v._id);
 
-                    // The video ID in the URL must match this response. The slug part is optional:
-                    // both "/video/title-slug_<hex>" and "/video/<hex>" occur. Without a match, background fetches
-                    // (e.g. sidebar hover previews) could be mistaken for the playing video.
+                    // The slug part is optional (/video/slug_<hex> or /video/<hex>). Without an id match, background
+                    // fetches (e.g. sidebar hover previews) would be taken for the playing video.
                     const pageId = location.pathname.match(/^\/video\/(?:[^?#]*_)?([0-9a-f]{24})(?:[?#]|$)/i)?.[1];
-                    // Playlist pages carry the playlist id, so compare with the active queue row (border-orange-500).
+                    // Playlist pages: compare with the active queue row (border-orange-500).
                     const isCurrentPage = pageId
                         ? (urlId === pageId || v._id === pageId || State.slugToApiId.get(pageId) === v._id)
                         : (location.pathname.startsWith('/playlists/')
@@ -4523,13 +4624,11 @@ whenBody(() => {
                 settleVideoDeferred(null);
             }
 
-            // storage.pmvhaven.com/<id>/... (thumbnail, preview): only used when the ID matches the page video,
-            // so background fetches for other videos do not overwrite state.
+            // storage.pmvhaven.com/<id>/: used only for the page video, so background fetches don't overwrite state.
             const storageM = url.match(/storage\.pmvhaven\.com\/([a-f0-9]{24})\//);
             if (storageM) {
                 const idFromStorage = storageM[1];
                 const pageId = location.pathname.match(/^\/video\/(?:[^?#]*_)?([0-9a-f]{24})(?:[?#]|$)/i)?.[1];
-                // Store only for the page video or an already-known mapping.
                 if (pageId && (idFromStorage === pageId || State.slugToApiId.get(pageId) === idFromStorage)) {
                     if (!State.currentVideoData?.id) {
                         State.currentVideoId = idFromStorage;
@@ -4537,8 +4636,7 @@ whenBody(() => {
                 }
             }
 
-            // Playlist responses requested by the site: index their videos so queue rows resolve.
-            // Quiet (own) requests are skipped. Queue badges are invalidated only when something new arrived.
+            // Site playlist responses (not quiet ones): index their videos so queue rows resolve.
             if (jsonP && /\/api\/playlists\/[a-f0-9]{24}(?:\?|$)/.test(url) && !quietUrls.has(url)) {
                 jsonP.then(json => {
                     const details = json?.data?.videoDetails || json?.videoDetails;
@@ -4551,8 +4649,7 @@ whenBody(() => {
                     }
                 }).catch(() => {});
             }
-            // Video lists the site requests (discover, browse, search, ...): their full metadata (all tags,
-            // performers, duration) lets the filter judge more than the two tags a card shows.
+            // Site video lists (discover, browse, search): full metadata lets the filter see more than a card's two tags.
             if (jsonP && !quietUrls.has(url) && !/\/api\/(?:videos\/[a-f0-9]{24}|playlists\/)/.test(url)) {
                 jsonP.then(json => {
                     const list = [json?.videos, json?.data, json?.data?.videos, json?.results]
@@ -4565,7 +4662,6 @@ whenBody(() => {
         return res;
     };
 
-    // Fills State.currentVideoData for the page video and rebinds the page's playlist buttons to its _id.
     function adoptCurrentVideo(v) {
         State.currentVideoData = {
             id: v._id,
@@ -4579,26 +4675,23 @@ whenBody(() => {
             description: v.description || null,
             bayesianRating: v.bayesianRating ?? null,
             uploadDate: v.uploadDate || null,
-            // The user's own like/dislike/favourite state; the API buttons start from it.
+            // The user's like/dislike/favourite state for the API buttons.
             isLiked: v.isLiked === true,
             isDisliked: v.isDisliked === true,
             isFavorited: v.isFavorited === true,
-            // Timeline-strip frames {url, captureTime}, kept for fullscreen hand-over.
+            // Timeline frames {url, captureTime}, kept for fullscreen hand-over.
             timelineThumbnails: Array.isArray(v.timelineThumbnails)
                 ? v.timelineThumbnails.filter(t => t?.url).map(t => ({ url: t.url, captureTime: t.captureTime }))
                 : [],
         };
         State.currentVideoId = v._id;
-        // Reset and rebuild page buttons with the correct _id.
         const existing = document.getElementById('pmv-page-playlists');
         if (existing && existing.dataset.forVideo !== v._id) existing.remove();
         try { injectPagePlaylistButtons(v._id); } catch {}
         try { updateNativePlaylistButtons(true); } catch {}
     }
 
-    // ---------------------------------------------------------------------
-    // Video identification / meta
-    // ---------------------------------------------------------------------
+    // --- Video identification / meta ---
 
     function getJsonLdVideoId() {
         try {
@@ -4629,11 +4722,8 @@ whenBody(() => {
         return null;
     }
 
-    // ---------------------------------------------------------------------
-    // Watched tracking
-    // ---------------------------------------------------------------------
-    // Local playback history, exposed via PMVX.watched / __pmvIsWatched / __pmvMarkWatched.
-    // Attached from getVideo()'s one-time init, so no extra polling is needed.
+    // --- Watched tracking ---
+    // Local playback history (PMVX.watched / __pmvIsWatched / __pmvMarkWatched), attached from getVideo()'s init.
     let watchedMap = new Map(); // videoId -> ISO timestamp
     (function loadWatched() {
         try {
@@ -4645,7 +4735,6 @@ whenBody(() => {
     function saveWatched() {
         try {
             if (watchedMap.size > WATCHED_MAX) {
-                // Trim oldest-watched entries first.
                 const sorted = [...watchedMap.entries()].sort((a, b) => a[1].localeCompare(b[1]));
                 for (const [id] of sorted.slice(0, watchedMap.size - WATCHED_MAX)) watchedMap.delete(id);
             }
@@ -4659,9 +4748,9 @@ whenBody(() => {
     }
     PMVX.watched = watchedMap;
     PMVX.isWatched = id => watchedMap.has(id);
-    PMVX.markWatched = markWatched; // manual override
+    PMVX.markWatched = markWatched;
 
-    // Per-video dedup against the current id: Vue reuses the same <video> element across auto-advance.
+    // Dedup per current id: Vue reuses the same <video> element across auto-advance.
     let lastMarkedWatchedId = null;
     function maybeMarkWatchedFromPlayback(v) {
         const id = getCurrentVideoId();
@@ -4673,18 +4762,16 @@ whenBody(() => {
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Settings export/import
-    // ---------------------------------------------------------------------
-    // Exports every pmv*-prefixed localStorage key (scanned dynamically).
+    // --- Settings export/import ---
+    // Exports every pmv*-prefixed localStorage key.
     function collectPmvSettings() {
         const out = {};
         for (let i = 0; i < localStorage.length; i++) {
             const k = localStorage.key(i);
-            // Settings only: caches are rebuilt from the site and would bloat the file.
+            // Settings only: caches are rebuilt from the site.
             if (!k || !k.startsWith('pmv') || /cache/i.test(k)) continue;
             try { out[k] = JSON.parse(localStorage.getItem(k)); }
-            catch { out[k] = localStorage.getItem(k); } // non-JSON string value
+            catch { out[k] = localStorage.getItem(k); }
         }
         return out;
     }
@@ -4698,13 +4785,9 @@ whenBody(() => {
         return count;
     }
 
-    // ---------------------------------------------------------------------
-    // Settings section
-    // ---------------------------------------------------------------------
-    // A section appended to the site's Settings modal (teleported to <body> while open: overlay, card,
-    // h2 "Settings", a `space-y-6` section list). Styled like the native sections, with an inline
-    // CustomSelect that scrolls with the modal. The observer re-adds the section if the list is rebuilt.
-    // Without the gear (logged out) the section opens in a copy of the modal via Ctrl+K.
+    // --- Settings section ---
+    // Section in the site's Settings modal (teleported to <body>: h2 "Settings" + `space-y-6` list),
+    // styled like the native ones; the observer re-adds it when Vue rebuilds the list.
     const TS_SVG = {
         gauge: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"></path><path d="M3.34 19a10 10 0 1 1 17.32 0"></path></svg>',
         volume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z"></path><path d="M16 9a5 5 0 0 1 0 6"></path><path d="M19.4 18.4a9 9 0 0 0 0-12.8"></path></svg>',
@@ -4779,7 +4862,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         (document.head || document.documentElement).appendChild(st);
     }
 
-    // Inline version of the site's CustomSelect. items(): [{ value, label, desc }].
+    // Inline copy of the site's CustomSelect. items(): [{ value, label, desc }].
     function mkToolsSelect(items, getValue, onPick) {
         const wrap = document.createElement('div');
         const btn = document.createElement('button');
@@ -4819,7 +4902,6 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         return { el: wrap, close, paint };
     }
 
-    // A settings card (ts-* styles) with a label, a description and a control under it.
     function toolsCard(icon, iconColor, label, desc, control) {
         const c = document.createElement('div');
         c.className = 'ts-card';
@@ -4835,7 +4917,6 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         b.style.width = '100%';
         b.innerHTML = `${TS_SVG.gear}Open full settings`;
         b.onclick = () => {
-            // Close the site's modal (Escape), then go to the section on /settings.
             document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
             document.getElementById('pmv-ts-modal')?.remove();
             siteNavigate('/settings#pmvx');
@@ -4947,7 +5028,6 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         `;
         const slots = sec.querySelectorAll('[data-slot]');
 
-        // Seekbar preview
         const scrubItems = () => [
             { value: 'hybrid', label: 'Live', desc: 'Frame cache built in the background (more CPU)' },
             { value: 'frames', label: 'Timeline thumbnails', desc: "The site's own preview frames" },
@@ -4956,7 +5036,6 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         const scrubSel = mkToolsSelect(scrubItems, () => scrubMode(), v => setScrubMode(v));
         slots[0].replaceWith(scrubSel.el);
 
-        // Performance mode
         const perfItems = () => [
             { value: 'smooth', label: 'Smooth', desc: 'Pages update instantly, all effects — for fast computers' },
             { value: 'balanced', label: 'Balanced', desc: 'Page updates batched slightly, all effects (default)' },
@@ -4970,26 +5049,23 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         });
         sec.querySelector('[data-perf]').replaceWith(perfSel.el);
 
-        // Volume lock
         const vol = sec.querySelector('[data-vol]');
         const paintVol = () => vol.setAttribute('aria-checked', volumeLockEnabled() ? 'true' : 'false');
         vol.onclick = () => { setVolumeLock(!volumeLockEnabled()); paintVol(); };
         paintVol();
 
-        // Tag after reject
         const tagRej = sec.querySelector('[data-tagrej]');
         const paintTagRej = () => tagRej.setAttribute('aria-checked', tagAfterReject() ? 'true' : 'false');
         tagRej.onclick = () => { setTagAfterReject(!tagAfterReject()); paintTagRej(); };
         paintTagRej();
 
-        // Reject list
         const rejectItems = () => {
             const items = [{ value: '', label: 'None', desc: 'No reject list' }];
             [...State.playlists.values()]
                 .sort((a, b) => playlistSortIndex(a.name) - playlistSortIndex(b.name))
                 .forEach(p => items.push({ value: p.id, label: getPlaylistDisplayName(p.name, p.id) || p.id, desc: `${p.ids.size} videos` }));
             if (rejectPlaylistId && !State.playlists.has(rejectPlaylistId)) {
-                // Not loaded yet; keep it visible instead of showing "None".
+                // Not loaded yet: keep it instead of showing "None".
                 items.push({ value: rejectPlaylistId, label: rejectPlaylistId, desc: 'Not loaded yet' });
             }
             return items;
@@ -5006,17 +5082,14 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         });
         slots[1].replaceWith(rejectSel.el);
 
-        // Advanced settings live on the site's full settings page.
         sec.querySelector('[data-more]').replaceWith(moreSettingsCard());
 
-        // A click elsewhere in the modal folds an open list.
         sec.addEventListener('click', e => {
             if (!e.target.closest('.ts-cs, .ts-dd')) { scrubSel.close(); rejectSel.close(); }
         });
         return sec;
     }
 
-    // The section list of the open Settings modal, if any.
     function nativeSettingsList() {
         for (const ov of document.body.children) {
             if (ov.tagName !== 'DIV' || !ov.classList.contains('inset-0')) continue;
@@ -5041,11 +5114,8 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         requestAnimationFrame(() => { toolsSettingsQueued = false; try { injectToolsSettings(); } catch {} });
     }).observe(document.body, { childList: true, subtree: true });
 
-    // ---------------------------------------------------------------------
-    // /settings page: playlist names & colours
-    // ---------------------------------------------------------------------
-    // A section in the site's full settings page (same card style as its own sections) for the
-    // per-playlist short names and colours in pmv_playlist_config_v1. Saved on change.
+    // --- /settings page: playlist names & colours ---
+    // Per-playlist short names and colours (pmv_playlist_config_v1), saved on change.
 
     function savePlaylistConfig() {
         try {
@@ -5055,7 +5125,6 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             if (!Object.keys(raw.styles).length && !(raw.order || []).length) localStorage.removeItem(PLAYLIST_CONFIG_KEY);
             else localStorage.setItem(PLAYLIST_CONFIG_KEY, JSON.stringify(raw));
         } catch {}
-        // Badges and chips pick the new names up on the next pass.
         document.querySelectorAll('[data-playlist-name], [data-pmv-rec-badge]').forEach(el => el.remove());
         document.querySelectorAll('[data-pmv-checked], [data-pmv-rec-checked], [data-pmv-mf-checked]').forEach(el => {
             delete el.dataset.pmvChecked; delete el.dataset.pmvRecChecked; delete el.dataset.pmvMfChecked;
@@ -5063,7 +5132,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         try { scheduleBadges(); } catch {}
     }
 
-    // Every entry for a playlist: by id, and legacy ones by (lowercased) name.
+    // All entries for a playlist: by id, plus legacy ones by lower-cased name.
     function playlistStyleKeys(p) {
         const name = p.name || '';
         return [p.id, name.trim().toLowerCase(), name].filter((k, i, a) => k && a.indexOf(k) === i);
@@ -5219,7 +5288,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         if (location.hash === '#pmvx') setTimeout(() => sec.scrollIntoView({ block: 'start', behavior: 'smooth' }), 100);
     }
 
-    // Vue may re-render the page and drop the section; put it back.
+    // Vue re-renders can drop the section; put it back.
     let settingsPageQueued = false;
     new MutationObserver(() => {
         if (settingsPageQueued || location.pathname.replace(/\/+$/, '') !== '/settings') return;
@@ -5227,11 +5296,8 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         requestAnimationFrame(() => { settingsPageQueued = false; try { injectSettingsPageSection(); } catch {} });
     }).observe(document.body, { childList: true, subtree: true });
 
-    // ---------------------------------------------------------------------
-    // Sidebar: hide items (set on the full settings page)
-    // ---------------------------------------------------------------------
-    // Keys: "g:<label>" for a group (Explore, Community, Saved content: header and items), "a:<href>" for
-    // a single link. Hidden via a data-* flag + stylesheet, re-applied on every sidebar pass.
+    // --- Sidebar: hide items (set on the full settings page) ---
+    // Keys: "g:<label>" (group header + items) or "a:<href>" (one link); hidden via data-* flag + stylesheet.
     const NAV_HIDE_KEY = 'pmv_sidebar_hidden_v1';
     let navHidden = new Set((() => { try { return JSON.parse(localStorage.getItem(NAV_HIDE_KEY) || '[]'); } catch { return []; } })());
     function saveNavHidden() {
@@ -5285,7 +5351,6 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         });
     }
 
-    // Settings card: one switch per sidebar entry (on = shown).
     function sidebarCard() {
         const wrap = document.createElement('div');
         wrap.style.cssText = 'display:flex;flex-direction:column;gap:2px;';
@@ -5335,12 +5400,8 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             '', 'Sidebar', 'Hide items you never use. A group hides its header and everything in it.', wrap);
     }
 
-    // ---------------------------------------------------------------------
-    // Sidebar: "Saved content" group
-    // ---------------------------------------------------------------------
-    // A group under Explore in the site's sidebar: Favorites (the Favorites tab of your profile) and
-    // each of your playlists. Built from clones of the sidebar's own header row and links, so it
-    // matches their style; re-added when Vue re-renders the sidebar. Collapsed state is remembered.
+    // --- Sidebar: "Saved content" group ---
+    // Favorites + own playlists under Explore, cloned from the sidebar's rows; re-added on Vue re-renders.
 
     const SAVED_NAV_KEY = 'pmv_saved_nav_open_v1';
     const SAVED_NAV_ICON = {
@@ -5354,7 +5415,6 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
     let savedNavOpen = (() => { try { return localStorage.getItem(SAVED_NAV_KEY) !== '0'; } catch { return true; } })();
     let savedNavSig = '';
 
-    // Swaps the drawing of a cloned site icon, keeping its size and classes.
     function setNavIcon(svgEl, paths) {
         if (!svgEl) return;
         svgEl.setAttribute('viewBox', '0 0 24 24');
@@ -5367,8 +5427,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         else location.href = href;
     }
 
-    // Extension points for builds that add to the sidebar rows: navRowHook(link, playlist) and
-    // navRowSig(playlist) (part of the redraw signature); refreshSavedNav redraws.
+    // PMVX.navRowHook(link, playlist) / navRowSig(playlist) (in the redraw signature) let builds extend rows.
     PMVX.refreshSavedNav = () => { try { injectSavedNav(); } catch {} };
 
     function savedNavLink(template, href, label, icon, extraTitle) {
@@ -5380,11 +5439,11 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         a.classList.remove('router-link-active', 'router-link-exact-active');
         const svgEl = a.querySelector('svg');
         const span = a.querySelector('span.flex-1') || document.createElement('span');
-        // Keep only the icon and the label: drop badges and Vue comment nodes.
+        // Keep only icon and label: drop badges and Vue comment nodes.
         a.textContent = '';
         if (svgEl) { setNavIcon(svgEl, icon); a.appendChild(svgEl); }
         span.className = 'flex-1';
-        // min-width:0 lets a long name shrink (ellipsis) instead of widening the sidebar.
+        // min-width:0 lets long names ellipsize instead of widening the sidebar.
         span.style.cssText = 'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;';
         a.style.minWidth = '0';
         a.style.maxWidth = '100%';
@@ -5406,7 +5465,6 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         const existing = document.getElementById('pmvx-saved-nav');
         const playlists = [...State.playlists.values()].sort((a, b) =>
             playlistSortIndex(a.name) - playlistSortIndex(b.name) || (a.name || '').localeCompare(b.name || ''));
-        // Logged out (no playlists known): no group.
         if (!playlists.length) { existing?.remove(); return; }
         const sig = savedNavOpen + '|' + playlists.map(p => p.id + ':' + getPlaylistDisplayName(p.name, p.id) + ':' + p.ids.size + ':' + (PMVX.navRowSig?.(p) || '')).join('|');
         if (existing && existing.previousElementSibling === exploreGroup && savedNavSig === sig) return;
@@ -5421,7 +5479,6 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         group.style.minWidth = '0';
         group.style.maxWidth = '100%';
 
-        // Header: a clone of Explore's row, as a toggle.
         const head = headRowTpl.cloneNode(true);
         head.querySelectorAll('[aria-controls],[aria-expanded]').forEach(el => { el.removeAttribute('aria-controls'); el.removeAttribute('aria-expanded'); });
         const headLink = head.querySelector('a');
@@ -5478,7 +5535,6 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         exploreGroup.after(group);
     }
 
-    // /profile#favorites: open the Favorites tab once the profile has rendered.
     let favTabTries = 0;
     function openFavoritesTabIfAsked() {
         if (location.pathname.replace(/\/+$/, '') !== '/profile' || location.hash !== '#favorites') { favTabTries = 0; return; }
@@ -5504,7 +5560,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
     }).observe(document.body, { childList: true, subtree: true });
     window.addEventListener('pmv:cache-ready', () => { try { injectSavedNav(); } catch {} });
 
-    // The site's gear: the header button whose lucide:settings icon has the r=3 center circle.
+    // The site's gear: header button whose lucide:settings icon has an r=3 center circle.
     function siteSettingsButton() {
         const row = headerControlRow();
         return row && [...row.querySelectorAll('button')]
@@ -5526,7 +5582,7 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
             }, 150);
             return;
         }
-        // Logged out: no gear, so open a copy of the modal holding only this section.
+        // Logged out: no gear, so open a modal copy holding only this section.
         if (document.getElementById('pmv-ts-modal')) return;
         const ov = document.createElement('div');
         ov.id = 'pmv-ts-modal';
@@ -5550,12 +5606,8 @@ ${R} textarea::placeholder{color:rgb(107,114,128);}
         document.body.appendChild(ov);
     }
 
-    // ---------------------------------------------------------------------
-    // Hotkey editor
-    // ---------------------------------------------------------------------
-    // Keyboard diagram: click or press a key, then bind an action or playlist inline (saved immediately).
-    // Below it, a list of all bound keys. Tile colors: orange = action, green = playlist, red = reject list.
-    // Styled like the site's Settings modal.
+    // --- Hotkey editor ---
+    // Click or press a key to bind it inline (saved at once). Tiles: orange action, green playlist, red reject list.
     const KEYBOARD_ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm?']; // '?' is Shift+/ (hotkey overview)
 
     function bindingKind(b) {
@@ -5637,7 +5689,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     const KIND_COLOR = { action: 'rgb(249,115,22)', playlist: 'rgb(100,255,0)', reject: 'rgb(239,68,68)' };
 
-    // Site shortcuts the player handles itself (see PLAYER_KEY_DEFAULTS); a binding replaces them.
+    // Keys the player handles itself (see PLAYER_KEY_DEFAULTS); a binding overrides them.
     const SITE_KEY_ROWS = [
         ['Space / K', 'Play / pause', [' ', 'k']],
         ['F', 'Fullscreen', ['f']],
@@ -5678,7 +5730,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const render = () => {
             body.textContent = '';
 
-            // Keyboard
             const kbSec = document.createElement('div');
             kbSec.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
             kbSec.innerHTML = `<h3>Keyboard<span class="sub">click or press a key</span></h3>`;
@@ -5798,7 +5849,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             }
             body.appendChild(kbSec);
 
-            // Bound keys
             const listSec = document.createElement('div');
             listSec.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
             const bound = Object.keys(keybindings).filter(k => keybindings[k]).sort();
@@ -5820,7 +5870,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             listSec.appendChild(list);
             body.appendChild(listSec);
 
-            // Defaults: what the script and the site do out of the box.
             const defSec = document.createElement('div');
             defSec.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
             defSec.innerHTML = `<h3>Default shortcuts<span class="sub">for reference</span></h3>`;
@@ -5890,10 +5939,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         (getFullscreenRoot() || document.body).appendChild(ov);
     }
 
-    // ---------------------------------------------------------------------
-    // Command palette (Ctrl/Cmd+K)
-    // ---------------------------------------------------------------------
-    // Searches every cached video and playlist. Navigates with location.href rather than a SPA transition.
+    // --- Command palette (Ctrl/Cmd+K) ---
+    // Navigates via location.href, not a SPA transition.
     function buildCommandPaletteResults(query) {
         const q = query.trim().toLowerCase();
         const results = [];
@@ -5912,7 +5959,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             }
         });
 
-        if (q) { // videos only once a query is typed (titleIndex can be large)
+        if (q) { // titleIndex can be large: videos only with a query
             let count = 0;
             for (const [title, id] of State.titleIndex) {
                 if (count >= 40) break;
@@ -6007,11 +6054,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
     });
 
-    // ---------------------------------------------------------------------
-    // Up next queue
-    // ---------------------------------------------------------------------
-    // Ranked, playable list built from constraints (count/rating/duration/seen/tag) and weighted by a
-    // tag-affinity score from the user's playlists. Candidates come from State.videoMeta.
+    // --- Up next queue ---
+    // Ranked by constraints and tag affinity from the user's playlists; candidates from State.videoMeta.
     function computeTagAffinity() {
         const scores = new Map();
         State.videoMeta.forEach((meta, id) => {
@@ -6034,16 +6078,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return 0;
     }
 
-    // Queue state: one ordered, drag-reorderable list. manuallyAddedIds distinguishes user adds from
-    // suggestions; order is independent of that.
+    // One ordered, drag-reorderable list; manuallyAddedIds marks user adds (order is independent).
     let smartQueueItems = []; // [{id, meta}], order = play order
     let manuallyAddedIds = new Set();
-    // True once the queue has been used; gates auto-top-up. Reset by "clear".
+    // Set once the queue is used; gates auto-top-up. Reset by "clear".
     let smartQueueActive = false;
     // Index of the playing item: earlier entries are history, later ones upcoming. -1 = none from the queue.
     let queueCursor = -1;
-    // History is capped.
-    // Played items kept in Up next; one is shown, "Show more" reveals older ones in steps.
+    // Played items kept (capped); one shown, "Show more" reveals older ones in steps.
     const QUEUE_HISTORY_MAX = 200;
     const QUEUE_HISTORY_SHOWN = 1;
     const QUEUE_HISTORY_STEP = 10;
@@ -6053,11 +6095,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     let queueSettingsOpen = false;
     let queueCollapsed = false;
 
-    // The queue survives navigation (full page loads) via sessionStorage, which keeps it per tab
-    // and out of the settings export.
+    // Per-tab sessionStorage: survives page loads, stays out of the settings export.
     const QUEUE_STATE_KEY = 'pmv_queue_v1';
-    // Every save also writes a dated copy to localStorage, which a tab starting empty adopts
-    // (sessionStorage does not survive a browser restart).
+    // Dated localStorage copy, adopted by an empty tab (sessionStorage dies with the browser).
     const QUEUE_BACKUP_KEY = 'pmv_queue_backup_v1';
     const QUEUE_BACKUP_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
@@ -6077,7 +6117,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         } catch {}
     }
 
-    // Adopt a backup only when the tab has no queue and the copy is recent and non-empty.
     function loadQueueBackup() {
         try {
             const d = JSON.parse(localStorage.getItem(QUEUE_BACKUP_KEY) || 'null');
@@ -6096,13 +6135,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             smartQueueActive = !!d.active;
             queueCollapsed = !!d.collapsed;
             queueCursor = Number.isInteger(d.cursor) ? d.cursor : -1;
-            // Write the adopted queue to this tab's own store.
             if (!sessionStorage.getItem(QUEUE_STATE_KEY)) saveQueueState();
         } catch { /* corrupt entry — start empty rather than break boot */ }
     }
     loadQueueState();
 
-    // Queue settings are a preference, so they live in localStorage (included in settings export).
+    // Queue settings are a preference: localStorage, included in the settings export.
     const QUEUE_SETTINGS_KEY = 'pmv_queue_settings_v1';
     const QUEUE_SETTINGS_DEFAULTS = { count: 20, minRating: 0, maxDuration: 0, unseenOnly: false, tagFilter: '', autoRefill: true, targetSize: 5, useNfFilter: true, freshEvery: 20, freshEveryFs: 10 };
     function loadQueueSettings() {
@@ -6114,9 +6152,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         try { localStorage.setItem(QUEUE_SETTINGS_KEY, JSON.stringify(queueSettings)); } catch { /* quota/private mode */ }
     }
 
-    // Best-effort title/thumbnail/rating/duration read from a card's DOM when State.videoMeta has nothing.
-    // Uses a TreeWalker over text nodes: card.textContent runs fields together ("Aug 10, 2024" + "84%"),
-    // and childless-element scans skip spans that also hold an icon.
+    // DOM fallback per card. Walks text nodes: textContent glues fields together, childless scans miss icon spans.
     function cardLeafTexts(card) {
         const out = [];
         const walker = document.createTreeWalker(card, NodeFilter.SHOW_TEXT);
@@ -6132,8 +6168,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     const ASPECT_LABELS = new Set(['9:16', '16:10', '10:16', '9:21', '21:10']);
 
     function scrapeCardTitle(card, leaves) {
-        // Grids use an <h4>; the Recommended sidebar does not, so the image alt text is used there.
-        // Longest remaining text is the last resort.
+        // Grids use <h4>; the Recommended sidebar has none, so img alt, then the longest text.
         const h4 = card.querySelector('h4')?.textContent?.trim();
         if (h4) return h4;
         const alt = card.querySelector('img')?.getAttribute('alt')?.trim();
@@ -6145,12 +6180,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return candidates.sort((a, b) => b.length - a.length)[0];
     }
 
-    // Tag chips have title "Search for: #Tag", more reliable than their text. Only visible tags are readable;
-    // the rest sit behind a "+N" button. Do not click it open: the DOM change re-triggers the observer
-    // and loops.
+    // Chip title "Search for: #Tag" beats its text; never click "+N" open (re-triggers the observer, loops).
     function scrapeCardTags(card) {
         const out = new Set();
-        // The "#" matters: the track chip uses the same title pattern ("Search for: <artist> - <song>").
+        // The "#" matters: the track chip uses "Search for: <artist> - <song>".
         card.querySelectorAll('[title^="Search for:"]').forEach(el => {
             const raw = el.getAttribute('title');
             if (!/^Search for:\s*#/.test(raw)) return;
@@ -6171,7 +6204,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (!card) return {};
         const leaves = cardLeafTexts(card);
         const rating = leaves.find(t => RATING_RE.test(t));
-        // Some cards show an aspect pill ("9:16") next to the duration; it looks like a time.
+        // Some cards show an aspect pill ("9:16") that looks like a time.
         const times = leaves.filter(t => DURATION_RE.test(t));
         const duration = times.length > 1 ? (times.find(t => !ASPECT_LABELS.has(t)) || times[times.length - 1]) : times[0];
         const viewsIdx = leaves.findIndex(t => /\bviews?\b/i.test(t));
@@ -6187,9 +6220,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         };
     }
 
-    // Merges the cache with a DOM scrape per field (cache wins, scrape fills gaps). Returns only the
-    // five fields a row renders, since queue items are stored in sessionStorage.
-    // The playing video is often only in State.currentVideoData, so it is checked too.
+    // Cache wins, DOM fills gaps (State.currentVideoData too); only the five row fields, for sessionStorage.
     function currentPageMeta(id) {
         const cvd = State.currentVideoData;
         if (!cvd || cvd.id !== id) return {};
@@ -6216,17 +6247,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         };
     }
 
-    // Carry the card's own href: the hex in a page URL is the slug id, not the API _id.
-    //
-    // Swaps the video in place via the Vue Router (instance on #__nuxt, router.push) like a NuxtLink
-    // click; falls back to a normal load if the router is unreachable. onUrlChange handles the
-    // client-side navigation and shared state survives.
-    //
-    // A route change detaches the <video> without pausing it, and detached media keeps decoding.
-    // The player may also restart it while still attached, so references are held and pressed down
-    // across the whole transition. Elements are muted and have their source removed only once
-    // detached, never while still on the page. This also covers the site's own navigation, so every
-    // media element seen is remembered and torn down once it leaves the page.
+    // Carry the card's own href (its hex is the slug id, not the API _id); swaps in place via the Vue Router.
+    // A route change detaches <video> without pausing it and detached media keeps decoding (the player may
+    // even restart it), so every media element seen is muted and unsourced once detached, never before.
     let inPlaceHandover = false;
 
     const seenMediaEls = new Set();
@@ -6250,19 +6273,17 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         document.querySelectorAll('video, audio').forEach(el => {
             if (seenMediaEls.has(el)) return;
             seenMediaEls.add(el);
-            // Event-driven: the player can restart an element after any fixed window, so tear down any
-            // element that starts playing while off the page.
+            // The player can restart a detached element at any time, so tear down on play.
             el.addEventListener('play', () => { if (!el.isConnected) killDetachedMedia(el); });
         });
     }
 
-    // graceMs applies to sweeps outside a navigation: the site moves its player between containers
-    // (theater, fullscreen), so a detached element is not necessarily discarded. 0 during navigation.
+    // graceMs (0 during navigation): the site moves its player between containers, so detached != discarded.
     function sweepDetachedMedia(graceMs = 0) {
         const now = Date.now();
         seenMediaEls.forEach(el => {
             if (el.isConnected) { mediaDetachedAt.delete(el); return; }
-            // Already torn down; dropped to bound the set. Its play listener still covers a restart.
+            // Already dead: drop to bound the set; its play listener still covers a restart.
             if (mediaIsDead(el)) { seenMediaEls.delete(el); return; }
             const since = mediaDetachedAt.get(el);
             if (since === undefined) {
@@ -6275,8 +6296,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         });
     }
 
-    // Detaching happens somewhere inside the transition, so sweep across the whole handover.
-    // Elements are not dropped after one teardown (the player may restart them); pruned at the end.
+    // Detaching happens somewhere in the transition, so sweep throughout; prune only at the end.
     let mediaSweepTimer = null;
     function sweepDetachedMediaFor(ms = 3000) {
         trackMediaElements();
@@ -6306,22 +6326,18 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
 
-    // ---------------------------------------------------------------------
-    // Fullscreen hand-over
-    // ---------------------------------------------------------------------
-    // A route change replaces the player and ends fullscreen, which cannot be re-requested later.
-    // While fullscreen, the next video is instead loaded into the same <video> (as site playlists do),
-    // and the page itself catches up when fullscreen ends.
+    // --- Fullscreen hand-over ---
+    // A route change ends fullscreen, which cannot be re-requested. In fullscreen the next video loads into
+    // the same <video> instead; the page catches up when fullscreen ends.
     let staleFullscreenHref = null;
-    // API id of the video playing in place; the page still holds the earlier one until it catches up.
+    // API id playing in place; the page holds the earlier video until it catches up.
     let staleFullscreenId = null;
 
     async function videoStreamUrl(videoId) {
-        // Deduped: the following page-data lookup (onUrlChange, ensureCurrentVideoData) is answered from this.
+        // Deduped: the page-data lookup that follows is answered from this.
         try {
             const video = await fetchVideoDeduped(videoId);
             if (!video) return null;
-            // Same choice as the player: HLS playlist if available, plain file otherwise.
             return (video.hlsEnabled && video.hlsMasterPlaylistUrl) ? video.hlsMasterPlaylistUrl : (video.videoUrl || null);
         } catch { return null; }
     }
@@ -6334,18 +6350,15 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (!hls || !video || typeof hls.loadSource !== 'function') return false;
 
         const url = await videoStreamUrl(videoId);
-        // Fullscreen may have ended during the lookup; an ordinary navigation is better then.
+        // Fullscreen may have ended meanwhile; navigate normally then.
         if (!url || !document.fullscreenElement) return false;
 
-        // Detach first: attaching a new hls.js source over buffered data causes bufferAppendError.
-        // hls.js resumes a new source at the previous one's last position when no start position is
-        // given (startLoad(-1) takes lastCurrentTime), so every handed-over video would start where
-        // the earlier one was. Start at 0 for this load, then give the site its own setting back.
+        // Detach first: a new hls.js source over buffered data causes bufferAppendError.
+        // Without startPosition hls.js resumes at the previous source's position; force 0, then restore.
         try {
             const prevStart = hls.config.startPosition;
             hls.config.startPosition = 0;
             const restore = () => { try { hls.config.startPosition = prevStart; } catch {} };
-            // The first loaded fragment means loading has started (from the manifest or on attach).
             try { hls.once?.('hlsFragLoaded', restore); } catch {}
             setTimeout(restore, 15000);
             hls.stopLoad();
@@ -6356,7 +6369,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         try { video.play()?.catch(() => {}); } catch {}
 
         guardHandoverStart(video);
-        // Keep the address bar in step, since the rest of the script reads the video id from it.
+        // The script reads the video id from the address bar.
         try { history.replaceState(history.state, '', href); } catch {}
         staleFullscreenHref = href;
         staleFullscreenId = videoId;
@@ -6368,10 +6381,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return true;
     }
 
-    // The video page restores its own video's watch progress (watchProgress % of the duration) each
-    // time the player reports a loaded source. After an in-place hand-over the page still holds the
-    // earlier video, so every new one would jump to that percentage. For a few seconds after the
-    // swap, a seek nobody asked for (no click or key since) goes back to the start.
+    // The page re-applies its own video's watchProgress % on each loaded source, so a handed-over video would
+    // jump there. For a few seconds, an unrequested seek (no click/key since) goes back to 0.
     let handoverGuardOff = null;
     function guardHandoverStart(video) {
         handoverGuardOff?.();
@@ -6395,8 +6406,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         handoverGuardOff = off;
     }
 
-    // The fetch is fired by the core and nothing re-renders the panel when it lands, so rebuild once
-    // the data is there, or give up after a few seconds.
+    // Nothing re-renders the panel when the core's fetch lands; rebuild once the data is there (with timeout).
     function refreshHudAfterHandover(videoId, wasOpen) {
         if (!wasOpen) return;
         let tries = 0;
@@ -6410,7 +6420,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }, 150);
     }
 
-    // Restore playback position after the page catches up; retried because a seek needs a ready player.
+    // Restore the position once the page catches up; retried until the player can seek.
     function resumePlaybackAt(seconds) {
         if (!(seconds > 1)) return;
         let tries = 0;
@@ -6434,8 +6444,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (freshLoadDue()) { freshLoad(href, at); return; }
         if (!navigateInPage(href)) { location.href = href; return; }
         resumePlaybackAt(at);
-        // The address bar already points here, so onUrlChange has nothing to react to; run the
-        // after-navigation work (badges, Up next panel) explicitly.
+        // The URL already points here, so onUrlChange won't react; run the after-navigation work directly.
         setTimeout(() => {
             try { kickRecommended(); } catch {}
             try { scheduleBadges(); } catch {}
@@ -6453,12 +6462,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         } catch { return href; }
     }
 
-    // Fresh page load every N videos (Up next settings). Every in-page hop leaves some of the site's
-    // state behind (player instances, cached pages, buffers), so a long session keeps growing. A
-    // full load clears that; the queue survives via sessionStorage, and the flag below lets the new
-    // page resume playback (and the position, after leaving fullscreen). Fullscreen has its own,
-    // usually lower, count: a page load ends fullscreen and a browser only re-enters it on a click or
-    // key, so the new page asks for exactly one.
+    // Full load every N videos: in-page hops leak site state; the queue survives in sessionStorage. Fullscreen
+    // has a lower count: a browser re-enters fullscreen only on a click or key, so the new page asks for one.
     const FRESH_LOAD_KEY = 'pmvx_fresh_load_v1';
     let videoHopsThisPage = 0;
     let freshLoading = false;
@@ -6476,8 +6481,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         try { document.querySelectorAll('video, audio').forEach(el => el.pause()); } catch {}
         location.href = href;
     }
-    // One click or key (Esc skips) puts the player back in fullscreen and plays; the gesture also
-    // satisfies a browser that blocked autoplay.
+    // One click or key (Esc skips) restores fullscreen and plays; the gesture also unblocks autoplay.
     function offerFullscreenResume(video) {
         if (document.getElementById('pmvx-fs-resume')) return;
         const ov = document.createElement('div');
@@ -6506,8 +6510,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         window.addEventListener('keydown', onKey, true);
         document.body.appendChild(ov);
     }
-    // After a fresh load: start playback (and seek back) once the player is ready. A browser that
-    // blocks autoplay without a click gets a hint instead.
+    // After a fresh load: play (and seek back) once ready; hint if autoplay is blocked.
     (function resumeAfterFreshLoad() {
         let d = null;
         try {
@@ -6550,7 +6553,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return href && href.includes('/video/') ? cleanVideoHref(href) : null;
     }
 
-    // Recovers a slug URL from the slug to API id map for items without a card; null falls back to the bare id.
+    // Slug URL from the slug-to-API-id map for items without a card; null = use the bare id.
     function knownHrefForId(apiId) {
         for (const [slugId, mapped] of State.slugToApiId) {
             if (mapped === apiId) return `/video/${slugId}`;
@@ -6558,8 +6561,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return null;
     }
 
-    // Keeps `queueCursor` on the playing item. A video reached outside the queue is inserted right
-    // after the current one while the queue is active, so earlier items move into the history.
+    // Keeps queueCursor on the playing item; a video opened outside the queue is inserted after it.
     function syncQueueCursor() {
         if (!location.pathname.startsWith('/video/')) return;
         const id = getCurrentVideoId();
@@ -6569,9 +6571,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
         const idx = smartQueueItems.findIndex(it => it.id === id);
         if (idx !== -1 && idx !== queueCursor && idx !== queueCursor + 1) {
-            // A queued video opened out of turn (a card, a row further down, Back to one already played)
-            // cuts in line: it moves right behind the current one and plays now. What was still to come
-            // keeps its order and follows it, instead of everything in between counting as played.
+            // Opened out of turn: cut in after the current one; the rest keeps its order (not counted as played).
             const [item] = smartQueueItems.splice(idx, 1);
             if (idx < queueCursor) queueCursor--;
             queueCursor++;
@@ -6601,7 +6601,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         queueCursor -= excess;
     }
 
-    // Items still waiting after the playing one, or null when the playing video is not the queue's current item.
+    // Items after the playing one, or null when it is not the queue's current item.
     function queueRemaining() {
         syncQueueCursor();
         if (queueCursor < 0 || !smartQueueItems.length) return null;
@@ -6615,8 +6615,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const idx = smartQueueItems.findIndex(it => it.id === id);
         return idx > queueCursor ? idx - queueCursor : 0;
     }
-    // The Up next button on a card shows whether the video is queued, and where.
-    // Recommended rows carry the slug id; the API id is tried first.
+    // Card's Up next button shows the queue position; Recommended rows use slug ids, so API id first.
     function syncQueueCardBtn(btn) {
         const raw = btn.dataset.qid;
         const pos = queuedPosition(State.slugToApiId.get(raw)) || queuedPosition(raw);
@@ -6636,36 +6635,33 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         manuallyAddedIds.add(videoId);
         const was = smartQueueItems.findIndex(it => it.id === videoId);
         if (was !== -1 && was >= queueCursor) {
-            // Already playing or waiting: do not move it, which would reshuffle the list.
             toast('Already in Up next', null, { under: upNextToastAnchor() });
             renderQueueSidebar();
             return;
         }
         if (was !== -1) {
-            // Move out of the history back into line without leaving a duplicate.
             smartQueueItems.splice(was, 1);
             queueCursor--;                           // keep pointing at the same item
         }
         const href = hrefOverride || cardHref(card) || (card ? null : location.pathname + location.search);
-        // Appended at the end to preserve click order.
         smartQueueItems.push({ id: videoId, href, meta: metaOverride || resolveQueueMeta(videoId, card) });
         toast(`+ Added to Up next (${upcomingCount()})`, 'green', { under: upNextToastAnchor() });
         renderQueueSidebar();
     }
-    // Up next messages appear right under Up next in the header (under its panel when that is open).
+    // Up next messages appear under the header button (or its open panel).
     function upNextToastAnchor() {
         const panel = document.getElementById('pmv-queue-floating');
         if (panel && panel.getClientRects().length) return panel;
         return [...document.querySelectorAll('[data-pmv-queue-btn]')].find(b => b.getClientRects().length) || null;
     }
     function addCurrentVideoToQueue() { addVideoToQueue(getCurrentVideoId()); }
-    // For panels with their own video lists (the star popout): the id and link are known, no card.
+    // For panels with their own video lists (star popout): id and link known, no card.
     PMVX.upNext = {
         add: (id, href, meta) => addVideoToQueue(id, null, href, meta),
         remove: id => { removeFromQueue(id); toast('\u2212 Removed from Up next', null, { under: upNextToastAnchor() }); },
         position: id => queuedPosition(id),
     };
-    // A row added before its API _id was known is keyed by slug id; move it over in place once known.
+    // A row added under its slug id is re-keyed in place once the API _id is known.
     function adoptResolvedQueueId(tempId, realId) {
         if (tempId === realId) return;
         const idx = smartQueueItems.findIndex(it => it.id === tempId);
@@ -6688,31 +6684,27 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         renderQueueSidebar();
     }
 
-    // The visible "Recommended" section (a mobile and a desktop h3 exist). Returns its container
-    // (the h3's grandparent), or null off /video/ pages.
+    // Visible "Recommended" (mobile and desktop h3 exist): the h3's grandparent, or null off /video/.
     function findVisibleRecommendedContainer() {
         const h3 = [...document.querySelectorAll('h3')].find(el => {
             if (el.textContent.trim() !== 'Recommended') return false;
-            // No boxes: inside a display:none ancestor (the hidden layout).
+            // No boxes: inside a display:none ancestor.
             return el.getClientRects().length > 0;
         });
         return h3?.parentElement?.parentElement || null;
     }
 
-    // The queue uses the site's own Tailwind class strings, copied from a Recommended card, to match
-    // it exactly. Only use classes present in the compiled stylesheet; unused ones silently do nothing.
+    // Site's Tailwind classes copied from a Recommended card; only classes in the compiled CSS work.
     const Q_CHIP = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold border';
     const Q_CHIP_ON = `${Q_CHIP} bg-orange-500/10 border-orange-500/30 text-orange-300`;
     const Q_CHIP_OFF = `${Q_CHIP} bg-white/5 border-white/10 text-gray-400`;
     const Q_CHIP_ADD = `${Q_CHIP} bg-green-500/10 border-green-500/30 text-green-300`;
 
-    // Row HTML is built from API values (titles, uploaders) and playlist names that can contain
-    // markup; everything interpolated goes through this first.
+    // Titles, uploaders and playlist names can contain markup; escape everything interpolated.
     function escHtml(v) {
         return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
-    // The user's playlists containing this video, in each playlist's color.
     const QUEUE_IN_PLAYLIST_RGB = '100,255,0';
 
     function queuePlaylistChipsHtml(videoId) {
@@ -6725,25 +6717,21 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return chips.join('');
     }
 
-    // Re-render only when the video whose membership changed is in the queue.
     function refreshQueuePlaylistChips(videoId) {
         if (smartQueueItems.some(it => it.id === videoId)) renderQueueSidebar();
     }
 
-    // One row: a native Recommended card plus a position column and hover-revealed reorder/remove
-    // controls (the opacity-0 to group-hover:opacity-100 pattern of the card's play overlay).
+    // Native Recommended card plus a position column and hover-revealed reorder/remove (group-hover).
     function sidebarRowHtml({ id, href, meta }, isCurrent, index, pinned, isPlayed) {
         const bits = [
             meta?.bayesianRating ? Math.round(meta.bayesianRating) + '%' : '',
             isCurrent ? 'now playing' : (isPlayed ? 'played' : (pinned ? 'added' : 'suggested')),
         ].filter(Boolean);
         const plChips = queuePlaylistChipsHtml(id);
-        // With the site-wide filter on: why it would hide this video, as red chips (the row stays).
-        // Playlist reasons are left out: the row's tint and playlist chips already show that.
+        // Site-wide filter on: red chips for why it would hide this video (playlist reasons: tint/chips).
         const reasons = filterConfig.active && filterIsMeaningful()
             ? filterReasons(id, meta, filterConfig, true).filter(r => r !== 'in playlist' && r !== 'not in playlist').slice(0, 3) : [];
         const reasonChips = reasons.map(r => `<span title="Your filter would hide this video" style="display:inline-flex;align-items:center;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:500;background:rgba(${REJECT_RGB},0.12);border:1px solid rgba(${REJECT_RGB},0.45);color:rgb(${REJECT_RGB});white-space:nowrap;">${escHtml(r)}</span>`).join('');
-        // Already saved: row tinted green (red for the reject list).
         const tintRgb = isRejected(id) ? REJECT_RGB : QUEUE_IN_PLAYLIST_RGB;
         const rowStyle = [
             plChips ? `background:rgba(${tintRgb},0.07);box-shadow:inset 0 0 0 1px rgba(${tintRgb},0.35);` : '',
@@ -6770,7 +6758,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             </a>`;
     }
 
-    // Fill in rows added with empty metadata once it becomes available.
     function healQueueMeta() {
         smartQueueItems.forEach(it => {
             if (it.meta?.title) return;
@@ -6787,8 +6774,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             ? `${upcomingCount()} up next${played ? ` \u2022 ${played} played` : ''} \u2022 auto-refill ${queueSettings.autoRefill ? 'on' : 'off'}${queueSettings.useNfFilter && lastFilteredOut ? ` \u2022 ${lastFilteredOut} filtered out` : ''}`
             : 'Empty \u2014 add with "+", or generate below';
 
-        // Older played items stay folded away behind "Show more".
-        // "Clear" next to it drops the played items.
         const firstShown = Math.max(0, played - queueHistoryShown);
         const foldBtn = firstShown > 0
             ? `<button id="pmv-sq-more" type="button" class="${Q_CHIP_OFF}" style="cursor:pointer;flex:1;justify-content:center;">Show more \u2022 ${firstShown} earlier</button>`
@@ -6833,7 +6818,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             const rb = panel.querySelector(sel);
             if (rb) rb.onclick = e => { e.preventDefault(); e.stopPropagation(); restoreQueueSnapshot(loadQueueUndo()); };
         });
-        // Both clears ask for a second click, then offer Undo (the old queue also goes into Previous queues).
+        // Both clears need a second click, then offer Undo (old queue also goes to Previous queues).
         const clearPlayed = panel.querySelector('#pmv-sq-clear-played');
         if (clearPlayed) clearPlayed.onclick = e => {
             e.preventDefault();
@@ -6874,9 +6859,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 if (e.target.closest('[data-remove-queue]')) return;
                 if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; // let modified clicks open a new tab
                 if (!document.fullscreenElement && freshLoadDue()) { e.preventDefault(); freshLoad(row.getAttribute('href')); return; }
-                // Via goToVideo, so a click from fullscreen hands over the source instead of navigating.
+                // Via goToVideo, so from fullscreen the source is handed over instead.
                 if (!document.fullscreenElement && !navigateInPage(row.getAttribute('href'))) return;
                 e.preventDefault();
+                // From the header popout: close it, show Up next docked on the video page.
+                if (panel.id === 'pmv-queue-floating' && !document.fullscreenElement) { panel.remove(); dockQueueSoon(); }
                 if (document.fullscreenElement) goToVideo(row.getAttribute('href'), row.getAttribute('data-queue-id'));
             });
         });
@@ -6895,7 +6882,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const container = findVisibleRecommendedContainer();
         let panel = document.getElementById('pmv-queue-sidebar');
 
-        // The panel stays up with an empty queue while settings are open, so "Generate" is reachable.
+        // Stays up when empty while settings are open, so "Generate" is reachable.
         if (!container?.parentElement || (!smartQueueItems.length && !queueSettingsOpen)) { panel?.remove(); return; }
 
         if (!panel) {
@@ -6909,9 +6896,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         wireQueuePanel(panel, renderQueueSidebar);
     }
 
-    // Header button that opens the queue anywhere (the inline queue needs a video page),
-    // with a count badge.
-    // Same "play next" outline as the Up next button on cards.
+    // Header button: queue anywhere (inline needs a video page), count badge, cards' "play next" outline.
     const QUEUE_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5v11L10 12z"></path><path d="M11 6.5v11l7.5-5.5z"></path><path d="M21 6.5v11"></path></svg>';
 
     function updateQueueButton() {
@@ -6930,6 +6915,36 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             if (badge.style.display !== vis) badge.style.display = vis;
             if (btn.title !== label) btn.title = label;
         });
+    }
+
+    // Recommended may appear late or linger after a route change; keep re-placing until settled.
+    let dockTimer = null;
+    function dockQueueSoon() {
+        clearInterval(dockTimer);
+        const until = Date.now() + 6000;
+        dockTimer = setInterval(() => {
+            if (Date.now() > until || document.fullscreenElement) { clearInterval(dockTimer); return; }
+            const container = findVisibleRecommendedContainer();
+            const panel = document.getElementById('pmv-queue-sidebar');
+            if (container && (!panel || !panel.isConnected || panel.nextElementSibling !== container)) {
+                try { renderQueueSidebar(); } catch {}
+            }
+        }, 200);
+    }
+
+    function ensureQueueFloatingStyle() {
+        if (document.getElementById('pmv-queue-floating-style')) return;
+        const st = document.createElement('style');
+        st.id = 'pmv-queue-floating-style';
+        st.textContent = `
+#pmv-queue-floating h3{color:rgb(251,146,60);}
+#pmv-queue-floating [data-queue-id]:hover{background:#333333 !important;}
+#pmv-queue-floating [data-queue-id].bg-\\[\\#1A1A1A\\]{background:rgba(249,115,22,0.12) !important;box-shadow:inset 3px 0 0 rgb(249,115,22);}
+#pmv-queue-floating::-webkit-scrollbar{width:8px;}
+#pmv-queue-floating::-webkit-scrollbar-thumb{background:rgba(249,115,22,0.35);border-radius:4px;}
+#pmv-queue-floating::-webkit-scrollbar-thumb:hover{background:rgba(249,115,22,0.6);}
+`;
+        document.head.appendChild(st);
     }
 
     function renderQueueFloating() {
@@ -6951,8 +6966,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             'position:fixed;z-index:999999;width:420px;max-width:calc(100vw - 16px);' +
             'max-height:calc(100vh - 90px);overflow:auto;' +
             `top:${Math.round(r.bottom + 8)}px;left:${Math.round(Math.min(r.left, window.innerWidth - 428))}px;` +
-            'background:rgba(0,0,0,0.92);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.14);' +
-            'border-radius:12px;padding:12px;color:white;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
+            'background:#232323;border:1px solid rgba(249,115,22,0.35);border-top:3px solid rgb(249,115,22);' +
+            'border-radius:12px;padding:12px;color:white;scrollbar-color:rgba(249,115,22,0.35) transparent;' +
+            'box-shadow:0 12px 40px rgba(0,0,0,0.7),0 0 24px rgba(249,115,22,0.12);';
+        ensureQueueFloatingStyle();
         document.body.appendChild(box);
         renderQueueFloating();
 
@@ -6966,8 +6983,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }, 0);
     }
 
-    // Native HTML5 drag-and-drop. dragover previews the move by moving the DOM node;
-    // dragend rebuilds smartQueueItems from the final DOM order.
+    // Native drag-and-drop: dragover moves the DOM node, dragend rebuilds smartQueueItems from DOM order.
     function attachQueueDragReorder(rowsEl) {
         let draggingId = null;
         rowsEl.querySelectorAll('[data-queue-id]').forEach(row => {
@@ -6978,7 +6994,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             });
             row.addEventListener('dragend', () => {
                 row.style.opacity = '';
-                // Rebuild smartQueueItems from the final DOM order.
                 const order = [...rowsEl.querySelectorAll('[data-queue-id]')].map(r => r.dataset.queueId);
                 const byId = new Map(smartQueueItems.map(it => [it.id, it]));
                 smartQueueItems = order.map(id => byId.get(id)).filter(Boolean);
@@ -7000,17 +7015,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         });
     }
 
-    // ---------------------------------------------------------------------
-    // Queue refill
-    // ---------------------------------------------------------------------
-    // Keeps an active queue topped up from the site's own Recommended sidebar for the current video,
-    // scored like generateSmartQueue(). Falls back to a DOM-scraped rating when a candidate is not
-    // in State.videoMeta.
-    // ---------------------------------------------------------------------
-    // Playlist-page filter applied to the queue
-    // ---------------------------------------------------------------------
-    // The playlist-page filter persists its settings, so the same rules are applied to queue
-    // candidates by reading them. Unknown values never filter anything out.
+    // --- Queue refill ---
+    // Tops up an active queue from Recommended, scored like generateSmartQueue() (DOM rating as fallback).
+    // --- Playlist-page filter applied to the queue ---
+    // Applies the playlist-page filter's saved settings to queue candidates; unknown values never filter.
     const NF_SETTINGS_KEY = 'pmvnf_filter_settings_v1';
     const NF_DEFAULT_TERMS_KEY = 'pmvnf_default_terms_v1';
 
@@ -7048,8 +7056,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
 
-    // Summarizes what the saved filter does, and how many candidates it rejected on the last refill
-    // (a tight filter can leave the queue short).
+    // Filter summary, plus how many candidates the last refill rejected (a tight filter leaves the queue short).
     let lastFilteredOut = 0;
 
     function filterSummary() {
@@ -7057,6 +7064,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const bits = [];
         const terms = filterTerms(c.exclude).length + filterTerms(c.include).length;
         if (terms) bits.push(`${terms} term${terms === 1 ? '' : 's'}`);
+        const models = filterTerms(c.modelsExclude).length + filterTerms(c.modelsInclude).length;
+        if (models) bits.push(`${models} model${models === 1 ? '' : 's'}`);
         if (c.ratingMin > 0 || c.ratingMax < 100) bits.push(`${c.ratingMin}-${c.ratingMax}%`);
         if (c.maxMinutes > 0) bits.push(`max ${c.maxMinutes}m`);
         if (c.seen !== 'any') bits.push(c.seen);
@@ -7077,7 +7086,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     function topUpQueueFromRecommended() {
         const targetSize = queueSettings.targetSize;
-        // Only items still ahead count toward the target; history does not block refilling.
+        // Only items still ahead count toward the target.
         if (!smartQueueActive || !queueSettings.autoRefill || upcomingCount() >= targetSize) return;
         const container = findVisibleRecommendedContainer();
         if (!container) return;
@@ -7126,7 +7135,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return candidates.slice(0, count);
     }
 
-    // Settings live inline in the queue panel.
     const Q_INPUT = 'background:#0F0F0F;border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:#fff;padding:3px 6px;font:inherit;';
 
     function queueSettingsHtml() {
@@ -7176,7 +7184,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             </div>`;
     }
 
-    // A click that arms the button first ("Clear all?"); the second click within 3 s goes through.
+    // Two-step click ("Clear all?"): the second click within 3 s goes through.
     function confirmClick(btn, label) {
         if (btn.dataset.armed === '1') { clearTimeout(btn._pmvArm); delete btn.dataset.armed; return true; }
         btn.dataset.armed = '1';
@@ -7193,9 +7201,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return false;
     }
 
-    // Previous queues: Up next as it was before a clear or a replace, newest first. Kept in
-    // localStorage (at most QUEUE_PREV_MAX, for QUEUE_PREV_MAX_AGE_MS), so a cleared queue can come
-    // back later too, not only through the Undo right after.
+    // Previous queues: Up next before a clear or replace, newest first, in localStorage (QUEUE_PREV_MAX,
+    // QUEUE_PREV_MAX_AGE_MS), so a cleared queue can come back after the Undo is gone.
     const QUEUE_PREV_KEY = 'pmv_queue_prev_v1';
     const QUEUE_PREV_MAX = 10;
     const QUEUE_PREV_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -7224,7 +7231,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             items: smartQueueItems.map(it => ({ id: it.id, href: it.href, meta: it.meta ? { ...it.meta } : {} })),
         };
         if (!snap.items.length) return snap;
-        // The same queue twice in a row is kept once (the newest copy).
         const list = loadPrevQueues().filter(q => queueSig(q.items) !== queueSig(snap.items));
         list.unshift(snap);
         storePrevQueues(list);
@@ -7232,12 +7238,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
     function loadQueueUndo() { return loadPrevQueues()[0] || null; }
     function prevQueueCount() { return loadPrevQueues().length; }
-    // Restores a previous queue; the queue it replaces (if any) goes into the list, so this is undoable too.
+    // Restores a previous queue; the replaced queue goes into the list, so this is undoable too.
     function restoreQueueSnapshot(snap) {
         if (!snap) return;
         const rest = loadPrevQueues().filter(q => !(q.at === snap.at && queueSig(q.items) === queueSig(snap.items)));
         storePrevQueues(rest);
-        // The queue being replaced goes into the list, unless it is only part of the restored one (an undo).
+        // Not when the current queue is only part of the restored one (an undo).
         const restoredIds = new Set(snap.items.map(it => it.id));
         if (smartQueueItems.length && !smartQueueItems.every(it => restoredIds.has(it.id))) snapshotQueue(`Replaced by a restore \u2022 ${smartQueueItems.length} videos`);
         smartQueueItems = snap.items.map(it => ({ ...it, meta: it.meta ? { ...it.meta } : {} }));
@@ -7266,7 +7272,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }).join('');
     }
 
-    // A message with an Undo button, under Up next in the header; gone after 10 s.
+    // Undo toast under Up next in the header; fades after 2 s (held on hover).
     function showQueueUndo(msg, snap) {
         document.getElementById('pmv-undo-toast')?.remove();
         const el = document.createElement('div');
@@ -7285,11 +7291,18 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const r = anchor && !document.fullscreenElement && anchor.isConnected ? anchor.getBoundingClientRect() : null;
         if (r && r.width) { el.style.bottom = 'auto'; el.style.top = Math.round(r.bottom + 8) + 'px'; el.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px'; }
         (document.fullscreenElement || document.body).appendChild(el);
-        setTimeout(() => el.remove(), 10000);
+        el.style.transition = 'opacity .3s';
+        let timer = null;
+        const arm = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 2000);
+        };
+        el.addEventListener('mouseenter', () => { clearTimeout(timer); el.style.opacity = '1'; });
+        el.addEventListener('mouseleave', arm);
+        arm();
     }
 
-    // Saved queues: named copies of Up next in localStorage, kept until deleted (the automatic backup
-    // only bridges a restart within QUEUE_BACKUP_MAX_AGE_MS). Newest first, at most SAVED_QUEUES_MAX.
+    // Saved queues: named Up next copies in localStorage until deleted (the auto backup only bridges a restart).
     const SAVED_QUEUES_KEY = 'pmv_saved_queues_v1';
     const SAVED_QUEUES_MAX = 20;
     function loadSavedQueues() {
@@ -7319,7 +7332,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     function wireQueueSettings(panel) {
         const q = sel => panel.querySelector(sel);
-        // Controls write straight through to the persisted settings.
         const bind = (sel, key, read) => {
             const el = q(sel);
             if (el) el.onchange = () => { queueSettings[key] = read(el); saveQueueSettings(); renderQueueSidebar(); };
@@ -7338,7 +7350,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         q('#sq-generate').onclick = () => {
             queueSettings.tagFilter = q('#sq-tag').value;
             saveQueueSettings();
-            // Keeps manually added items and replaces only the suggested portion.
             const generated = generateSmartQueue(queueSettings)
                 .filter(c => !manuallyAddedIds.has(c.id))
                 .map(c => ({ id: c.id, href: knownHrefForId(c.id), meta: resolveQueueMeta(c.id) }));
@@ -7368,7 +7379,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             restoreQueueSnapshot(loadPrevQueues()[+b.dataset.sqPrev]);
         };
 
-        // Saved queues.
         const savedList = q('#sq-saved-list');
         const redrawSaved = () => { if (savedList) savedList.innerHTML = savedQueuesHtml(); };
         const copyItems = items => items.filter(it => it?.id).map(it => ({ id: it.id, href: it.href, meta: it.meta ? { ...it.meta } : {} }));
@@ -7395,7 +7405,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             const saved = list[idx];
             if (!saved) return;
             if (b.dataset.sqDel !== undefined) {
-                // Two clicks: the first arms the button.
                 if (b.dataset.armed !== '1') {
                     b.dataset.armed = '1'; b.textContent = 'Delete?';
                     setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = '\u2715'; } }, 3000);
@@ -7408,7 +7417,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             }
             const items = copyItems(saved.items);
             if (b.dataset.sqLoad !== undefined) {
-                // Replacing a queue that still has videos to come asks for a second click.
                 if (upcomingCount() > 0 && b.dataset.armed !== '1') {
                     b.dataset.armed = '1'; b.textContent = 'Replace?';
                     setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Load'; } }, 3000);
@@ -7431,7 +7439,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         };
     }
 
-    // Opens the queue panel's settings; needs the Recommended sidebar to anchor to, so it says so otherwise.
     function openQueueSettings() {
         if (!findVisibleRecommendedContainer()) {
             toast('Up next appears on a video page, next to "Recommended"');
@@ -7444,19 +7451,16 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     function getCurrentVideoId() {
-        // Playlist pages: the active queue row (border-orange-500) is the playing video. It wins over
-        // currentVideoData, which lags a step when the queue advances, and over the player's poster,
-        // whose hex is a thumbnail asset id; either would leave the playlist pills on the wrong video.
+        // Playlist pages: the active queue row (border-orange-500) wins over currentVideoData (lags a step on
+        // advance) and the poster (its hex is a thumbnail asset id).
         if (location.pathname.startsWith('/playlists/')) {
             const active = getActiveQueueVideoId();
             if (active) return active;
         }
         if (State.currentVideoData?.id) return State.currentVideoData.id;
 
-        // On /video/ pages the URL hex is the one reliable id before any API response: a mapped slug id
-        // or the API _id. This must come before the poster fallback: a poster URL hex is a thumbnail
-        // asset id, not a video _id, and binding to it breaks the playlist buttons until unrelated
-        // data arrives.
+        // /video/ pages: the URL hex (slug id or API _id) is the only reliable id before any API response.
+        // Must precede the poster fallback: a poster hex is a thumbnail asset id, not a video _id.
         const pageId = location.pathname.match(/^\/video\/(?:[^?#]*_)?([0-9a-f]{24})(?:[?#]|$)/i)?.[1];
         if (pageId) return State.slugToApiId.get(pageId) || pageId;
 
@@ -7475,10 +7479,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return getJsonLdVideoId();
     }
 
-    // Ensures State.currentVideoData (rating, tags, performers, description, uploadDate) is populated.
-    // Vue often hydrates from the SSR payload without a client fetch, so one is made here and flows
-    // through the interceptor. Goes through fetchVideoDeduped (shared, cached, failures parked);
-    // adopted only if it is still the video on screen when the answer lands.
+    // Vue often hydrates from SSR without a client fetch, so fetch here (deduped) to fill
+    // State.currentVideoData; adopted only if it is still the video on screen.
     function ensureCurrentVideoData(videoId) {
         if (!videoId || State.currentVideoData?.id === videoId) return;
         if (lookupOnCooldown(videoId)) return;
@@ -7491,9 +7493,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }).catch(() => noteLookupFailure(videoId));
     }
 
-    // Links use the video's `oldId` when present, else `_id`. Every API response and __NUXT_DATA__
-    // carries those objects, so slug to _id mappings are learned without per-card lookups.
-    // Returns the number of new mappings.
+    // Links use `oldId` when present, else `_id`; API responses and __NUXT_DATA__ carry both, so slug -> _id
+    // mappings are learned without per-card lookups. Returns the number of new mappings.
     const HEX24_RE = /^[0-9a-f]{24}$/i;
     function learnVideoId(id, oldId) {
         if (typeof id !== 'string' || !HEX24_RE.test(id)) return 0;
@@ -7517,7 +7518,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 for (const x of o) if (x && typeof x === 'object') stack.push(x);
                 continue;
             }
-            // Only video-shaped objects: an _id plus a title and a video-only field.
             if (typeof o._id === 'string' && typeof o.title === 'string'
                 && ('duration' in o || 'previewUrl' in o || 'oldId' in o)) {
                 added += learnVideoId(o._id, o.oldId);
@@ -7539,7 +7539,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         try { arr = JSON.parse(el.textContent); } catch { return 0; }
         if (!Array.isArray(arr)) return 0;
         const val = ref => (typeof ref === 'number' ? arr[ref] : ref);
-        // Resolves a field: indices into the array, arrays of indices, devalue's Reactive/Ref wrappers.
+        // Resolves indices, arrays of indices and devalue's Reactive/Ref wrappers.
         const res = (ref, depth = 0) => {
             if (typeof ref !== 'number' || ref < 0 || depth > 4) return typeof ref === 'number' ? undefined : ref;
             const x = arr[ref];
@@ -7558,8 +7558,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             if (!o || typeof o !== 'object' || Array.isArray(o) || !('_id' in o) || !('title' in o)) continue;
             if (!('duration' in o || 'previewUrl' in o || 'oldId' in o)) continue;
             added += learnVideoId(val(o._id), val(o.oldId));
-            // Server-rendered lists (the homepage's first page) never pass the fetch interceptor:
-            // their metadata (all tags, content flags) is read from here.
+            // SSR lists (homepage first page) never pass the fetch interceptor; read their metadata here.
             if (!('tags' in o || 'top5Tags' in o)) continue;
             const v = {};
             FIELDS.forEach(k => { if (k in o) v[k] = res(o[k]); });
@@ -7577,15 +7576,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     function getMeta() {
-        // While fullscreen runs ahead of the page (hand-over), page-derived fields still belong to the
-        // previous video, so the page is not read; the fetched data is correct.
+        // During a fullscreen hand-over the page still shows the previous video; use only fetched data.
         const pageIsBehind = !!staleFullscreenHref;
 
         const liveTitle = pageIsBehind ? null :
             document.querySelector('.min-w-0 h1')?.textContent?.trim() ||
             document.querySelector('h1')?.textContent?.trim();
 
-        // Creator: orange gradient h3, text nodes only (skips the "Creator" badge child).
+        // Creator: orange gradient h3, text nodes only (skips the "Creator" badge).
         let liveCreator = null;
         const uploaderH3 = pageIsBehind ? null : document.querySelector('h3.bg-gradient-to-r.from-orange-400');
         if (uploaderH3) {
@@ -7594,7 +7592,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 .map(n => n.textContent).join('').trim();
             if (text) liveCreator = text;
         }
-        // Fallback: "More from X (N)"; only h3 elements with a class.
+        // Fallback: the "More from X (N)" h3.
         if (!liveCreator && !pageIsBehind) {
             const h3s = document.querySelectorAll('h3[class]');
             for (const h of h3s) {
@@ -7606,26 +7604,22 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             }
         }
 
-        // Tags: <a href="/search?tags=...">
         const domTags = pageIsBehind ? [] : [...document.querySelectorAll('a[href^="/search?tags="]')]
             .slice(0, 15)
             .map(a => (a.getAttribute('title')?.replace(/^Search for '|'$/g, '') ||
                        a.textContent.replace(/^#/, '')).trim())
             .filter(Boolean);
 
-        // Performers: <a href="/search?stars=...">, falling back to /model/ links. /model/ titles use
-        // "View <name>'s profile", so the visible text (span.truncate or textContent) is used as the name.
+        // Performers: /search?stars= or /model/ links; /model/ titles read "View <name>'s profile", so use the text.
         const domStars = pageIsBehind ? [] : [...document.querySelectorAll('a[href^="/search?stars="], a[href^="/model/"]')]
             .slice(0, 10)
             .map(a => (a.querySelector('.truncate')?.textContent || a.textContent || '').replace(/^#/, '').trim())
             .filter(Boolean);
 
-        // Description block on /videos/ detail pages.
         let liveDescription = null;
         const descBlock = pageIsBehind ? null : document.querySelector('div.bg-\\[\\#1A1A1A\\] p.whitespace-pre-wrap, div.bg-\\[\\#1A1A1A\\] p.text-gray-300');
         if (descBlock) liveDescription = descBlock.textContent.trim() || null;
 
-        // JSON-LD fallback for creator and description.
         let ldCreator = null, ldDescription = null;
         try {
             const jsonLd = pageIsBehind ? null : document.querySelector('script[type="application/ld+json"]');
@@ -7647,9 +7641,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         };
     }
 
-    // ---------------------------------------------------------------------
-    // Video helpers
-    // ---------------------------------------------------------------------
+    // --- Video helpers ---
 
     // Volume lock (Settings, off by default): keeps the player unmuted at 100 %.
     function setVolumeLock(on) {
@@ -7671,10 +7663,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     function getVideo() {
-        // Cached element, if still in the DOM.
         if (State.video?.isConnected) return State.video;
 
-        // Excludes the hover-preview <video> (notifications list): it is not the player and must stay muted.
+        // Skip the hover-preview <video> (notifications): not the player, must stay muted.
         const v = document.querySelector('video:not([data-pmv-preview-video])');
         if (!v) { State.video = null; return null; }
 
@@ -7691,13 +7682,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 if (v.volume > 0) State.lastVolume = v.volume;
             });
 
-            // Seekbar preview: start buffering the low rendition shortly after each new source plays (see scrubWarm).
+            // Seekbar-preview: buffer the low rendition shortly after each new source plays (scrubWarm).
             const warmSoon = () => {
                 clearTimeout(Scrub.warmTimer);
                 Scrub.warmTimer = setTimeout(scrubWarm, SCRUB_WARM_DELAY);
             };
             v.addEventListener('playing', warmSoon);
-            // Also handle a source that was already playing before this listener was attached.
             if (!v.paused && v.readyState >= 2) warmSoon();
 
             v.addEventListener('loadedmetadata', () => {
@@ -7705,8 +7695,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     setTimeout(() => forceVolume100({ silent: true }), 80);
                     setTimeout(() => forceVolume100({ silent: true }), 600);
                 }
-                // Fires on every src swap (playlist auto-advance) regardless of Vue's DOM details;
-                // Vue's currentVideoIndex watch has already run by then.
+                // Fires on every src swap (playlist auto-advance), after Vue's currentVideoIndex watch.
                 try { maybeShowNextVideoNotification(); } catch {}
             });
 
@@ -7714,7 +7703,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 if (State.forceVolume100) setTimeout(() => forceVolume100({ silent: true }), 80);
             });
 
-            // Invalidate the cache when the src changes.
             v.addEventListener('emptied', () => { if (State.video === v) State.video = null; });
 
             v.addEventListener('timeupdate', () => maybeMarkWatchedFromPlayback(v));
@@ -7745,9 +7733,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Playlist mutation
-    // ---------------------------------------------------------------------
+    // --- Playlist mutation ---
 
     async function addToPlaylist(videoId, playlistId) {
         const res = await api(`/api/playlists/${playlistId}/add-video`, {
@@ -7766,12 +7752,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             saveCacheSoon();
             refreshQueuePlaylistChips(videoId);
         }
-        // Filters keep this video visible until they are applied again (see PMVX.markActed).
+        // Filters keep this video visible until applied again (PMVX.markActed).
         PMVX.markActed(videoId);
 
-        // The reject list is exclusive: a video on it is on no other playlist, and saving it to any
-        // other playlist removes it from the reject list. Handled here so every surface (HUD row,
-        // page buttons, context menu, hotkey) behaves the same.
+        // The reject list is exclusive with other playlists; enforced here so every surface behaves the same.
         if (isRejectList(playlistId)) {
             const others = getMatches(videoId).filter(p => p.id !== playlistId);
             if (others.length) await Promise.allSettled(others.map(p => removeFromPlaylist(videoId, p.id)));
@@ -7793,14 +7777,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         State.reverse.get(videoId)?.delete(playlistId);
         saveCacheSoon();
         refreshQueuePlaylistChips(videoId);
-        // Same for removal while filtering on "in list".
         PMVX.markActed(videoId);
         return true;
     }
 
-    // ---------------------------------------------------------------------
-    // Light cleanup
-    // ---------------------------------------------------------------------
+    // --- Light cleanup ---
 
     function pauseObserverBriefly(ms = 1000) {
         if (!observer || State.observerPaused) return;
@@ -7814,14 +7795,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }, ms);
     }
 
-    // IntersectionObserver lazily unloads far-offscreen thumbnails.
-    // Observation stays active after stripping: a display:none row is never intersecting, so
-    // unobserving would leave it blank. The src is restored from dataset.pmvOrigSrc on intersect.
+    // Lazily unloads far-offscreen thumbnails; src restored from dataset.pmvOrigSrc on intersect. Stays
+    // observed after stripping: a display:none row never intersects, so unobserving would leave it blank.
     const _farOffscreenIO = new IntersectionObserver(entries => {
         entries.forEach(entry => {
             const img = entry.target;
             if (entry.isIntersecting) {
-                // img.src reads back as the document URL after being cleared, so the pmvUnloaded marker is required.
+                // A cleared img.src reads back as the document URL, so the pmvUnloaded marker is required.
                 if (img.dataset.pmvUnloaded === '1' && img.dataset.pmvOrigSrc) {
                     img.src = img.dataset.pmvOrigSrc;
                     delete img.dataset.pmvUnloaded;
@@ -7854,12 +7834,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
         document.querySelectorAll('#pmv-toast, #pmv-progress-bar, #pmv-ctx-menu, #pmv-page-playlists, [data-pmv-badge="1"]').forEach(el => el.remove());
 
-        // Reset processed markers so badges are re-placed after the cleanup.
+        // Reset markers so badges and page playlist buttons are re-placed.
         document.querySelectorAll('[data-pmv-checked]').forEach(el => delete el.dataset.pmvChecked);
         document.querySelectorAll('[data-pmv-queue-checked]').forEach(el => delete el.dataset.pmvQueueChecked);
         document.querySelectorAll('[data-pmv-rec-checked]').forEach(el => delete el.dataset.pmvRecChecked);
 
-        // Force re-placement of page playlist buttons.
         State.nativePlaylistButtonLastVideoId = null;
 
         unloadFarOffscreenImages();
@@ -7874,16 +7853,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }, 1000);
     }
 
-    // ---------------------------------------------------------------------
-    // UI: toast / HUD / thumbnails
-    // ---------------------------------------------------------------------
+    // --- UI: toast / HUD / thumbnails ---
 
-    // color: 'green' | 'red' | null (neutral)
-    // `under`: an element the toast sits directly below (right-aligned), instead of the bottom corner.
+    // color: 'green' | 'red' | null; `under`: anchor element (the toast sits below it, right-aligned).
     PMVX.toast = (...a) => toast(...a);
     function toast(msg, color, { under = null } = {}) {
         document.getElementById('pmv-toast')?.remove();
-        // Fixed system messages default to green.
         if (!color) {
             if (/^playlists refreshed$/i.test(msg) || /^refreshing playlists/i.test(msg) ||
                 /^volume locked/i.test(msg)        || /^unmuted/i.test(msg)) {
@@ -7920,24 +7895,21 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return null;
     }
 
-    // Formats seconds like the page's own frame labels ("0:11").
     function formatThumbTime(seconds) {
         if (!Number.isFinite(seconds)) return '';
         const total = Math.round(seconds);
         return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
     }
 
-    // The src of an <img> as the site set it, also after unloadFarOffscreenImages() emptied it
-    // (an emptied src reads back as the page URL). Needed for the site's timeline strip, which is
-    // always off-screen in fullscreen and therefore emptied.
+    // An <img> src as the site set it, even after unloadFarOffscreenImages() emptied it (reads back as the
+    // page URL). Needed for the site's timeline strip, which is always off-screen and emptied in fullscreen.
     function pageImgSrc(img) {
         if (!img) return '';
         if (img.dataset.pmvUnloaded === '1') return img.dataset.pmvOrigSrc || '';
         return img.getAttribute('src') ? img.src : '';
     }
 
-    // The video's own API frames when available (same as the page strip); otherwise the page strip,
-    // unless fullscreen is ahead of the page (then the strip belongs to the previous video).
+    // API frames if available; else the page strip, unless fullscreen is ahead of the page (previous video's).
     function timelineFrames() {
         const data = State.currentVideoData;
         const id = getCurrentVideoId();
@@ -8009,14 +7981,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }, ms);
     }
 
-    // ---------------------------------------------------------------------
-    // Native action buttons
-    // ---------------------------------------------------------------------
-    // Cloned into the HUD so they stay reachable; one reusable detector for every page with this row.
+    // --- Native action buttons ---
+    // Cloned into the HUD to stay reachable; one detector for every page with this row.
 
     function findNativeActionBar() {
-        // Signals from specific to generic (titles/aria-labels vary per page and change on click);
-        // the first match is walked up to its button row.
+        // Signals from specific to generic (labels vary per page, change on click); first match walked up to its row.
         const anchorStrategies = [
             () => document.querySelector('[aria-label="Like video"]'),
             () => document.querySelector('[aria-label^="Like"]'),
@@ -8036,23 +8005,18 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 const container = anchor.closest(sel);
                 if (container) return container;
             }
-            // Last resort: the button's direct parent.
             if (anchor.parentElement) return anchor.parentElement;
         }
         return null;
     }
 
-    // The site's own favourite button, found by its title ("Add to favorites" / "Remove from favorites").
-    // Clicking it keeps the site's count, icon and cache in step; the HUD's cloned copy is skipped
-    // because its title is a snapshot.
-    // Direct API fallback, for when the page's button is stale:
-    //   PUT /api/videos/<id>/favorite  {action: "favorite"|"unfavorite"}
+    // The site's favourite button (by title): clicking it keeps the site's count, icon and cache in step; the HUD
+    // clone is skipped (title is a snapshot). Stale fallback: PUT /api/videos/<id>/favorite {action: "favorite"|"unfavorite"}
     async function toggleFavouriteViaApi() {
         const videoId = getCurrentVideoId();
         if (!videoId) { toast('No video'); return; }
 
-        // Toggle direction comes from the video's data; unknown counts as not favourited, so the key adds.
-        // Uses cached page data when present, otherwise a single lookup.
+        // Direction from the video's data (cached, else one lookup); unknown = not favourited, so the key adds.
         let wasOn = false;
         const cvd = State.currentVideoData;
         if (cvd?.id === videoId) wasOn = cvd.isFavorited === true;
@@ -8097,7 +8061,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
         const cloneBar = document.createElement('div');
         cloneBar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;';
-        // Clone only native buttons, not our own injections.
         [...nativeActionBar.children].forEach(child => {
             if (child.id === 'pmv-page-playlists' || child.dataset?.pmvPlBtn) return;
             if (child.tagName !== 'BUTTON' && child.tagName !== 'A') return;
@@ -8105,15 +8068,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             const clone = child.cloneNode(true);
             // Strip Vue attributes to avoid duplicate handlers.
             clone.removeAttribute('data-v-18f75d28');
-            // Forward clicks to the original.
             clone.addEventListener('click', e => {
                 e.stopPropagation();
-                // Our own buttons (⊘, Tags) open their menus at the clone, not at the hidden original.
+                // Our own buttons (⊘, Tags) open their menus at the clone, not the hidden original.
                 forwardedAnchor = { rect: clone.getBoundingClientRect(), at: performance.now() };
                 child.click();
                 startHudTimer(4000);
-                // The clone is a static snapshot; re-sync its classes shortly after the click,
-                // once Vue has patched the original (and again for slower API toggles).
+                // Snapshot clone: re-sync classes once Vue patched the original (again later for slow API toggles).
                 const sync = () => {
                     if (!clone.isConnected) return;
                     clone.className = child.className;
@@ -8132,11 +8093,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return cloneBar.children.length ? cloneBar : null;
     }
 
-    // Stand-ins for the page's like/dislike/favourite buttons while fullscreen is ahead of the page.
-    // Same look as the site's, but they call the API for the video actually playing:
-    //   PUT /api/videos/<id>/like|dislike|favorite  {action: "like"|"unlike"|...}
-    // Initial state comes from /api/videos/<id> (isLiked, isDisliked, isFavorited); the panel is
-    // rebuilt when it arrives (refreshHudAfterHandover).
+    // Stand-ins while fullscreen is ahead of the page: PUT /api/videos/<id>/like|dislike|favorite {action: "like"|"unlike"|...}
+    // for the video playing. Initial state from /api/videos/<id> (isLiked/isDisliked/isFavorited), via refreshHudAfterHandover.
     const API_BTN_BASE = 'inline-flex items-center justify-center px-3 py-1.5 rounded-lg transition-all text-sm w-[52px]';
     const API_BTN_OFF = 'bg-[#2A2A2A] text-gray-400 hover:bg-[#3A3A3A] hover:text-white';
     const lucide = paths => `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths.map(d => `<path d="${d}"/>`).join('')}</svg>`;
@@ -8184,7 +8142,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 const before = { ...st };
                 const turnOn = !st[b.key];
                 st[b.key] = turnOn;
-                // Like and dislike are mutually exclusive, as on the site.
                 if (turnOn && b.key === 'liked') st.disliked = false;
                 if (turnOn && b.key === 'disliked') st.liked = false;
                 paint();
@@ -8224,10 +8181,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return bar;
     }
 
-    // ---------------------------------------------------------------------
-    // Next-video mini-HUD
-    // ---------------------------------------------------------------------
-    // Brief bottom-left notification in fullscreen playlists.
+    // --- Next-video mini-HUD ---
     // Mounts in document.fullscreenElement, not body: nothing outside it is visible in fullscreen.
 
     function getFullscreenRoot() {
@@ -8287,9 +8241,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (State.nextHudEl.parentElement !== root) root.appendChild(State.nextHudEl);
     });
 
-    // Up-next card beside the main HUD panel. Shows the playlist's own Up Next on playlist pages,
-    // otherwise the next item of the user's queue (same choice as the N key). Clicking dispatches
-    // a synthetic N keydown.
+    // Playlist pages: the playlist's own Up Next; else the queue's next item (as N). A click dispatches N.
     function buildUpNextCard() {
         if (isPlaylistPage()) {
             const info = getUpNextVideoInfo();
@@ -8355,8 +8307,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return card;
     }
 
-    // "UP NEXT  8 left" label at the end of the HUD's first row; only while the playing video
-    // is the current item of the queue.
+    // "UP NEXT  8 left" label in the HUD's first row; only while the playing video is the queue's current item.
     function buildQueueProgressRow() {
         const left = queueRemaining();
         if (left === null) return null;
@@ -8393,29 +8344,23 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             'display:flex;flex-direction:column;' +
             'contain:layout style paint;pointer-events:auto;box-sizing:border-box;';
 
-        // Main column; separate from `hud` so the up-next card can sit beside it.
+        // Separate from `hud` so the up-next card can sit beside it.
         const mainCol = document.createElement('div');
         mainCol.style.cssText = 'flex:1;min-width:0;';
 
-        // Layout: [title ........ actions] / by · rating · views · duration · date ... up next /
-        // tags / description / playlists, then the thumbnail strip.
         const actionBarClone = staleFullscreenHref ? buildApiActionBar(videoId) : buildNativeActionBarClone();
         if (actionBarClone) {
             actionBarClone.style.cssText = 'display:flex;flex-wrap:nowrap;gap:4px;flex-shrink:0;align-items:center;';
         } else if (!opts._retried) {
-            // Action bar not rendered yet (the auth-dependent bar can still be hydrating on a fresh
-            // /video/ load): retry once.
+            // The auth-dependent action bar can still be hydrating on a fresh /video/ load: retry once.
             setTimeout(() => {
                 if (State.hud === hud) showHud({ _retried: true });
             }, 700);
         }
 
-        // Clone the views/date/duration row from the page.
         const metaBar = (() => {
-            // Skipped while fullscreen is ahead of the page (numbers belong to the previous video);
-            // rating and date below come from fetched data.
+            // Skipped while fullscreen is ahead of the page (previous video's numbers); rating/date come from data.
             if (staleFullscreenHref) return null;
-            // Row: flex-wrap items-center gap-3 with SVG+span children.
             const spans = [...document.querySelectorAll('span')].filter(s =>
                 /\d[.,]?\d*K?\s*views/i.test(s.textContent) ||
                 /^\d{4}-\d{2}-\d{2}$/.test(s.textContent.trim())
@@ -8426,7 +8371,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         })();
         const cvd = State.currentVideoData;
 
-        // Header: title left, the action toolbar right.
         const header = document.createElement('div');
         header.style.cssText = 'display:flex;align-items:center;gap:16px;min-width:0;margin-bottom:4px;';
         const title = document.createElement('div');
@@ -8435,8 +8379,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         header.appendChild(title);
         if (actionBarClone) header.appendChild(actionBarClone);
 
-        // One subdued line: creator, rating, then the page's views/date/duration row (icons included);
-        // the upload date from the data only when that row is missing.
+        // Creator, rating, then the page's views/date/duration row; upload date from data only without that row.
         const sub = document.createElement('div');
         sub.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-bottom:10px;font-size:12px;color:rgba(255,255,255,.6);';
         const creator = document.createElement('span');
@@ -8460,13 +8403,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             sub.appendChild(dateEl);
         }
 
-        // Tags: top5Tags when available, else regular tags; performers follow in the same row
-        // with the site's yellow accent.
+        // top5Tags if available, else tags; performers follow in the site's yellow.
         const activeTags = (cvd?.top5Tags?.length ? cvd.top5Tags : null) || meta.tags;
         const activeStars = meta.starsTags || [];
 
-        // Each chip toggles the site-wide filter (see cycleTagInFilter): orange = required,
-        // red struck-through with ⊘ = excluded.
+        // Each chip cycles the site-wide filter (cycleTagInFilter): orange = required, red ⊘ = excluded.
         const TAG_STYLE_BASE = 'font-size:12px;padding:4px 8px;border-radius:8px;cursor:pointer;user-select:none;';
         const TAG_STATE_STYLE = {
             include: 'background:rgba(249,115,22,.2);border:1px solid rgba(249,115,22,.55);color:rgb(253,186,116);',
@@ -8503,7 +8444,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         });
         activeStars.forEach(star => {
             const el = document.createElement('span');
-            // Flat SVG sparkle icon, matching the site's performer chips.
             el.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/></svg>';
             const nameSpan = document.createElement('span');
             el.appendChild(nameSpan);
@@ -8529,23 +8469,19 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 const btn = document.createElement('button');
                 btn.type = 'button';
 
-                // Configured colour, else derived from the name.
                 const customStyle = getPlaylistStyle(playlist.name, playlist.id);
                 const displayName = getPlaylistDisplayName(playlist.name, playlist.id);
                 const colorHex = customStyle ? customStyle.color : FALLBACK_COLOR;
                 const activeRgb = hexToRgbStr(colorHex);
                 const inactiveRgb = mixToGrayStr(colorHex);
 
-                // Fixed width regardless of label length.
                 const BTN_WIDTH = 'width:82px;box-sizing:border-box;text-align:center;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;justify-content:center;';
-                // Active: muted playlist colour, thicker bright border.
                 // Inactive: near gray with a hint of the colour (mixToGrayStr).
                 const STYLE_ACTIVE = `font-size:12px;font-weight:700;padding:5px 6px;border-radius:6px;cursor:pointer;background:rgba(${activeRgb},.24);border:2px solid rgba(${activeRgb},.9);color:rgb(${activeRgb});white-space:nowrap;${BTN_WIDTH}box-shadow:0 0 0 1px rgba(${activeRgb},.22) inset;`;
                 const STYLE_INACTIVE = `font-size:12px;font-weight:400;padding:5px 6px;border-radius:6px;cursor:pointer;background:rgba(${inactiveRgb},.05);border:1px solid rgba(${inactiveRgb},.45);color:rgba(${inactiveRgb},.75);white-space:nowrap;${BTN_WIDTH}`;
-                // Busy: grayer; the green success state is the indicator.
                 const STYLE_BUSY = `font-size:12px;font-weight:400;padding:5px 6px;border-radius:6px;cursor:default;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);color:rgba(255,255,255,.3);white-space:nowrap;${BTN_WIDTH}`;
 
-                // Label in a span plus the hotkey cap, as on the buttons under the player (syncPageBtnKey).
+                // Label span plus hotkey cap, as under the player (syncPageBtnKey).
                 const restyle = () => {
                     btn.textContent = '';
                     const lbl = document.createElement('span');
@@ -8583,7 +8519,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (tags.children.length) mainCol.appendChild(tags);
         const descText = cvd?.description || meta.description;
         if (descText) {
-            // One line; the full text in the tooltip.
             const desc = document.createElement('div');
             desc.textContent = String(descText).replace(/\s+/g, ' ').trim();
             desc.title = descText;
@@ -8593,13 +8528,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         mainCol.appendChild(playlistRow);
 
 
-        // Top row: main column plus up-next card; the thumbnail strip spans the full width below.
         const topRow = document.createElement('div');
         topRow.style.cssText = 'display:flex;gap:14px;align-items:flex-start;min-width:0;';
         topRow.appendChild(mainCol);
         const upNextCard = buildUpNextCard();
         if (upNextCard) topRow.appendChild(upNextCard);
-        // Queue counter: in the up-next card's label ("UP NEXT  8 left"), else at the end of the subline.
+        // Queue counter in the up-next card's label, else at the end of the subline.
         const queueRow = buildQueueProgressRow();
         const cardLabel = upNextCard?.querySelector('[data-pmv-un-label]');
         if (queueRow && cardLabel) {
@@ -8622,15 +8556,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         hud.addEventListener('mouseleave', () => startHudTimer(1500));
         startHudTimer(3500);
 
-        // Hard upper bound: hover only pauses the soft timeout, so this timer closes the HUD
-        // 5s after showing regardless of hover.
+        // Hard limit: hover only pauses the soft timeout, so this closes the HUD 5s after showing regardless.
         clearTimeout(State.hudHardTimeout);
         State.hudHardTimeout = setTimeout(closeHud, 5000);
     }
 
-    // ---------------------------------------------------------------------
-    // Progress bar
-    // ---------------------------------------------------------------------
+    // --- Progress bar ---
 
     function formatTime(sec) {
         return `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
@@ -8657,9 +8588,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         bar.appendChild(track);
         bar.appendChild(time);
 
-        // Own seek bar for when the site's controls stay hidden (e.g. after an in-place fullscreen
-        // hand-over). Hover for the preview, click/drag to seek; steps aside (no pointer events)
-        // when the site's controls are visible.
+        // Own seek bar for when the site's controls stay hidden (e.g. after an in-place fullscreen hand-over);
+        // no pointer events while the site's controls are visible.
         const zone = document.createElement('div');
         zone.id = 'pmv-scrub-zone';
         zone.style.cssText = 'position:absolute;left:0;right:0;bottom:0;height:' + SCRUB_ZONE_PX + 'px;pointer-events:none;cursor:pointer;';
@@ -8718,12 +8648,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         State.progressBar = null;
     }
 
-    // ---------------------------------------------------------------------
-    // Fullscreen queue sidebar
-    // ---------------------------------------------------------------------
-    // Playlist pages: in fullscreen only the player wrapper is shown, so the right-hand column is hidden
-    // but stays live. The Up Next preview and queue scroller are moved (never cloned: clones lose
-    // Vue handlers) into a rounded overlay; the rest of the column stays in place.
+    // --- Fullscreen queue sidebar ---
+    // Fullscreen on playlist pages hides the live right-hand column. Up Next and the queue scroller are
+    // moved (never cloned: clones lose Vue handlers) into an overlay; the rest stays in place.
 
     const QUEUE_EDGE_ZONE_PX = 24;  // px from the right edge that reveals the sidebar
     const QUEUE_HIDE_DELAY_MS = 1000;  // grace period before hiding
@@ -8735,8 +8662,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     function findQueueParts() {
-        // Wrapper found via its inline height (clamp(...)), falling back to the parent of the
-        // scrollable video list.
+        // Wrapper via its inline height (clamp(...)), else the scrollable list's parent.
         const wrapper = [...document.querySelectorAll('div[style*="clamp("]')]
             .find(el => el.querySelector('.w-24.h-14')) ||
             [...document.querySelectorAll('.overflow-y-auto.custom-scrollbar')]
@@ -8747,7 +8673,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const scroller = wrapper.querySelector('.overflow-y-auto.custom-scrollbar');
         if (!scroller) return null;
 
-        // "Up Next" preview: the block containing the <p> label "Up Next".
         const upNext = [...wrapper.querySelectorAll('p')]
             .find(p => p.textContent.trim() === 'Up Next')?.parentElement || null;
 
@@ -8755,8 +8680,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     function getActiveQueueRow() {
-        // The active row carries bg-[#272727] + border-orange-500: the most stable hook that needs
-        // no video IDs. Shared with the fetch interceptor's isCurrentPage check.
+        // Active row (bg-[#272727] + border-orange-500): most stable hook without video IDs; shared with isCurrentPage.
         return document.querySelector('[role="button"].border-orange-500');
     }
 
@@ -8769,8 +8693,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const scroller = overlayEl.querySelector('.overflow-y-auto.custom-scrollbar');
         const active = scroller?.querySelector('[role="button"].border-orange-500');
         if (!scroller || !active) return;
-        // Assign scrollTop directly: scrollIntoView follows the site's smooth scrolling and the
-        // sidebar would visibly fly into place.
+        // scrollTop directly: scrollIntoView follows the site's smooth scrolling and visibly flies into place.
         scroller.scrollTop = active.offsetTop - (scroller.clientHeight / 2) + (active.clientHeight / 2);
     }
 
@@ -8785,7 +8708,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
         const overlay = document.createElement('div');
         overlay.dataset.pmvQueueOverlay = '1';
-        // Rounded corners (14px, as the HUD) and 80% opacity.
         overlay.style.cssText =
             `position:fixed;top:${QUEUE_SIDEBAR_MARGIN}px;right:${QUEUE_SIDEBAR_MARGIN}px;` +
             `bottom:${QUEUE_SIDEBAR_MARGIN}px;width:${QUEUE_SIDEBAR_WIDTH}px;max-width:90vw;` +
@@ -8859,8 +8781,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     document.addEventListener('fullscreenchange', () => {
         if (document.fullscreenElement) {
             createProgressBar();
-            // Use the playing video, not null: with null the next real change (e.g. N right after
-            // entering fullscreen) is skipped.
+            // The playing video, not null: with null the next real change (e.g. N after entering fullscreen) is skipped.
             State.lastNextHudVideoId = getCurrentVideoId();
         } else {
             removeProgressBar(); closeHud(); hideQueueSidebarNow();
@@ -8868,9 +8789,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
     });
 
-    // ---------------------------------------------------------------------
-    // Native playlist button highlight
-    // ---------------------------------------------------------------------
+    // --- Native playlist button highlight ---
 
     function findNativePlaylistButton() {
         if (State.nativePlaylistButton?.isConnected) return State.nativePlaylistButton;
@@ -8906,27 +8825,21 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             }
         }
 
-        // Inject/update playlist buttons below the native button bar.
         injectPagePlaylistButtons(videoId);
     }
 
 
     function injectPagePlaylistButtons(videoId) {
-        // Active on /video/ and /playlists/ pages (same native "Add to Playlist" button, slightly
-        // different bar).
         if (!location.pathname.startsWith('/video/') && !location.pathname.startsWith('/playlists/')) return;
         if (!State.ready || !videoId) return;
 
-        // Find the container of the native button bar; the extra row goes right after it.
         const nativeBar = nativeActionBar();
         if (!nativeBar) return;
         ensureRejectBarButton(videoId, nativeBar);
 
-        // Remove the previous injection if videoId changed.
         const existing = document.getElementById('pmv-page-playlists');
         if (existing) {
             if (existing.dataset.forVideo === videoId) {
-                // Same video: recompute active status.
                 existing.querySelectorAll('[data-pmv-pl-btn]').forEach(b => {
                     const plId = b.dataset.pmvPlBtn;
                     const inPl = State.playlists.get(plId)?.ids.has(videoId) || false;
@@ -8937,13 +8850,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             existing.remove();
         }
 
-        // Separate row below the native bar, in the same grid parent.
+        // Own row below the native bar, in the same grid parent.
         const wrap = document.createElement('div');
         wrap.id = 'pmv-page-playlists';
         wrap.dataset.forVideo = videoId;
         wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end;margin-top:8px;grid-column:1/-1;';
 
-        // The reject list is not a playlist button: it is the ⊘ in the site's action bar.
+        // The reject list is the ⊘ in the action bar, not a playlist button.
         const rejectId = rejectPlaylistId && State.playlists.has(rejectPlaylistId) ? rejectPlaylistId : null;
 
         [...State.playlists.values()]
@@ -8982,7 +8895,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             b.addEventListener('click', async e => {
                 e.stopPropagation();
                 b.disabled = true;
-                // Busy: grayer; the label does not change.
                 b.style.background = 'rgba(255,255,255,.04)';
                 b.style.border = '1px solid rgba(255,255,255,.08)';
                 b.style.color = 'rgba(255,255,255,.3)';
@@ -9007,7 +8919,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             wrap.appendChild(b);
         });
 
-        // Insert as next sibling of the native bar.
         nativeBar.parentElement?.appendChild(wrap);
     }
 
@@ -9022,9 +8933,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             })();
     }
 
-    // ⊘ as the first button of the site's action bar, in its style. The same toggle as the ⊘ on
-    // cards (no skip, unlike the hotkey). Vue owns the bar, so the heartbeat re-inserts it when
-    // the bar is rebuilt.
+    // Same toggle as the ⊘ on cards (no skip, unlike the hotkey). Vue owns the bar, so the
+    // heartbeat re-inserts it after a rebuild.
     const BAN_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" style="font-size:16px;" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="m4.9 4.9 14.2 14.2"></path></svg>';
     function ensureRejectBtnStyle() {
         if (document.getElementById('pmv-reject-bar-style')) return;
@@ -9067,8 +8977,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         });
         return b;
     }
-    // Tags button: the compact tag menu (openTagPopup) instead of the site's Vote on Tags modal, with
-    // that button's icon (lucide laptop-check). Also on playlist pages, which have no such button.
+    // Compact tag menu instead of the site's Vote on Tags modal; also on playlist pages, which lack that button.
     const VOTE_TAGS_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" style="font-size:16px;" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="m9 12l2 2l4-4"></path><path d="M5 7c0-1.1.9-2 2-2h10a2 2 0 0 1 2 2v12H5zm17 12H2"></path></g></svg>';
     function tagBarButton(videoId, kind = 'general') {
         const b = document.createElement('button');
@@ -9091,8 +9000,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return b;
     }
 
-    // The site's own "Vote on Tags" buttons open the compact tag menu instead of its modal;
-    // Shift+click still opens the modal.
+    // The site's "Vote on Tags" buttons open the compact tag menu too; Shift+click keeps the modal.
     document.addEventListener('click', e => {
         if (e.shiftKey || !State.ready) return;
         const b = e.target.closest?.('button');
@@ -9128,7 +9036,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return b;
     }
 
-    // Our buttons at the start of the site's action bar: ⊘ (with a reject list), then Tags and Models.
+    // At the start of the action bar: ⊘ (with a reject list), Tags, Models, open-page (playlist pages).
     function ensureRejectBarButton(videoId, bar = null) {
         const onPage = location.pathname.startsWith('/video/') || location.pathname.startsWith('/playlists/');
         if (onPage && videoId && !bar) bar = nativeActionBar();
@@ -9152,7 +9060,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             } else tag?.remove();
         }
 
-        // On a playlist page: open the playing video's own page in a new tab.
         let ext = pageOwn('[data-pmv-open-page]');
         if (ok && location.pathname.startsWith('/playlists/')) {
             if (!ext || ext.parentElement !== bar || ext.dataset.forVideo !== videoId) { ext?.remove(); ext = openPageBarButton(videoId); }
@@ -9160,12 +9067,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         } else ext?.remove();
 
         if (!ok) return;
-        // In order at the start, moved only when out of place.
+        // Move only when out of place.
         want.forEach((el, i) => { if (bar.children[i] !== el) bar.insertBefore(el, bar.children[i] || null); });
     }
 
-    // The hotkey bound to a playlist, as a small key cap after the label (the first if several).
-    // It fills the pill's height with a 2px gap to its border (negative margins into the 5px/6px padding).
+    // Key cap: first hotkey bound to the playlist; negative margins into the padding fill the pill's height.
     function playlistHotkeys(plId) {
         return Object.keys(keybindings)
             .filter(k => keybindings[k]?.action === 'playlist' && keybindings[k].playlistId === plId)
@@ -9174,11 +9080,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     function syncPageBtnKey(btn, plId) {
         const keys = playlistHotkeys(plId);
         let cap = btn.querySelector('[data-pmv-plkey]');
-        // With a cap the label takes the remaining width (centred), so the cap sits at the right edge.
+        // The label takes the rest, so the cap sits at the right edge.
         const lbl = btn.querySelector('span');
         if (lbl) { lbl.style.flex = keys.length ? '1 1 auto' : ''; lbl.style.textAlign = keys.length ? 'center' : ''; }
-        // Up to 24px wider for the cap (24px + 4px gap - 4px into the padding), so a long label keeps the
-        // usual 82px room; a short one stays at 82px.
+        // Up to 24px wider for the cap, so a long label keeps its 82px of room.
         btn.style.width = keys.length ? 'auto' : '82px';
         btn.style.minWidth = keys.length ? '82px' : '';
         btn.style.maxWidth = keys.length ? '106px' : '';
@@ -9188,7 +9093,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             cap.dataset.pmvPlkey = '1';
             cap.style.cssText = 'flex:0 0 auto;display:inline-block;min-width:24px;height:24px;padding:0 4px;margin:-3px -4px -3px 4px;box-sizing:border-box;border-radius:4px;border:1px solid currentColor;background:rgba(255,255,255,0.06);font:700 13px/22px system-ui,-apple-system,"Segoe UI",sans-serif;text-align:center;font-variant-numeric:tabular-nums;opacity:0.8;';
         }
-        // Always after the label (the button may be styled before its label is added).
+        // The button may be styled before its label is added.
         if (btn.lastElementChild !== cap) btn.appendChild(cap);
         const k = keys[0];
         cap.textContent = k.length === 1 ? k.toUpperCase() : k.slice(0, 3);
@@ -9203,7 +9108,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (lbl) lbl.textContent = getPlaylistDisplayName(name, plId);
         syncPageBtnKey(btn, plId);
 
-        // Active: muted playlist colour, thicker bright border. Inactive: near gray with a hint of the colour.
         const customStyle = getPlaylistStyle(name, plId);
         const colorHex = customStyle ? customStyle.color : FALLBACK_COLOR;
         const activeRgb = hexToRgbStr(colorHex);
@@ -9221,28 +9125,26 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Site-wide filter
-    // ---------------------------------------------------------------------
-    // Own filter, editable from the header on any page. Hides only while switched on:
-    // the header button is the switch, the panel is the editor.
+    // --- Site-wide filter ---
+    // Own filter, editable from the header on any page: the header button switches it on, the panel edits it.
     const FILTER_KEY = 'pmv_filter_v1';
     const FILTER_DEFAULTS = {
         active: false,
-        exclude: '',       // space separated, quoted phrases allowed
+        exclude: '',       // space separated, "quoted" phrases ok; title, tags, music, uploader (not models)
         include: '',
+        modelsExclude: '', // same syntax, matched only against models (starsTags)
+        modelsInclude: '',
         ratingMin: 0,
         ratingMax: 100,
         maxMinutes: 0,     // 0 = no cap
         playlistMode: 'all',
         playlistIds: [],
         seen: 'any',       // 'any' | 'seen' | 'unseen'
-        savedSearch: null,  // parsed copy of a saved search
+        savedSearch: null,
         savedSearchName: '',
         flags: {},          // content flag key -> 'out' (hide) | 'in' (only these)
-        // Pagination options (see the Pagination section).
-        bigPages: false,   // raise the site's own page size to its maximum
-        mergeGrids: true,  // one grid instead of one per loaded batch
+        bigPages: false,   // raise the site's page size to its max
+        mergeGrids: true,
         pagedWhenFiltered: false, // autoscroll off while the filter hides things
         siteInfiniteWas: false,
         topUpTarget: 24,   // keep loading until this many survive (autoscroll on)
@@ -9259,8 +9161,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         try { localStorage.setItem(FILTER_KEY, JSON.stringify(filterConfig)); } catch {}
     }
 
-    // Saved searches from the site. Picking one applies the same rules as the playlist-page
-    // filter, so a setup made once works everywhere (and covers tags better than card chips).
+    // Site saved searches use the playlist-page filter's rules, so one setup works everywhere.
     let savedSearchCache = null;
     async function fetchSavedSearches() {
         if (savedSearchCache) return savedSearchCache;
@@ -9287,8 +9188,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         };
     }
 
-    // Terms: plain words match anywhere in the text; "quoted" terms (also smart quotes) and =word match
-    // only as a whole word or phrase. Internally a whole-word term is "=term" (PMVX.termMatch).
+    // Plain words match anywhere; "quoted" (smart quotes too) or =word: whole word only, stored as "=term".
     function filterTerms(raw) {
         const quoted = t => t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")));
         return (PMVX.plainQuotes(raw).trim().match(/=?"[^"]*"|=?'[^']*'|\S+/g) || [])
@@ -9304,60 +9204,82 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return terms.map(t => PMVX.isWordTerm(t) || /\s/.test(t) ? `"${PMVX.termLabel(t)}"` : t).join(' ');
     }
 
-    // Where a tag stands in the filter: 'include', 'exclude' or null.
-    function tagFilterState(tag) {
+    const filterKeys = kind => (kind === 'star' || kind === 'stars') ? ['modelsInclude', 'modelsExclude'] : ['include', 'exclude'];
+    function tagFilterState(tag, kind) {
         const t = String(tag).toLowerCase().trim();
-        if (filterTerms(filterConfig.include).includes(t)) return 'include';
-        if (filterTerms(filterConfig.exclude).includes(t)) return 'exclude';
+        const [inc, exc] = filterKeys(kind);
+        if (filterTerms(filterConfig[inc]).includes(t)) return 'include';
+        if (filterTerms(filterConfig[exc]).includes(t)) return 'exclude';
         return null;
     }
 
-    // The exclude term (or saved-search tag) of the active site-wide filter that this tag would trip,
-    // or null: a video carrying it is hidden. Used by the tag menu to warn before adding.
-    function tagHiddenBy(tag) {
+    // Exclude term (or saved-search tag) this tag would trip, or null; the tag menu warns with it.
+    function tagHiddenBy(tag, kind = 'general') {
         if (!filterConfig.active) return null;
         const t = String(tag).toLowerCase().trim();
         if (!t) return null;
-        const term = filterTerms(filterConfig.exclude).find(x => PMVX.termMatch(t, x));
+        const term = filterTerms(filterConfig[filterKeys(kind)[1]]).find(x => PMVX.termMatch(t, x));
         if (term) return PMVX.termLabel(term);
-        if (filterConfig.savedSearch?.excludeTags?.includes(t)) return t;
+        if (kind !== 'stars' && filterConfig.savedSearch?.excludeTags?.includes(t)) return t;
         return null;
     }
 
-    // Clicking a tag cycles it: not in filter, required, excluded, removed. Adding switches hiding
-    // on; removing leaves the switch alone. An open panel gets the new text.
+    // Click cycles: off -> required -> excluded -> removed. Adding switches hiding on; removing leaves it.
     const TAG_CYCLE = { null: 'include', include: 'exclude', exclude: null };
-    function cycleTagInFilter(tag) {
+    function cycleTagInFilter(tag, kind) {
         const t = String(tag).toLowerCase().trim();
         if (!t) return null;
-        return setTagInFilter(t, TAG_CYCLE[tagFilterState(t)]);
+        return setTagInFilter(t, TAG_CYCLE[tagFilterState(t, kind)], kind);
     }
-    // Puts a tag in the filter as 'include', 'exclude' or null (removed).
-    function setTagInFilter(tag, next) {
+    // next: 'include' | 'exclude' | null (remove); kind 'star' uses the model lists.
+    function setTagInFilter(tag, next, kind) {
         const t = String(tag).toLowerCase().trim();
         if (!t) return null;
-        const include = filterTerms(filterConfig.include).filter(x => x !== t);
-        const exclude = filterTerms(filterConfig.exclude).filter(x => x !== t);
+        const [incKey, excKey] = filterKeys(kind);
+        const include = filterTerms(filterConfig[incKey]).filter(x => x !== t);
+        const exclude = filterTerms(filterConfig[excKey]).filter(x => x !== t);
         if (next === 'include') include.push(t);
         if (next === 'exclude') exclude.push(t);
-        filterConfig.include = joinFilterTerms(include);
-        filterConfig.exclude = joinFilterTerms(exclude);
+        filterConfig[incKey] = joinFilterTerms(include);
+        filterConfig[excKey] = joinFilterTerms(exclude);
         if (next) filterConfig.active = true;
         saveFilterConfig();
         applyFilterToCards();
-        setNfDefaultTag(t, next);
+        // The playlist-page filter has no model lists: plain terms only.
+        if (incKey === 'include') setNfDefaultTag(t, next);
         document.getElementById('pmv-filter-panel')?.refresh?.();
         return next;
     }
 
-    // For the tag menu (tags, stars, music artists under the player): state and set.
-    PMVX.tagFilter = { state: t => tagFilterState(t), set: (t, next) => setTagInFilter(t, next) };
+    // Tag menu hook (tags, stars, music artists).
+    PMVX.tagFilter = { state: (t, kind) => tagFilterState(t, kind), set: (t, next, kind) => setTagInFilter(t, next, kind) };
 
-    // No right-click tag menu any more: the tag menu (left click on a chip under the player) does this.
+    // One-time migration: plain terms that are a model name (and not a tag) move to the model lists.
+    const MODELS_MIGRATED_KEY = 'pmv_filter_models_migrated_v1';
+    (function migrateModelTerms() {
+        try { if (localStorage.getItem(MODELS_MIGRATED_KEY)) return; } catch { return; }
+        const plain = [...filterTerms(filterConfig.include), ...filterTerms(filterConfig.exclude)];
+        if (!plain.length) { try { localStorage.setItem(MODELS_MIGRATED_KEY, '1'); } catch {} return; }
+        setTimeout(async () => {
+            const [stars, tags] = await Promise.all([popularTags('stars'), popularTags('general')]);
+            if (!stars?.length) return; // try again next load
+            const starSet = new Set(stars.map(n => n.toLowerCase())), tagSet = new Set((tags || []).map(n => n.toLowerCase()));
+            const isModel = t => { const l = PMVX.termLabel(t); return starSet.has(l) && !tagSet.has(l); };
+            let moved = 0;
+            [['include', 'modelsInclude'], ['exclude', 'modelsExclude']].forEach(([from, to]) => {
+                const all = filterTerms(filterConfig[from]);
+                const m = all.filter(isModel);
+                if (!m.length) return;
+                moved += m.length;
+                filterConfig[from] = joinFilterTerms(all.filter(t => !isModel(t)));
+                filterConfig[to] = joinFilterTerms([...filterTerms(filterConfig[to]), ...m.filter(t => !filterTerms(filterConfig[to]).includes(t))]);
+            });
+            try { localStorage.setItem(MODELS_MIGRATED_KEY, '1'); } catch {}
+            if (moved) { saveFilterConfig(); applyFilterToCards(); document.getElementById('pmv-filter-panel')?.refresh?.(); }
+        }, 4000);
+    })();
 
-    // The tag is also written to the playlist-page filter's fixed default terms (always required /
-    // excluded), straight into its storage; an event makes it refilter if active. Any earlier token
-    // for the tag, including share-limited ones like -trans(0.1), is removed first.
+    // Also written to the playlist-page filter's fixed terms (storage + refilter event), replacing earlier tokens like -trans(0.1).
     function setNfDefaultTag(tag, state) {
         let raw = '';
         try { raw = localStorage.getItem(NF_DEFAULT_TERMS_KEY) || ''; } catch { return; }
@@ -9381,6 +9303,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     function filterIsMeaningful(c = filterConfig) {
         return filterTerms(c.exclude).length > 0
             || filterTerms(c.include).length > 0
+            || filterTerms(c.modelsExclude).length > 0
+            || filterTerms(c.modelsInclude).length > 0
             || c.ratingMin > 0 || c.ratingMax < 100
             || c.maxMinutes > 0
             || c.playlistMode !== 'all'
@@ -9389,8 +9313,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             || Object.values(c.flags || {}).some(Boolean);
     }
 
-    // A content flag of a video, or undefined when it is not known (then it never hides anything).
-    // Vertical falls back to the stored size.
+    // Content flag of a video, or undefined when unknown (then it never hides). Vertical falls back to stored size.
     function videoFlag(id, key) {
         if (!id) return undefined;
         const i = CONTENT_FLAGS.findIndex(([k]) => k === key);
@@ -9404,9 +9327,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
     PMVX.videoFlag = videoFlag;
 
-    // Flags still unknown for any of `keys` get fetched in bulk: GET /api/videos/bulk?ids=… (up to 100
-    // ids per call, full documents). One call at a time, a short pause between calls, a longer one on
-    // HTTP 429; each id is asked for once per page load. onDone runs when the queue is empty.
+    // Unknown flags: GET /api/videos/bulk?ids=… (≤100 ids, full docs), one call at a time, pause between
+    // calls, longer on HTTP 429; each id once per page load. onDone runs when the queue empties.
     const FLAG_BULK = 100;
     const flagQueue = new Set();
     const flagTried = new Set();
@@ -9422,6 +9344,18 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             flagTried.add(id); flagQueue.add(id); added++;
         });
         if (onDone) flagDone.add(onDone);
+        if (added) runFlagFetch();
+        return added;
+    };
+    // Same queue for full tag/model lists: playlist data carries only 5 tags.
+    const fullTried = new Set();
+    PMVX.fetchFullMeta = (ids, onDone) => {
+        let added = 0;
+        ids.forEach(id => {
+            if (!id || fullTried.has(id) || State.videoMeta.get(id)?.full) return;
+            fullTried.add(id); flagQueue.add(id); added++;
+        });
+        if (onDone && (added || flagFetching)) flagDone.add(onDone);
         if (added) runFlagFetch();
         return added;
     };
@@ -9456,32 +9390,35 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
     }
 
-    // `meta` is what could be read off the card; the cache fills in the rest. Unknown data never
-    // causes a hide, so a video that was not fetched yet is not filtered out for no visible reason.
+    // `meta` is read off the card, the cache fills the rest. Unknown data never hides a video.
     function passesFilter(id, meta, c = filterConfig) {
         return filterReasons(id, meta, c, false).length === 0;
     }
 
-    // Why the filter blocks a video: short labels ("⊘ term", "needs term", "rating 41%" …). With
-    // all=false it stops at the first one (passesFilter); with all=true it collects every reason.
+    // Block reasons as short labels ("⊘ term", "rating 41%" …); all=false stops at the first.
     function filterReasons(id, meta, c = filterConfig, all = true) {
         const out = [];
         const hit = label => { out.push(label); return !all; };
         const cached = id ? State.videoMeta.get(id) : null;
         const title = (meta?.title || cached?.title || '').toLowerCase();
         const uploader = (meta?.uploaderDisplay || cached?.uploaderDisplay || '').toLowerCase();
-        // Tags come from both the cache (complete, but only fetched videos) and the card (whatever it
-        // shows); neither alone suffices.
+        // Tags from cache (complete, fetched videos only) plus card (what it shows): neither alone suffices.
         const tags = [...new Set([
             ...(meta?.tags || []),
             ...(cached?.tags || []),
-            ...(cached?.starsTags || []),
             ...(cached?.music || []),
         ].map(t => String(t).toLowerCase()))];
         const haystacks = [title, uploader, ...tags];
 
         for (const term of filterTerms(c.exclude)) if (haystacks.some(h => PMVX.termMatch(h, term)) && hit('\u2298 ' + PMVX.termLabel(term))) return out;
         for (const term of filterTerms(c.include)) if (!haystacks.some(h => PMVX.termMatch(h, term)) && hit('needs ' + PMVX.termLabel(term))) return out;
+
+        const mExc = filterTerms(c.modelsExclude), mInc = filterTerms(c.modelsInclude);
+        if ((mExc.length || mInc.length) && Array.isArray(cached?.starsTags)) {
+            const models = cached.starsTags.map(m => String(typeof m === 'string' ? m : m?.name || '').toLowerCase()).filter(Boolean);
+            for (const term of mExc) if (models.some(h => PMVX.termMatch(h, term)) && hit('\u2298 model ' + PMVX.termLabel(term))) return out;
+            for (const term of mInc) if (!models.some(h => PMVX.termMatch(h, term)) && hit('needs model ' + PMVX.termLabel(term))) return out;
+        }
 
         const rating = meta?.bayesianRating ?? cached?.bayesianRating ?? 0;
         if ((c.ratingMin > 0 || c.ratingMax < 100) && rating > 0) {
@@ -9511,8 +9448,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
         const ss = c.savedSearch;
         if (ss) {
-            // Tags here come from the same partial picture, so an excluded tag the card does not show
-            // cannot be caught.
+            // Same partial tag picture: an excluded tag the card doesn't show can't be caught.
             const bad = ss.excludeTags?.length ? tags.find(t => ss.excludeTags.includes(t)) : null;
             if (bad && hit('\u2298 ' + bad)) return out;
             if (ss.minRating && rating > 0 && rating < ss.minRating && hit('rating ' + Math.round(rating) + '%')) return out;
@@ -9550,8 +9486,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return Number.isFinite(n) ? n : 0;
     }
 
-    // Hiding uses a stylesheet rule keyed on a data-* flag: Vue re-renders wipe inline styles
-    // but keep data attributes.
+    // Hide via a stylesheet rule on a data-* flag: Vue re-renders wipe inline styles but keep data attributes.
     function ensureFilterStyle() {
         if (document.getElementById('pmv-filter-style')) return;
         const st = document.createElement('style');
@@ -9561,20 +9496,15 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
     let filterHiddenCount = 0;
-    // What the filter hid on this page: id -> { title, href, thumb, reasons }, plus every card it judged.
-    // Kept apart from the DOM, because hidden cards can be pruned from the site's list.
+    // Hidden here: id -> { title, href, thumb, reasons }, plus every judged card. Off-DOM: the site prunes hidden cards.
     const filterHiddenLog = new Map();
     const filterSeen = new Set();
     let filterLogPath = location.pathname + location.search;
     function resetFilterLog() { filterHiddenLog.clear(); filterSeen.clear(); filterLogPath = location.pathname + location.search; }
 
-    // Walks every card surface: grids (data-video-id), the Recommended sidebar (.w-40 thumbs) and
-    // the "More from" grid. Cards are marked or unmarked, never removed.
-    // Runs from the DOM observer (up to once a frame), so it is throttled:
-    // - filter off: only still-marked cards are touched;
-    // - a card is stamped with the id it was judged for; observer runs judge only new or changed cards;
-    // - all cards at most once a second, and in full when called directly;
-    // - what a card shows is scraped once per card+id (WeakMap).
+    // Marks/unmarks (never removes) cards in grids (data-video-id), Recommended (.w-40) and "More from". Throttled
+    // (observer calls up to once a frame): filter off touches only marked cards; cards are stamped with their judged id so
+    // only new/changed ones are judged; full pass at most 1/s or on a direct call; card scrapes cached per card+id (WeakMap).
     let filterFullPassAt = 0;
     const cardMetaCache = new WeakMap();
     function cachedCardMeta(card, stamp) {
@@ -9589,7 +9519,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     function applyFilterToCards(full = true) {
         ensureFilterStyle();
         const on = filterConfig.active && filterIsMeaningful();
-        // The Up next rows show why the filter would hide a video; re-render them when it changes.
+        // Up next rows show block reasons; re-render them on change.
         const sig = on ? JSON.stringify(filterConfig) : '';
         if (filterLogPath !== location.pathname + location.search) resetFilterLog();
         if (sig !== queueFilterSig) {
@@ -9637,7 +9567,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         document.querySelectorAll('.w-40').forEach(thumb => {
             const card = thumb.parentElement;
             if (!card || card.hasAttribute('data-video-id')) return;
-            // Up next rows stay: the filter is shown on them (blocking reason chip), never hides them.
+            // Up next rows are never hidden, only labelled with the reason.
             if (card.matches('[data-queue-id]') || card.closest('#pmv-queue-sidebar, #pmv-queue-floating')) { card.removeAttribute('data-pmv-filtered'); return; }
             const slugId = resolveRecCardVideoId(card);
             mark(card, slugId ? (State.slugToApiId.get(slugId) || slugId) : null);
@@ -9658,7 +9588,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         filterHiddenCount = Math.max(filterHiddenLog.size, document.querySelectorAll('[data-pmv-filtered="1"]').length);
         updateFilterButton();
 
-        // Content flags the cards' data did not carry: fetched in bulk, then judged again.
         const flagKeys = Object.keys(filterConfig.flags || {}).filter(k => filterConfig.flags[k]);
         if (flagKeys.length && full) {
             const ids = [...filterSeen].filter(k => /^[a-f0-9]{24}$/.test(k));
@@ -9668,11 +9597,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     const FILTER_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>';
 
-    // Both buttons live on document.body in a bar pinned to the header's control row; that row gets
-    // extra padding via an injected stylesheet rule. They are not inserted into the row itself: Vue
-    // manages it (server-rendered v-if placeholders are filled after hydration), so injected nodes
-    // end up in wrong slots or displace the site's controls.
-    const HEADER_GAP_PX = 104;  // divider, both buttons and spacing
+    // Buttons sit in a body-level bar pinned over the header's control row (which gets extra padding). Not in
+    // the row itself: Vue manages it (v-if placeholders filled after hydration), so injected nodes misplace.
+    const HEADER_GAP_PX = 104;  // divider, both buttons, spacing
 
     const QUEUE_BADGE_HTML =
         '<span data-pmv-queue-count style="position:absolute;top:0;right:0;min-width:15px;height:15px;' +
@@ -9684,16 +9611,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (document.getElementById('pmv-headroom-style')) return;
         const st = document.createElement('style');
         st.id = 'pmv-headroom-style';
-        // Padding, not margin: the row is a flex container, so its children shift left without changing
-        // its box. Keyed on a data attribute because Vue rewrites class/style on patch.
-        // --pmv-headroom: the bar's measured width (set in ensureHeaderBar), so extra buttons fit.
+        // Padding, not margin (flex row: box stays); keyed on a data attribute as Vue rewrites class/style. --pmv-headroom = bar width.
         st.textContent = `[data-pmv-headroom="1"]{padding-right:calc(var(--pmv-headroom, ${HEADER_GAP_PX}px) + 16px) !important;}`;
         (document.head || document.documentElement).appendChild(st);
     }
 
-    // The site keeps a mobile and a desktop header in the DOM; the visible one is whichever has width.
-    // Measurement and placement (forced layout) are cached and redone only when the row is gone, on
-    // window resize, or when a ResizeObserver on the row fires (also catches the mobile/desktop switch).
+    // Mobile and desktop headers both exist; the visible one has width. Layout cached; redone if the row is gone, on resize or ResizeObserver.
     let hdrRow = null;
     let hdrRO = null;
     let hdrDirty = true;
@@ -9728,15 +9651,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (!bar) {
             bar = document.createElement('div');
             bar.id = 'pmv-header-bar';
-            // Above the header background (z-50), below the site's modals.
+            // Above the header (z-50), below the site's modals.
             bar.style.cssText = 'position:fixed;z-index:60;display:flex;align-items:center;gap:12px;';
-            // Hairline marking these as an add-on group.
             const divider = document.createElement('span');
             divider.setAttribute('data-pmv-header-divider', '1');
             divider.style.cssText = 'width:1px;height:20px;background:rgba(255,255,255,0.12);flex-shrink:0;pointer-events:none;';
             bar.appendChild(divider);
             document.body.appendChild(bar);
-            // The counter's text changes the bar's width: keep the reserved room in step.
+            // Counter text changes the bar width: keep the reserved room in step.
             try {
                 new ResizeObserver(() => {
                     const w = Math.max(HEADER_GAP_PX, Math.ceil(bar.offsetWidth || 0)) + 'px';
@@ -9748,11 +9670,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const r = row.getBoundingClientRect();
         const top = `${Math.round(r.top + (r.height - 36) / 2)}px`;
         if (bar.style.display !== 'flex') bar.style.display = 'flex';
-        // Room for whatever the bar holds (the hidden-videos counter comes and goes).
         const w = Math.max(HEADER_GAP_PX, Math.ceil(bar.offsetWidth || 0));
         const room = w + 'px';
         if (document.documentElement.style.getPropertyValue('--pmv-headroom') !== room) document.documentElement.style.setProperty('--pmv-headroom', room);
-        // Anchored on the right edge, so a wider bar grows to the left instead of off the page.
+        // Right-anchored, so a wider bar grows to the left.
         const right = `${Math.max(0, Math.round(document.documentElement.clientWidth - r.right + 8))}px`;
         if (bar.style.top !== top) bar.style.top = top;
         if (bar.style.left) bar.style.left = '';
@@ -9780,7 +9701,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     function ensureHeaderButtons() {
         const bar = ensureHeaderBar();
         if (!bar) return;
-        // ⊘ with a red corner badge holding the hidden count (like the Up next badge).
         const hb = ensureHeaderButton(bar, 'data-pmv-hidden-btn',
             '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>' +
             `<span data-pmv-hidden-count style="position:absolute;top:0;right:0;min-width:15px;height:15px;line-height:15px;padding:0 3px;border-radius:8px;background:rgb(${REJECT_RGB});color:#000;font-size:10px;font-weight:700;text-align:center;font-variant-numeric:tabular-nums;"></span>`,
@@ -9792,7 +9712,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
         ensureHeaderButton(bar, 'data-pmv-filter-btn', FILTER_ICON, btn => toggleFilterPanel(btn));
         ensureHeaderButton(bar, 'data-pmv-queue-btn', QUEUE_ICON, btn => toggleQueueFloating(btn), QUEUE_BADGE_HTML);
-        // Remove stale in-row nodes.
         document.querySelectorAll('[data-pmv-hidden-btn], [data-pmv-filter-btn], [data-pmv-queue-btn]').forEach(btn => {
             if (!bar.contains(btn)) btn.remove();
         });
@@ -9802,8 +9721,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     function attachFilterButton() { ensureHeaderButtons(); }
 
-    // Painted via SVG presentation attributes, not CSS `color`: an inline `color !important` still
-    // computes to the site's grey, so currentColor is unusable here.
+    // SVG presentation attributes, not CSS color: inline `color !important` still computes to the site's grey.
     function setBtnColor(btn, color) {
         const svg = btn.querySelector('svg');
         if (!svg) return;
@@ -9822,7 +9740,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             setBtnColor(btn, on ? 'rgb(100, 255, 0)' : 'rgb(156, 163, 175)');
             if (btn.title !== title) btn.title = title;
         });
-        // "⊘ hidden/total" next to the funnel, only while the filter hides something here.
         const n = filterHiddenLog.size, total = Math.max(filterSeen.size, n);
         const txt = n > 999 ? '999+' : String(n);
         document.querySelectorAll('[data-pmv-hidden-btn]').forEach(btn => {
@@ -9837,7 +9754,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (panel && panel.dataset.sig !== String(n) + '/' + total) renderHiddenPanel(panel);
     }
 
-    // A hidden card's image often never loads (lazy, display:none): fall back to cached video data.
+    // Hidden cards' images often never load (lazy, display:none): use cached video data.
     function cardThumbUrl(el, id, meta) {
         const img = el.querySelector('img');
         const fromImg = img && (img.currentSrc || img.getAttribute('src') || img.dataset?.src || (img.getAttribute('srcset') || '').split(/\s+/)[0]);
@@ -9845,8 +9762,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return ok(fromImg) || ok(meta?.thumbnailUrl) || (id ? ok(State.videoMeta.get(id)?.thumbnailUrl) || ok(resolveQueueMeta(id)?.thumbnailUrl) : '') || '';
     }
 
-    // List of the videos the filter hid on this page, grouped by reason: one foldable row per reason
-    // ("10 in playlist ›"), largest first. Ratings and lengths share one row each.
+    // Hidden videos grouped by reason, one foldable row each, largest first (ratings/lengths share a row).
     const hiddenOpenGroups = new Set();
     function hiddenGroupKey(reason) {
         if (/^rating \d+%$/.test(reason)) return 'rating';
@@ -9952,12 +9868,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }, 0);
     }
 
-    // ---------------------------------------------------------------------
-    // Site-wide filter panel
-    // ---------------------------------------------------------------------
-    // In the style of the playlist-page filter drawer: uppercase section labels, term chips (click a
-    // chip: whole word only), choice chips, dual sliders with a pill and presets, site-style dropdowns.
-    // Changes are staged in a draft and saved by Apply; the on/off switch acts at once.
+    // --- Site-wide filter panel ---
+    // Styled like the playlist-page filter drawer; edits stage in a draft until Apply, the on/off switch acts at once.
     const GF_SVG = {
         ban: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>',
         x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
@@ -9996,6 +9908,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 #pmv-filter-panel .gf-tag.pos{background:rgba(249,115,22,0.2);color:rgb(253,186,116);}
 #pmv-filter-panel .gf-tag.neg{background:rgba(239,68,68,0.2);color:rgb(252,165,165);}
 #pmv-filter-panel .gf-tag.neg .txt{text-decoration:line-through;}
+#pmv-filter-panel .gf-tag .star{display:inline-flex;color:rgb(250,204,21);}
+#pmv-filter-panel .gf-tag.pos.model{background:rgba(234,179,8,0.18);color:rgb(253,224,71);}
 #pmv-filter-panel .gf-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:4px;border:none;cursor:pointer;background:#272727;color:rgb(209,213,219);
   font-size:11px;font-weight:500;line-height:1.2;font-family:inherit;white-space:nowrap;}
 #pmv-filter-panel .gf-chip:hover{background:#323232;}
@@ -10048,7 +9962,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
 
     function closeGfDropdown() { document.querySelectorAll('.pmv-gf-dd').forEach(d => d.remove()); document.querySelectorAll('#pmv-filter-panel .gf-sel[data-open="1"]').forEach(b => { b.dataset.open = '0'; }); }
 
-    // Site-style custom select. items(): [{ value, title, sub }]; multi keeps the list open.
+    // Site-style select. items(): [{ value, title, sub }]; multi keeps the list open.
     function gfSelect({ placeholder, items, label, isSelected, onPick, multi = false }) {
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -10089,7 +10003,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     };
                     dd.appendChild(row);
                 });
-                // Keep it on screen.
                 const dr = dd.getBoundingClientRect();
                 if (dr.bottom > innerHeight - 8) dd.style.top = Math.max(8, Math.round(r.top - dr.height - 6)) + 'px';
             };
@@ -10101,7 +10014,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return btn;
     }
 
-    // Dual slider 0..max with a pill and preset chips. get() -> [a, b]; set(a, b).
+    // Dual slider 0..max with pill and presets. get() -> [a, b]; set(a, b).
     function gfRange({ max, get, set, fmt, presets }) {
         const wrap = document.createElement('div');
         wrap.innerHTML = `<div class="gf-pillrow"><span class="gf-pill"><span class="a"></span><span class="sep">-</span><span class="b"></span></span></div>
@@ -10139,9 +10052,11 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return wrap;
     }
 
-    // The site-wide filter as plain values, for the playlist page filter's "Sync from site filter".
+    // Plain values for the playlist-page filter's "Sync from site filter".
     PMVX.siteFilterSnapshot = () => ({
         include: filterTerms(filterConfig.include), exclude: filterTerms(filterConfig.exclude),
+        modelsInclude: filterTerms(filterConfig.modelsInclude), modelsExclude: filterTerms(filterConfig.modelsExclude),
+        active: !!filterConfig.active,
         seen: filterConfig.seen, playlistMode: filterConfig.playlistMode, playlistIds: (filterConfig.playlistIds || []).slice(),
         ratingMin: filterConfig.ratingMin, ratingMax: filterConfig.ratingMax, maxMinutes: filterConfig.maxMinutes,
         flags: { ...(filterConfig.flags || {}) },
@@ -10152,7 +10067,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (existing) { existing.remove(); closeGfDropdown(); return; }
         ensureGfStyle();
 
-        // Mounted on document.body, outside Vue's tree, so header re-renders cannot remove the open panel.
+        // On document.body, outside Vue's tree, so header re-renders can't remove the open panel.
         const box = document.createElement('div');
         box.id = 'pmv-filter-panel';
         const r = anchorBtn.getBoundingClientRect();
@@ -10160,7 +10075,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         box.style.left = Math.round(Math.max(8, Math.min(r.right - 360, window.innerWidth - 368))) + 'px';
         document.body.appendChild(box);
 
-        // Draft: everything but the on/off switch waits for Apply.
         let d = JSON.parse(JSON.stringify(filterConfig));
         const sigOf = c => JSON.stringify({ ...c, active: null });
         const mk = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
@@ -10168,7 +10082,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         let status = () => {};
         const refreshPending = () => { const p = sigOf(d) !== sigOf(filterConfig); applyBtn.classList.toggle('pending', p); applyBtn.textContent = p ? 'Apply' : 'Applied'; };
 
-        // Head: title, hidden count, on/off switch (immediate)
         const head = mk('div', 'gf-head');
         head.appendChild(mk('strong', null, 'Filter'));
         const sub = mk('span', 'gf-sub');
@@ -10188,16 +10101,17 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const body = mk('div', 'gf-body');
         box.appendChild(body);
 
-        // Term chips (exclude / require): Enter adds, click a chip toggles whole word, × removes.
-        const termSection = (key, label, placeholder, kind) => {
+        // Term chips: Enter adds, click toggles whole word, × removes.
+        const termSection = (key, label, placeholder, kind, other, model = false) => {
             const s2 = sec(label);
             const inp = mk('input'); inp.type = 'text'; inp.placeholder = placeholder; inp.spellcheck = false;
             const chips = mk('div', 'gf-chips');
             const draw = () => {
                 chips.textContent = '';
                 filterTerms(d[key]).forEach((t, i, all) => {
-                    const c = mk('span', 'gf-tag ' + kind);
+                    const c = mk('span', 'gf-tag ' + kind + (model ? ' model' : ''));
                     if (kind === 'neg') { const ic = mk('span'); ic.innerHTML = GF_SVG.ban; ic.style.display = 'inline-flex'; c.appendChild(ic); }
+                    if (model) { const ic = mk('span', 'star'); ic.innerHTML = STAR_SVG; c.appendChild(ic); }
                     const word = PMVX.isWordTerm(t);
                     const tx = mk('span', 'txt', word ? `"${PMVX.termLabel(t)}"` : t);
                     tx.title = word ? 'Whole word only — click to match anywhere in the text' : 'Matches anywhere in the text — click to match it only as a whole word';
@@ -10209,7 +10123,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 });
             };
             inp.addEventListener('keydown', e => {
-                e.stopPropagation(); // site and script hotkeys stay out of the field
+                e.stopPropagation(); // keep site/script hotkeys out
                 if (e.key === 'Enter') {
                     e.preventDefault();
                     const v = inp.value.trim();
@@ -10218,8 +10132,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                     const cur = filterTerms(d[key]);
                     add.forEach(t => { if (!cur.includes(t)) cur.push(t); });
                     d[key] = joinFilterTerms(cur);
-                    // A term cannot be both required and excluded.
-                    const other = key === 'exclude' ? 'include' : 'exclude';
                     d[other] = joinFilterTerms(filterTerms(d[other]).filter(t => !add.includes(t)));
                     inp.value = '';
                     drawAllTerms(); refreshPending();
@@ -10232,13 +10144,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             draw();
             return s2;
         };
-        const sExc = termSection('exclude', 'Exclude', 'Hide videos with… (title, tag, performer, uploader)', 'neg');
-        const sInc = termSection('include', 'Require', 'Only videos with…', 'pos');
-        const drawAllTerms = () => { sExc.draw(); sInc.draw(); };
+        const sExc = termSection('exclude', 'Exclude', 'Hide videos with… (title, tag, music, uploader)', 'neg', 'include');
+        const sInc = termSection('include', 'Require', 'Only videos with…', 'pos', 'exclude');
+        const sMExc = termSection('modelsExclude', 'Exclude models', 'Hide videos with model…', 'neg', 'modelsInclude', true);
+        const sMInc = termSection('modelsInclude', 'Require models', 'Only videos with model…', 'pos', 'modelsExclude', true);
+        const drawAllTerms = () => { sExc.draw(); sInc.draw(); sMExc.draw(); sMInc.draw(); };
         const hint = mk('div', 'gf-hint', 'Enter adds · Backspace in an empty field removes the last one · "quotes" or a click on a term: whole word only');
-        body.append(sExc, sInc, hint);
+        body.append(sExc, sInc, sMExc, sMInc, hint);
 
-        // Choice chips
         const choice = (label, opts, get, set) => {
             const s2 = sec(label);
             const row = mk('div', 'gf-chips');
@@ -10255,7 +10168,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             return s2;
         };
 
-        // Playlist mode + which playlists count (dropdown, multi)
         const sPl = choice('Playlist', [
             { v: 'all', t: 'All' }, { v: 'in', t: '✓ In playlist', cls: 'in' }, { v: 'out', t: '✕ Not in playlist', cls: 'out' },
         ], () => d.playlistMode, v => { d.playlistMode = v; plSel.style.display = v === 'all' ? 'none' : ''; });
@@ -10276,7 +10188,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             { v: 'any', t: 'All' }, { v: 'unseen', t: 'Unwatched' }, { v: 'seen', t: 'Watched' },
         ], () => d.seen, v => { d.seen = v; }));
 
-        // Content flags: off -> hide (⊘) -> only these (✓) -> off, like the playlist choice.
+        // Content flags cycle: off -> hide (⊘) -> only (✓) -> off.
         const sFlags = sec('Content');
         const fRow = mk('div', 'gf-chips');
         CONTENT_FLAGS.forEach(([key, label]) => {
@@ -10304,7 +10216,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         sFlags.appendChild(mk('div', 'gf-hint', 'Click: hide (\u2298) \u2192 only these (\u2713) \u2192 off. Videos whose flag is not known yet stay visible.'));
         body.appendChild(sFlags);
 
-        // Rating
         const sRate = sec('Rating');
         sRate.appendChild(gfRange({
             max: 100,
@@ -10315,7 +10226,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }));
         body.appendChild(sRate);
 
-        // Length: maximum only (0..60 min, 60 = any)
+        // Length: maximum only (0..60 min, 60 = any); lower handle hidden.
         const sLen = sec('Max length');
         const LEN_ANY = 60;
         const lenWrap = gfRange({
@@ -10325,12 +10236,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             fmt: (v, side) => side === 'b' && v >= LEN_ANY ? 'Any' : v + 'm',
             presets: [{ t: 'Any', a: 0, b: LEN_ANY }, { t: '≤5m', a: 0, b: 5 }, { t: '≤10m', a: 0, b: 10 }, { t: '≤20m', a: 0, b: 20 }, { t: '≤30m', a: 0, b: 30 }],
         });
-        // Only the upper bound is used: hide the lower handle.
         lenWrap.querySelectorAll('input[type=range]')[0].style.display = 'none';
         sLen.appendChild(lenWrap);
         body.appendChild(sLen);
 
-        // Saved search (lazy list)
         const sSs = sec('Saved search');
         const ssSel = gfSelect({
             placeholder: 'None',
@@ -10348,7 +10257,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         sSs.appendChild(ssSel);
         body.appendChild(sSs);
 
-        // Pagination (folded)
         const more = mk('button', 'gf-more'); more.type = 'button';
         more.innerHTML = `Pagination ${GF_SVG.chev}`;
         const pag = mk('div', 'gf-sec'); pag.hidden = true;
@@ -10380,7 +10288,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             numRow('Skip pages under', 'With autoscroll off: skip to the next page when fewer than this many survive. 1 skips only empty pages, 0 is off.', 'skipBelow', 50));
         body.append(more, pag);
 
-        // Actions
         const actions = mk('div', 'gf-actions');
         const applyBtn = mk('button', 'gf-apply', 'Applied'); applyBtn.type = 'button';
         const clearBtn = mk('button', 'gf-ghost', 'Clear'); clearBtn.type = 'button'; clearBtn.title = 'Reset every filter setting';
@@ -10421,14 +10328,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             saveFilterConfig(); reopen();
         };
         refreshPending();
-        // External changes (a tag clicked in the HUD) redraw the open panel from the stored config.
+        // External changes (a tag clicked in the HUD) redraw the open panel.
         box.refresh = () => { d = JSON.parse(JSON.stringify(filterConfig)); reopen(); };
 
-        // Deferred close: binding synchronously would catch the click that opened the panel.
+        // Deferred: binding now would catch the opening click.
         setTimeout(() => {
             const onDocClick = e => {
                 if (!box.isConnected) { document.removeEventListener('click', onDocClick); return; }
-                // composedPath: a chip redrawn by its own click is no longer in the box, but was.
+                // composedPath: a chip redrawn by its own click is no longer in the box.
                 const path = e.composedPath ? e.composedPath() : [];
                 if (path.includes(box) || box.contains(e.target) || !e.target.isConnected || e.target.closest('[data-pmv-filter-btn], .pmv-gf-dd')) return;
                 closeGfDropdown();
@@ -10438,15 +10345,10 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }, 0);
     }
 
-    // ---------------------------------------------------------------------
-    // Homepage state across Back / Forward
-    // ---------------------------------------------------------------------
-    // The site's homepage forgets its filters and starts over at page 1 when you come back to it. Its
-    // own saved-search component gets two functions as props, getCurrentFilters() and onLoad(filters)
-    // (the same pair "Saved searches" uses); they are found through Vue's vnode tree from #__nuxt.
-    // While on the homepage the filters, list depth, page and scroll position are kept per tab
-    // (sessionStorage); Back / Forward to the homepage puts them back. A fresh visit (logo, link) does not.
-    // Only while logged in: the site renders that component only then.
+    // --- Homepage state across Back / Forward ---
+    // The site's homepage resets its filters and page on return. Its saved-search component's props getCurrentFilters()
+    // and onLoad(filters) (found via Vue's vnode tree from #__nuxt) let us keep filters, depth, page and scroll per tab
+    // (sessionStorage) and restore them on Back/Forward, not on a fresh visit. Logged in only: the component needs it.
     const HOME_STATE_KEY = 'pmvx_home_state_v1';
     function homeFilterProps() {
         const root = document.querySelector('#__nuxt')?._vnode;
@@ -10465,9 +10367,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
         return null;
     }
-    // "Saved Searches" next to "More Filters": the site keeps that button inside the folded filter
-    // panel. The copy mirrors its icon, label and count and clicks the original, which opens the
-    // site's own saved-searches dialog. Vue owns the row, so a 1 s check re-inserts it.
+    // Copy of "Saved Searches" next to "More Filters" (the site hides it in the folded panel); it clicks the
+    // original to open the site's dialog. Vue owns the row, so a 1 s check re-inserts it.
     function nativeSavedSearchesBtn() {
         return [...document.querySelectorAll('.filter-panel-wrapper button')]
             .find(b => !b.dataset.pmvSavedShortcut && /^Saved Searches/.test(b.textContent.trim())) || null;
@@ -10522,7 +10423,6 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             let saved;
             try { saved = JSON.parse(sessionStorage.getItem(HOME_STATE_KEY) || 'null'); } catch { saved = null; }
             if (!saved || Date.now() - saved.at > 6 * 60 * 60 * 1000) return;
-            // Wait for the page and its filter component.
             let pr = null;
             for (let i = 0; i < 40 && isHomePath() && !(pr = homeFilterProps()); i++) await wait(250);
             if (!pr || !isHomePath()) return;
@@ -10531,7 +10431,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 pr.onLoad(saved.filters || {});
                 await wait(600);
             }
-            // Same depth: pages mode → the saved page; autoscroll → load batches until the count is back.
+            // Same depth: pages mode → saved page; autoscroll → load batches until the count is back.
             const paging = siteListPaging();
             if (paging && !paging.infinite && saved.page > 1) {
                 for (let i = 0; i < 20 && siteListPaging()?.pending; i++) await wait(250);
@@ -10540,7 +10440,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 btn?.click();
                 await wait(800);
             } else if (saved.count > homeListCount()) {
-                const target = Math.min(saved.count, 100); // the site keeps about 100 cards
+                const target = Math.min(saved.count, 100); // the site keeps ~100 cards
                 for (let i = 0; i < 12 && isHomePath() && homeListCount() < target; i++) {
                     window.scrollTo(0, document.documentElement.scrollHeight);
                     window.dispatchEvent(new Event('scroll'));
@@ -10553,15 +10453,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             homeRestoring = false;
         }
     }
-    // Capture before the route changes (the homepage is still mounted), on link clicks and regularly.
+    // Capture before the route changes (homepage still mounted), on link clicks and regularly.
     (() => {
         const push = history.pushState;
         history.pushState = function (...a) { try { captureHomeState(); } catch {} return push.apply(this, a); };
         document.addEventListener('click', e => { if (e.target.closest?.('a[href]')) { try { captureHomeState(); } catch {} } }, true);
         setInterval(() => { if (isHomePath() && !document.hidden) { try { captureHomeState(); } catch {} } }, 2000);
         window.addEventListener('pagehide', () => { try { captureHomeState(); } catch {} });
-        // Back / Forward: popstate fires before the router renders the homepage.
-        // The capture is held off right away, so the reset page is not saved over the state first.
+        // popstate fires before the router renders the homepage: hold capture off so the reset page isn't saved.
         window.addEventListener('popstate', () => {
             homeBackNav = true;
             homeRestoring = true;
@@ -10570,25 +10469,17 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 homeBackNav = false;
             }, 50);
         });
-        // A Back that reloads the page (bfcache miss) is a back_forward navigation.
+        // A Back that reloads (bfcache miss) is a back_forward navigation.
         try {
             const nav = performance.getEntriesByType('navigation')[0];
             if (nav?.type === 'back_forward' && isHomePath()) { homeRestoring = true; setTimeout(restoreHomeState, 300); }
         } catch {}
     })();
 
-    // ---------------------------------------------------------------------
-    // Pagination
-    // ---------------------------------------------------------------------
-    // A filter that hides most of a page breaks both list-loading modes:
-    // - Autoscroll off: a page is `videosPerPage` long and replaced, not appended, so a strict filter
-    //   can leave a single card. The API caps pages at 100 and the site accepts any positive stored
-    //   preference, so raising it fixes this.
-    // - Autoscroll on: the site appends via an IntersectionObserver on a sentinel (1000px rootMargin)
-    //   that only reports changes. If a mostly hidden batch does not push the sentinel out of the
-    //   margin, no callback fires and loading stops.
-    // The site also windows its list (maxItems 100, trimmed to 60), dropping cards off the top,
-    // so top-up stops below that window.
+    // --- Pagination ---
+    // A filter hiding most of a page breaks both modes. Autoscroll off: a page (`videosPerPage`, API cap 100) is replaced,
+    // so a strict filter can leave one card; raise it. Autoscroll on: the IntersectionObserver sentinel (1000px rootMargin)
+    // only reports changes, so a mostly hidden batch stalls loading; the list is windowed (100, trimmed to 60), so top-up stops below.
 
     const SITE_PREFS_KEY = 'user-preferences-v1';
     const SITE_PAGE_MAX = 100;  // server cap
@@ -10602,9 +10493,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             ?.globalProperties?.$nuxt?.payload?.state || null;
     }
 
-    // Nuxt keeps each list page's paging in a useState entry named after the page type
-    // ($shomepage-current-page, $ssearch-current-page, ...) that survives in-page navigation,
-    // so the prefix comes from the route first.
+    // Nuxt keeps list paging in useState keyed by page type ($shomepage-current-page, …), surviving in-page navigation.
     function siteListPaging() {
         const st = nuxtState();
         if (!st) return null;
@@ -10629,7 +10518,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return null;
     }
 
-    // The container with the most cards: the list grid, not a Recommended rail or "More from" strip.
+    // Container with the most cards: the list grid, not a Recommended rail or "More from" strip.
     function mainCardGrid() {
         const counts = new Map();
         let best = null, bestN = 0;
@@ -10643,8 +10532,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return bestN >= 4 ? best : null;
     }
 
-    // All cards of the list across the site's chunks. Counted from the cards, not data-video-id:
-    // a card whose id is not resolved yet counts as a result, which only makes this wait, never skip a page.
+    // Counted from cards, not data-video-id: an unresolved card counts, so this only waits, never skips a page.
     function listCards() {
         const merged = listChunks();
         const grids = merged ? merged.chunks : [mainCardGrid()].filter(Boolean);
@@ -10668,13 +10556,9 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return !!document.querySelector('.animate-spin');
     }
 
-    // Settles the two site preferences the filter depends on. Both are read at site init, so changes
-    // land on the next page change or reload.
-    // Autoscroll works against a strict filter: the site keeps ~100 cards (maxItems 100, trimmed to 60)
-    // and drops the oldest, survivors included, so top-up becomes a load/filter/trim treadmill. With
-    // autoscroll off a page stands alone and nothing is discarded. So the site is put on pages while
-    // the filter hides things, and the user's setting is restored afterwards.
-    // A bigger page only helps in that mode; with autoscroll on it reaches the trimming sooner.
+    // Settles the site prefs the filter depends on (read at site init: apply on next page change or reload).
+    // Autoscroll + strict filter = load/filter/trim treadmill (~100 cards kept, oldest dropped), so the site is put
+    // on pages while the filter hides things and the user's setting restored after. Big pages only help in that mode.
     function syncSitePrefs() {
         let prefs;
         try { prefs = JSON.parse(localStorage.getItem(SITE_PREFS_KEY) || 'null'); } catch { return; }
@@ -10713,9 +10597,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         }
     }
 
-    // An observer only reports changes, so the sentinel is first moved far out of reach (300vh, past
-    // the 1000px margin) and then into view, producing a real transition. Moving it into view alone
-    // fails on short pages where it never leaves the margin.
+    // Observers only report changes: move the sentinel far off (300vh, past the 1000px margin), then into view; into view alone fails on short pages.
     function nudgeInfiniteSentinel(afterEl) {
         const sentinel = [...document.querySelectorAll('div')].find(d =>
             d.className === 'h-4' && (afterEl.compareDocumentPosition(d) & Node.DOCUMENT_POSITION_FOLLOWING));
@@ -10736,10 +10618,8 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return true;
     }
 
-    // Removes everything the filter hides from the site's own list, which its memory management
-    // watches (past 100 items it trims the top, taking a strict filter's survivors with it). Hidden
-    // cards are display:none, so nothing in view moves. Only while the filter is hiding things, only
-    // with autoscroll on, and never below a floor: an empty list takes the sentinel with it and loading stops.
+    // Prunes hidden items from the site's own list, which it trims past 100 (taking survivors along). Hidden cards
+    // are display:none, so nothing moves. Autoscroll + active filter only; floor kept: an empty list drops the sentinel.
     const PRUNE_FLOOR = 8;
 
     function siteListKey() {
@@ -10757,8 +10637,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         return null;
     }
 
-    // Length of the site's own list (what its memory limit watches), not the DOM card count;
-    // the two differ briefly after a prune.
+    // The site's own list length (what its memory limit watches), not the DOM count; they differ briefly after a prune.
     function siteListLength() {
         const st = nuxtState();
         const key = st && siteListKey();
@@ -10784,18 +10663,15 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const kept = list.filter(item => !hidden.has(String(item?._id ?? item?.id)));
         const dropped = list.length - kept.length;
         if (!dropped) return 0;
-        // Keep the tail topped up to the floor so the site never gets an empty list.
         const final = kept.length >= PRUNE_FLOOR ? kept : list.slice(-PRUNE_FLOOR);
         if (final.length === list.length) return 0;
         try { st[key] = final; } catch { return 0; }
         return list.length - final.length;
     }
 
-    // The site renders a list in chunks, each its own grid, with ad containers between them; each
-    // chunk starts a fresh row, leaving short rows mid-list. Merge: the shared parent takes the chunk's
-    // classes (responsive rules stay the site's), chunks become display:contents, and separators
-    // collapse only while they render nothing; a visible banner spans the full row.
-    // Classes are re-applied per pass: a Vue patch rewrites class wholesale, data-* survives.
+    // The site renders lists in chunked grids with ads between, leaving short rows. Merge: the parent takes the chunk
+    // classes, chunks get display:contents, empty separators collapse, visible banners span the row. Classes are
+    // re-applied per pass: Vue patches rewrite class, data-* survives.
     function ensureMergeStyle() {
         if (document.getElementById('pmv-grid-style')) return;
         const st = document.createElement('style');
@@ -10818,7 +10694,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (chunks.length < 2) return null;
         const parent = chunks[0].parentElement;
         if (!parent || chunks.some(c => c.parentElement !== parent)) return null;
-        // Chunks of one list carry identical classes; other rails sharing a parent do not and must not be merged.
+        // Only chunks with identical classes are one list; other rails sharing the parent must not merge.
         const cls = chunks[0].className || '';
         if (!/(^|\s)grid(\s|$)/.test(cls)) return null;
         if (chunks.some(c => (c.className || '') !== cls)) return null;
@@ -10833,7 +10709,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         const { parent, chunks } = found;
 
         if (parent.getAttribute('data-pmv-grid-merge') !== '1') {
-            // Stored as an attribute so it survives Vue patches and re-initialisation.
+            // Attribute survives Vue patches and re-init.
             parent.setAttribute('data-pmv-grid-was', parent.className || '');
             parent.setAttribute('data-pmv-grid-merge', '1');
         }
@@ -10844,8 +10720,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
                 if (child.getAttribute('data-pmv-grid-chunk') !== '1') child.setAttribute('data-pmv-grid-chunk', '1');
                 return;
             }
-            // Judged by contents, not box: as a grid item an empty container stretches to the row height.
-            // Re-evaluated every pass so a banner that fills in later gets its row back.
+            // Judged by contents (an empty grid item stretches to row height), every pass so late banners get their row back.
             const empty = ![...child.querySelectorAll('*')]
                 .some(el => el.getBoundingClientRect().height > 0);
             if (empty) {
@@ -10891,14 +10766,12 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (pumpState.tries >= PUMP_MAX_TRIES || siteIsLoadingMore()) return;
         if (Date.now() - pumpState.lastAt < PUMP_COOLDOWN_MS) return;
 
-        // Fewer cards than before means the site's trimming kicked in (past ~100 it drops the oldest);
-        // asking for more only feeds that, so stop for this page view.
+        // Fewer cards than before: the site is trimming (past ~100); more would only feed that, so stop for this page.
         if (pumpState.lastCards && total < pumpState.lastCards) {
             pumpState.tries = PUMP_MAX_TRIES;
             return;
         }
-        // A nudge that brings nothing means the site will not deliver (rate limited or window full);
-        // after two, stop until the next page.
+        // Nothing new from a nudge: the site won't deliver (rate limit or window full); stop after two until the next page.
         if (pumpState.lastCards && total === pumpState.lastCards && ++pumpState.stalls >= 2) {
             pumpState.tries = PUMP_MAX_TRIES;
             return;
@@ -10930,8 +10803,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         if (skipState.key !== key) skipState = { key, seen: 0, done: skipState.done };
         if (visible >= below) { skipState.seen = 0; return; }
 
-        // Playlist membership and ratings resolve after cards appear; skip a page only if it is
-        // still this thin on a second look.
+        // Playlist membership and ratings resolve late: skip only if still thin on a second look.
         if (++skipState.seen < 2) { setTimeout(skipThinPage, 1500); return; }
         if (skipState.done >= SKIP_MAX_PAGES) return;
 
@@ -10943,9 +10815,7 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
         next.click();
     }
 
-    // ---------------------------------------------------------------------
-    // Badges
-    // ---------------------------------------------------------------------
+    // --- Badges ---
 
     function scheduleBadges() {
         if (State.quietMode || State.observerPaused || State.badgeScheduled) return;
@@ -10958,14 +10828,13 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
             addNotificationBadges();
             attachFilterButton();
             applyFilterToCards();
-            // Self-healing: a page re-render removes the Up next panel and it is otherwise rebuilt only on
-            // URL change. Rebuild only when missing; doing it every pass would interrupt a drag.
+            // Self-heal the Up next panel after a re-render; only when missing, as rebuilding interrupts a drag.
             if (smartQueueItems.length && !document.getElementById('pmv-queue-sidebar')) {
                 try { renderQueueSidebar(); } catch {}
             }
             syncSitePrefs();
             mergeListChunks();
-            // Our own pruning shrinks the list too; the top-up must not read that as site trimming.
+            // Own pruning shrinks the list too; don't count it as site trimming.
             if (pruneFilteredFromSiteList()) pumpState.lastCards = 0;
             topUpList();
             skipThinPage();
@@ -10975,20 +10844,14 @@ ${K} .ke-foot .h{font-size:12px;color:rgb(107,114,128);}
     }
 
 
-    // ✕ on a card: reject the video (see toggleRejectVideo) without opening it. Only present while a
-    // reject list is chosen; red if rejected, grey otherwise. `resolveId` gives the API _id
-    // (directly, or via lookup on slug cards). Kept apart from "+" (pushed to the end of its row) so
-    // the two are not mixed up. While a card filter is active, rejecting takes two clicks: the first
-    // turns the button red ("Reject?"), a second within REJECT_ARM_MS rejects.
+    // Reject ✕ on a card, only while a reject list is set; red when rejected.
+    // With a card filter active it takes a second click within REJECT_ARM_MS.
     const REJECT_ARM_MS = 3000;
-    // Card action buttons share one size, matching the site's "+N" tag button; the reject ✕ is a badge
-    // in the thumbnail's top-left corner in the style of the aspect-ratio badge, and the site's own
-    // top-left badges (NEW, Seen …) move down one slot under it.
+    // Buttons match the site's "+N" tag button; the ✕ goes top-left in the thumbnail, above the site's badges.
     const CARD_ICON = {
         external: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
         queueAdd: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 6H3"/><path d="M12 12H3"/><path d="M12 18H3"/><path d="M18 12v7"/><path d="M14.5 15.5h7"/></svg>',
         plus: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>',
-        // Up next: two play triangles and a bar (play next).
         upNext: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5v11L10 12z"/><path d="M11 6.5v11l7.5-5.5z"/><path d="M21 6.5v11"/></svg>',
     };
     function ensureCardBtnStyle() {
@@ -11041,7 +10904,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         b.addEventListener('mousedown', e => e.stopPropagation());
         return b;
     }
-    // The card's thumbnail box (grid: .aspect-video, Recommended: .w-40).
+    // Thumbnail box: .aspect-video (grid) or .w-40 (Recommended).
     function cardThumb(card) {
         return card.querySelector('.aspect-video') || card.querySelector('.w-40') || card.querySelector('img')?.parentElement || null;
     }
@@ -11050,12 +10913,12 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         if (!thumb) return false;
         if (getComputedStyle(thumb).position === 'static') thumb.style.position = 'relative';
         thumb.dataset.pmvRejthumb = '1';
-        // Small, subtle variant where the card has no resolution pill (Recommended, More from, …).
+        // Small variant on cards without a resolution pill (Recommended, More from).
         if (!thumb.querySelector(':scope > .absolute.top-3.right-3')) btn.dataset.small = '1';
         thumb.appendChild(btn);
         return true;
     }
-    // "+" on a card: the right-click playlist menu, opened under the button. A second click closes it.
+    // "+" opens the playlist menu under the button; a second click closes it.
     function playlistPickButton(resolveId) {
         const b = cardBtn('playlists', 'Add to a playlist', CARD_ICON.queueAdd);
         b.dataset.pmvPlpick = '1';
@@ -11127,7 +10990,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 }
                 btn.dataset.on = now ? '1' : '';
                 styleRejectCardBtn(btn, now);
-                // Re-render this card's badges and tint on the next pass.
+                // Force a re-badge and re-tint on the next pass.
                 card.querySelectorAll('[data-playlist-name]').forEach(el => el.remove());
                 delete card.dataset.pmvChecked;
                 delete card.dataset.pmvRecChecked;
@@ -11150,9 +11013,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         styleRejectCardBtn(btn, on);
     }
 
-    // Heart on a card: favourite / unfavourite without opening the video.
-    //   GET /api/users/favorite-ids -> { favorites: [id, ...] }   (state, loaded once per page load)
-    //   PUT /api/videos/<id>/favorite  { action: "favorite" | "unfavorite" }
+    // Heart: GET /api/users/favorite-ids -> { favorites: [id] } (once per page load);
+    // PUT /api/videos/<id>/favorite { action: "favorite" | "unfavorite" }.
     const FAV_RGB = '244,114,182'; // pink-400, the site's favourites colour
     const HEART_SVG = on => `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="${on ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`;
     let favIds = null;          // Set once loaded; null = unknown (logged out or not loaded yet)
@@ -11211,7 +11073,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                     body: JSON.stringify({ action: wasOn ? 'unfavorite' : 'favorite' }),
                 });
                 if (!res.ok) { toast(res.status === 401 ? 'Log in to favourite videos' : `Favourite failed (${res.status})`, 'red'); return; }
-                // noteFavourite already ran from the fetch hook; keep the page's own state in step too.
+                // The fetch hook already ran noteFavourite; sync the page's own state too.
                 if (State.currentVideoData?.id === id) State.currentVideoData.isFavorited = !wasOn;
                 PMVX.markActed(id);
                 toast(wasOn ? '✕ Removed from favourites' : '♥ Added to favourites', wasOn ? null : 'green');
@@ -11232,8 +11094,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             const videoId = card.dataset.videoId;
             if (!videoId) return;
 
-            // Skip cards already processed for this video ID, unless it is in a playlist and its badge is
-            // missing (Vue re-render); cheap Map lookup first, DOM query only for in-playlist cards.
+            // Skip processed cards unless a badge or reject button went missing (Vue re-render).
             if (card.dataset.pmvChecked === videoId && State.ready
                 && !(isVideoInPlaylist(videoId) && !card.querySelector('[data-playlist-name]'))
                 && !(rejectPlaylistId && !card.querySelector('[data-pmv-reject-btn]'))
@@ -11252,8 +11113,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             }
             if (!targetRow) return;
 
-            // "Open in tab" button: a <button> + window.open() rather than a nested <a>, which is invalid
-            // inside a card that is itself a link. Independent of State.ready.
+            // <button> + window.open(): a nested <a> is invalid inside a card link.
             if (!targetRow.querySelector('[data-pmv-opentab]')) {
                 const cardHref = card.tagName === 'A'
                     ? card.getAttribute('href')
@@ -11270,8 +11130,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 }
             }
 
-            // "+" button: add this card's video to the Smart Queue without navigating. Uses the card's
-            // resolved videoId (real _id, not slug/asset ID).
+            // Up next button; uses the resolved _id, not the slug/asset id.
             if (!targetRow.querySelector('[data-pmv-addqueue]')) {
                 const aqBtn = cardBtn('queue', 'Add to Up next', CARD_ICON.upNext);
                 aqBtn.dataset.pmvAddqueue = '1';
@@ -11286,7 +11145,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 syncQueueCardBtn(aqBtn);
             }
 
-            // "+": add to a playlist (the right-click menu), after the Up next button.
             if (!targetRow.querySelector('[data-pmv-plpick]')) {
                 const pb = playlistPickButton(async () => card.dataset.videoId || videoId);
                 const aq = targetRow.querySelector('[data-pmv-addqueue]');
@@ -11299,7 +11157,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 if (pb) pb.after(fb); else targetRow.appendChild(fb);
             }
 
-            // ✕ in the thumbnail corner.
             const rjBtn = card.querySelector('[data-pmv-reject-btn]');
             if (!rejectPlaylistId) rjBtn?.remove();
             else if (rjBtn) refreshRejectCardBtn(rjBtn, isRejected(videoId));
@@ -11331,7 +11188,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 const badgeRgb = playlistBadgeRgb(name, plId);
                 badge.style.cssText = `display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;font-size:11px;background:rgba(${badgeRgb},0.15);border:1px solid rgba(${badgeRgb},0.4);color:rgb(${badgeRgb});max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
                 badge.title = 'In playlist: ' + name;
-                // Short name (Settings → Playlist names) on the badge, the full name in its tooltip.
+                // Short name (Settings → Playlist names); full name in the tooltip.
                 badge.textContent = (isRejectList(plId) ? '\u2298 ' : '✓ ') + (getPlaylistDisplayName(name, plId) || name);
                 targetRow.appendChild(badge);
             });
@@ -11346,18 +11203,14 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     }
 
     function resolveQueueItemVideoId(itemRoot) {
-        // Visible title text is more reliable than img.alt (Vue recycles nodes on virtual scroll, so alt lags).
-        // Displayed videos are always in videoDetails and thus titleIndex.
+        // Visible title, not img.alt: Vue recycles nodes on virtual scroll, so alt lags.
         const visibleTitle = getQueueRowVisibleTitle(itemRoot);
         if (visibleTitle) return State.titleIndex.get(visibleTitle.toLowerCase()) || null;
         return null;
     }
 
-    // Direct trigger on N: the Up Next preview already shows the next video before anything changes,
-    // so it is read synchronously in the keydown tick, before Vue re-renders it.
-    // Read off the visible preview rather than resolving an ID: the native block is a plain <button>
-    // (queue-row helpers don't apply), and when the playlist-page filter overlays it
-    // (#pmvnf-upnext-overlay) the native button still shows the filtered-out video, so the overlay wins.
+    // N key: read the visible Up next preview synchronously, before Vue re-renders it.
+    // The filter overlay (#pmvnf-upnext-overlay) wins: the native button still shows the filtered-out video.
     function getUpNextVideoInfo() {
         if (!isPlaylistPage()) return null;
         const upNextRoot = State.queueUpNextEl || findQueueParts()?.upNext;
@@ -11388,9 +11241,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         showNextVideoNotificationWithInfo(info, 'n-key-upnext');
     }
 
-    // Central gate for the mini-HUD whatever the trigger (N key, console hook, DOM fallback).
-    // `key` dedupes repeats: video ID if resolvable, else thumbnail URL or title, so a failed ID
-    // resolution never blocks it.
+    // Single gate for the Mini-HUD; `key` dedupes (video id, else thumbnail URL or title).
     function showNextVideoNotificationWithInfo(info, source) {
         if (!document.fullscreenElement) return;
         if (!info?.title || !info.key || info.key === State.lastNextHudVideoId) return;
@@ -11398,7 +11249,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         showNextVideoHUD({ title: info.title, creator: info.creator, thumbnail: info.thumbnail });
     }
 
-    // fallbackTitle is used when videoMeta has no entry yet.
     function showNextVideoNotificationFor(videoId, fallbackTitle, source) {
         if (!videoId) return;
         const meta = State.videoMeta.get(videoId);
@@ -11410,9 +11260,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         }, source);
     }
 
-    // Primary trigger: the site logs "Switching playlist video" with {newVideoId, newVideo, ...}
-    // whenever currentVideoIndex changes (next, N key, queue click). It fires before any media/HLS
-    // loading, so it is independent of readyState timing and of which DOM class the site shows.
+    // Primary trigger: the site logs "Switching playlist video" {newVideoId, newVideo} on every index
+    // change, before any media/HLS loading, so it doesn't depend on readyState or DOM classes.
     (function installPlaylistSwitchLogHook() {
         const origConsoleLog = console.log.bind(console);
         console.log = function (...args) {
@@ -11428,8 +11277,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         };
     })();
 
-    // Fallback: DOM detection via the active queue row (border-orange-500) in case the console
-    // message disappears. Same gate; showNextVideoNotificationFor dedupes by id.
+    // Fallback if the console message disappears: the active queue row (border-orange-500).
     function maybeShowNextVideoNotification() {
         if (!document.fullscreenElement || !isPlaylistPage()) return;
         const row = getActiveQueueRow();
@@ -11442,8 +11290,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     function addQueueBadges() {
         if (State.quietMode || !State.ready) return;
 
-        // Scope to thumbnail containers, then walk up to the button; much narrower than a global
-        // querySelectorAll('[role="button"]').
+        // Scoped to queue thumbnails; much narrower than all [role="button"].
         document.querySelectorAll('.w-24.h-14 img').forEach(img => {
             const itemRoot = img.closest('[role="button"]');
             if (!itemRoot) return;
@@ -11478,14 +11325,11 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     }
 
 
-    // ---------------------------------------------------------------------
-    // Recommended sidebar
-    // ---------------------------------------------------------------------
+    // --- Recommended sidebar ---
     // Badges and playlist filter on /video/ pages.
 
     function getVideoIdFromHref(href) {
-        // href: /video/<slug>_<24hex>?from=recommended (slug and query are
-        // optional)
+        // /video/<slug>_<24hex>?from=recommended; slug and query optional.
         if (!href) return null;
         const m = href.match(/\/video\/(?:[^?#]*_)?([0-9a-f]{24})(?:[?#]|$)/i);
         return m ? m[1] : null;
@@ -11510,9 +11354,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return false;
     }
 
-    // Bounded retry after navigation/load to wait out SSR/hydration; not a poller.
-    // A new kick replaces the running one. The Up next panel is rebuilt on the
-    // first tick, then only when missing or no longer above Recommended.
+    // Bounded retry (not a poller) to wait out SSR/hydration; a new kick cancels the old one.
     let kickTimers = [];
     function kickRecommended() {
         kickTimers.forEach(clearTimeout);
@@ -11528,10 +11370,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         }, d));
     }
 
-    // Re-badge as soon as the cache is ready (covers kicks that fired before
-    // State.ready).
+    // Re-badge once the cache is ready (kicks may have fired before State.ready).
     window.addEventListener('pmv:cache-ready', () => {
-        // Reset so all cards are re-evaluated
         document.querySelectorAll('[data-pmv-rec-checked]').forEach(el => {
             delete el.dataset.pmvRecChecked;
         });
@@ -11541,25 +11381,22 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     });
 
     function resolveRecCardVideoId(card) {
-        // 1. The card itself is an <a href="/video/slug_<id>">
+        // Order: own href, inner link, title (titleIndex), thumbnail.
         const selfHref = card.tagName === 'A' ? card.getAttribute('href') : null;
         if (selfHref) {
             const fromSelf = getVideoIdFromHref(selfHref);
             if (fromSelf) return fromSelf;
         }
-        // 2. <a href="/video/..."> somewhere inside the card
         const innerLink = card.querySelector('a[href*="/video/"]');
         if (innerLink) {
             const fromInner = getVideoIdFromHref(innerLink.getAttribute('href'));
             if (fromInner) return fromInner;
         }
-        // 3. Title → titleIndex (works once the cache is loaded)
         const h4 = card.querySelector('h4');
         if (h4) {
             const fromTitle = State.titleIndex.get(h4.textContent.trim().toLowerCase());
             if (fromTitle) return fromTitle;
         }
-        // 4. img.src → thumbUrl or thumbnailIndex
         const img = card.querySelector('img');
         if (img) {
             const src = img.getAttribute('src') || img.src || '';
@@ -11571,8 +11408,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return null;
     }
 
-    // "+" on a Recommended card. Placed from the card alone (no playlist cache or
-    // API id needed); the id is resolved on click.
+    // "+" on a Recommended card: placed without the cache; the API id is resolved on click.
     function placeRecAddQueueButton(card, slugId, targetEl) {
         const infoDiv = targetEl || card.querySelector('.flex-1.min-w-0');
         if (!infoDiv) return;
@@ -11583,9 +11419,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         aqBtn.dataset.pmvRecAddqueue = '1';
         aqBtn.dataset.rec = '1';
         aqBtn.dataset.qid = slugId;
-        // Added immediately under the card's slug id; the real API id is
-        // resolved in the background and swapped in (needed only for dedupe and
-        // playlist chips).
+        // Queued under the slug id at once; the API id is swapped in later (only for dedupe and chips).
         aqBtn.addEventListener('click', e => {
             e.preventDefault();
             e.stopPropagation();
@@ -11602,8 +11436,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 })
                 .catch(() => noteLookupFailure(slugId));
         });
-        // "+" (add to a playlist) and the heart after it; the resolved id is cached, so later clicks
-        // need no request.
+        // Playlist "+" and heart; the resolved id is cached in slugToApiId.
         const resolveId = async () => {
             const id = knownApiIdForCard(card, slugId);
             if (id) return id;
@@ -11620,8 +11453,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         infoDiv.append(aqBtn, plBtn, favBtn);
     }
 
-    // ✕ on a Recommended / More from card. Placed from the card alone, id resolved
-    // on click. Its colour follows the known id, re-checked on every badge pass.
+    // ✕ on Recommended / More from cards; colour follows the known id, resolved on click.
     function placeRecRejectButton(card, slugId, infoDiv) {
         const existing = card.querySelector('[data-pmv-reject-btn]');
         if (!rejectPlaylistId) { existing?.remove(); return; }
@@ -11667,8 +11499,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         else infoDiv.appendChild(badge);
     }
 
-    // Tints a card green (in a playlist) or red (rejected). Inline styles do not
-    // survive Vue re-renders; the badge pass reapplies them.
+    // Inline tint (green in playlist, red rejected); Vue re-renders wipe it, the badge pass reapplies.
     function applyInPlaylistTint(el, on, rejected = false) {
         if (!el) return;
         if (on) {
@@ -11682,8 +11513,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         }
     }
 
-    // Green "✓ <playlist names>" chip shared by Recommended and More from cards;
-    // null when the video is in no playlist.
+    // "✓ <playlists>" chip for Recommended / More from cards; null if in none.
     function playlistCheckBadgeEl(videoId) {
         const matching = [], shown = [];
         State.playlists.forEach(p => { if (p.ids.has(videoId)) { matching.push(p.name); shown.push(getPlaylistDisplayName(p.name, p.id) || p.name); } });
@@ -11700,23 +11530,158 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return badge;
     }
 
-    // "More from <uploader>" cards are plain <a href="/video/slug_<id>"> in a grid
-    // and carry no data-video-id.
-    //
-    // ID resolution is fetch-free: slug cache, then titleIndex/thumbnailIndex.
-    // titleIndex holds only playlist videos, so a hit means "in a playlist".
-    // Fetching every card on sight causes 429 bursts.
+    // More from cards are plain <a> links without data-video-id. Resolve without fetching (slug cache,
+    // titleIndex/thumbnailIndex; a hit means "in a playlist"): fetching every card causes 429 bursts.
     function knownApiIdForCard(card, slugId) {
         const mapped = State.slugToApiId.get(slugId);
         if (mapped) return mapped;
-        // A slug can itself be a playlist video's _id (newer videos have no
-        // oldId).
+        // Newer videos have no oldId, so a slug can be the playlist video's _id.
         if (State.reverse.has(slugId)) return slugId;
         const h4 = card.querySelector('h4');
         const byTitle = h4 && State.titleIndex.get(h4.textContent.trim().toLowerCase());
         if (byTitle) return byTitle;
         const src = (card.querySelector('img')?.getAttribute('src') || '').split('?')[0];
         return (src && State.thumbnailIndex.get(src)) || null;
+    }
+
+    // --- Video info on playlist pages ---
+    // "More about this video": models, Playlists with this video, More from, from one /watch-page request.
+    // Markup copies the video page's so Mini-checker, labels and card buttons attach; collapses on next video.
+    const VINFO_ID = 'pmv-vinfo';
+    const vinfo = { vid: null, open: false, data: null, loading: false, error: false, seq: 0 };
+    const VI_SVG = {
+        info: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4h.01"/></svg>',
+        chev: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+        userCircle: (s, cls = '') => `<svg viewBox="0 0 24 24" width="${s}" height="${s}" class="${cls}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/><path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662"/></svg>`,
+        listVideo: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 5H3m7 7H3m7 7H3m12-6.997a1 1 0 0 1 1.517-.859l4.997 2.997a1 1 0 0 1 0 1.718l-4.997 2.997a1 1 0 0 1-1.517-.86z"/></svg>',
+        arrow: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m-7-7 7 7-7 7"/></svg>',
+        play: '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
+        eye: '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>',
+        cal: '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>',
+        clock: '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+        user: '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+        videoCount: '<svg viewBox="0 0 24 24" width="10" height="10" class="inline" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect width="14" height="12" x="2" y="6" rx="2"/></svg>',
+        thumb: '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>',
+    };
+    const viSlug = s => String(s || '').toLowerCase().trim().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    const viCompact = n => {
+        n = Number(n) || 0;
+        if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+        if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+        return String(n);
+    };
+    const viAgo = iso => {
+        const t = Date.parse(iso || '');
+        if (!Number.isFinite(t)) return '';
+        const s = Math.max(0, (Date.now() - t) / 1000);
+        const steps = [[31536000, 'y'], [2592000, 'mo'], [86400, 'd'], [3600, 'h'], [60, 'm']];
+        for (const [sec, u] of steps) if (s >= sec) return `${Math.floor(s / sec)}${u} ago`;
+        return 'just now';
+    };
+    const VI_CARD = 'group bg-[#0F0F0F] rounded-lg overflow-hidden border border-[#2A2A2A] hover:border-orange-500/40 transition-all duration-300 hover:shadow-lg hover:shadow-orange-500/10';
+    const VI_GRID = 'grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4';
+
+    function viVideoCard(v) {
+        const r = Number(v.bayesianRating);
+        const hue = Number.isFinite(r) ? Math.max(0, Math.min(120, r * 1.2)) : 0;
+        const rating = Number.isFinite(r) && r > 0
+            ? `<div class="inline-flex items-center gap-1 font-semibold select-none rounded-full border flex-shrink-0" style="padding:3px 6px;font-size:10px;line-height:1;background:linear-gradient(135deg, hsla(${hue} 70% 55% / 0.7), hsla(${hue} 70% 41% / 0.7));border:1px solid hsla(${hue} 70% 59% / 0.8);color:#FFFFFF;" role="img" aria-label="Rating badge">${VI_SVG.thumb}<span>${Math.round(r)}%</span></div>` : '';
+        return `<a href="/video/${escHtml(viSlug(v.title) || 'video')}_${escHtml(v._id)}" class="${VI_CARD}">
+            <div class="relative aspect-video bg-[#0A0A0A] overflow-hidden">
+                ${v.thumbnailUrl ? `<img src="${escHtml(v.thumbnailUrl)}" alt="${escHtml(v.title || '')}" class="w-full h-full object-cover transition-transform duration-300 opacity-100 group-hover:scale-110" loading="lazy">` : ''}
+                <div class="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity duration-300 z-20"><div class="w-10 h-10 rounded-full bg-orange-600/80 hover:bg-orange-600 backdrop-blur-sm border border-orange-400/30 flex items-center justify-center text-white">${VI_SVG.play}</div></div>
+                ${v.duration ? `<div class="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 bg-black/80 backdrop-blur-sm rounded text-white text-xs font-semibold z-20">${escHtml(v.duration)}</div>` : ''}
+            </div>
+            <div class="p-2 space-y-1">
+                <h4 class="text-sm font-semibold line-clamp-2 group-hover:text-blue-400 transition-colors leading-tight text-white">${escHtml(v.title || '')}</h4>
+                <div class="flex items-center gap-2 text-xs text-gray-500"><span class="flex items-center gap-0.5">${VI_SVG.eye} ${viCompact(v.views)}</span><span>•</span><span class="flex items-center gap-0.5">${VI_SVG.cal} ${escHtml(String(v.uploadDate || '').slice(0, 10))}</span></div>
+                <div class="flex items-center gap-1.5 flex-wrap">${rating}</div>
+            </div></a>`;
+    }
+
+    function viPlaylistCard(p) {
+        const thumbs = (Array.isArray(p.videoThumbnails) && p.videoThumbnails.length ? p.videoThumbnails : (p.thumbnails || [])).slice(0, 4);
+        const cover = thumbs.length >= 2
+            ? `<div class="w-full h-full grid grid-cols-2">${thumbs.map((t, i) => `<div class="relative overflow-hidden"><img src="${escHtml(t)}" alt="Video ${i + 1}" class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300" loading="lazy"></div>`).join('')}</div>`
+            : ((p.thumbnailUrl || thumbs[0]) ? `<img src="${escHtml(p.thumbnailUrl || thumbs[0])}" alt="" class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300" loading="lazy">` : '');
+        return `<a href="/playlists/${escHtml(p._id)}" class="${VI_CARD}">
+            <div class="relative aspect-video bg-[#0A0A0A] overflow-hidden">${cover}
+                <div class="absolute top-1.5 right-1.5 px-1.5 py-0.5 bg-black/80 backdrop-blur-sm rounded text-white text-xs font-semibold">${VI_SVG.videoCount} ${escHtml(String(p.videoCount ?? ''))}</div>
+            </div>
+            <div class="p-2 space-y-1.5">
+                <h4 class="text-sm font-semibold line-clamp-2 group-hover:text-blue-400 transition-colors leading-tight text-white">${escHtml(p.name || '')}</h4>
+                <div class="flex items-center gap-1 text-xs text-gray-400"><span class="flex items-center gap-1 truncate">${VI_SVG.user}<span class="truncate">${escHtml(p.owner || '')}</span></span></div>
+                <div class="flex items-center gap-2 text-xs text-gray-500"><span class="flex items-center gap-0.5">${VI_SVG.eye} ${viCompact(p.views)}</span><span>•</span><span class="flex items-center gap-0.5">${VI_SVG.clock} ${escHtml(viAgo(p.updatedAt || p.createdAt))}</span></div>
+            </div></a>`;
+    }
+
+    function viSectionsHtml(d) {
+        const v = d.video || {};
+        const stars = Array.isArray(v.starsTags) ? v.starsTags.filter(Boolean) : [];
+        const models = `<div class="bg-[#1A1A1A] rounded-lg p-3"><div class="flex items-center gap-2 flex-wrap">
+            <span class="text-xs font-semibold text-gray-400 flex items-center gap-1 mr-1">${VI_SVG.userCircle(12, 'text-yellow-300')} Models</span>
+            ${stars.length ? stars.map(s => `<a href="/model/${escHtml(viSlug(s) || 'star')}" class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-gradient-to-r from-yellow-500/25 to-amber-500/25 border border-yellow-400/40 text-yellow-200 rounded-md text-xs font-semibold shadow-sm hover:from-yellow-500/35 hover:to-amber-500/35 hover:border-yellow-400/60 transition-all"><span class="truncate">${escHtml(s)}</span></a>`).join('')
+                : '<span class="text-xs text-gray-500">None tagged</span>'}
+        </div></div>`;
+        const pls = Array.isArray(d.playlists) ? d.playlists : [];
+        const playlists = pls.length ? `<div class="bg-[#1A1A1A] rounded-lg p-4">
+            <div class="flex items-center justify-between mb-4"><h3 class="text-lg font-bold text-white flex items-center gap-2">${VI_SVG.listVideo} Playlists with this video <span class="text-sm font-normal text-gray-400">(${pls.length})</span></h3></div>
+            <div class="${VI_GRID}">${pls.map(viPlaylistCard).join('')}</div></div>` : '';
+        const ups = Array.isArray(d.uploaderVideos) ? d.uploaderVideos.filter(x => x?._id && x._id !== v._id) : [];
+        const who = v.uploaderUsername || v.uploader || '';
+        const more = ups.length ? `<div class="bg-[#1A1A1A] rounded-lg p-4">
+            <div class="flex items-center justify-between mb-4"><h3 class="text-lg font-bold text-white flex items-center gap-2">${VI_SVG.userCircle(20)} More from ${escHtml(who)} <span class="text-sm font-normal text-gray-400">(${escHtml(String(d.uploaderVideosCount ?? ups.length))})</span></h3>
+                ${v.uploaderId ? `<a href="/users/${escHtml(v.uploaderId)}" class="text-sm text-orange-400 hover:text-orange-300 transition-colors flex items-center gap-1"> View channel ${VI_SVG.arrow}</a>` : ''}</div>
+            <div class="${VI_GRID}">${ups.map(viVideoCard).join('')}</div></div>` : '';
+        return models + playlists + more;
+    }
+
+    function renderVideoInfo(box, key) {
+        box.dataset.vid = vinfo.vid;
+        box.dataset.state = key;
+        const sub = vinfo.loading ? 'Loading…' : vinfo.error ? 'Could not load — click to retry' : 'Models • Playlists with this video • More from uploader';
+        box.innerHTML = `<button type="button" data-pmv-vinfo-toggle aria-expanded="${vinfo.open}" class="w-full flex items-center justify-between gap-3 bg-[#1A1A1A] rounded-lg px-4 py-3 text-left text-gray-300 hover:text-white transition-colors">
+                <span class="flex items-center gap-2 min-w-0"><span class="text-orange-400 flex-shrink-0">${VI_SVG.info}</span><span class="text-sm font-semibold text-white flex-shrink-0">${vinfo.open ? 'Less about this video' : 'More about this video'}</span><span class="text-xs text-gray-400 truncate">${sub}</span></span>
+                <span class="flex-shrink-0" style="transition:transform .2s;${vinfo.open ? 'transform:rotate(180deg);' : ''}">${VI_SVG.chev}</span>
+            </button>
+            ${vinfo.open && vinfo.data ? `<div class="space-y-4 mt-4">${viSectionsHtml(vinfo.data)}</div>` : ''}`;
+        box.querySelector('[data-pmv-vinfo-toggle]').onclick = () => {
+            if (vinfo.error) { vinfo.open = true; loadVideoInfo(); return; }
+            vinfo.open = !vinfo.open;
+            if (vinfo.open && !vinfo.data && !vinfo.loading) loadVideoInfo();
+            else ensureVideoInfo();
+        };
+        if (vinfo.open && vinfo.data) { try { addMoreFromBadges(); } catch {} }
+    }
+
+    async function loadVideoInfo() {
+        const seq = vinfo.seq, vid = vinfo.vid;
+        vinfo.loading = true; vinfo.error = false;
+        ensureVideoInfo();
+        try {
+            const json = await api(`/api/videos/${vid}/watch-page`);
+            if (seq !== vinfo.seq) return;
+            vinfo.data = json?.data?.video ? json.data : null;
+            if (!vinfo.data) vinfo.error = true;
+        } catch { if (seq === vinfo.seq) vinfo.error = true; }
+        finally { if (seq === vinfo.seq) { vinfo.loading = false; ensureVideoInfo(); } }
+    }
+
+    // After the info block under the player; self-healing via the page observer.
+    function ensureVideoInfo() {
+        let box = document.getElementById(VINFO_ID);
+        if (!isPlaylistPage()) { box?.remove(); return; }
+        const col = document.querySelector('.playlist-page div.grid > div.min-w-0');
+        const anchor = col && [...col.children].find(el => el.classList.contains('space-y-4') && el.classList.contains('mb-4'));
+        if (!anchor) { box?.remove(); return; }
+        // Only the active queue row counts; none (mid re-render) keeps the current state.
+        const vid = getActiveQueueVideoId() || vinfo.vid;
+        if (!vid) return;
+        if (vid !== vinfo.vid) Object.assign(vinfo, { vid, open: false, data: null, loading: false, error: false, seq: vinfo.seq + 1 });
+        if (!box) { box = document.createElement('div'); box.id = VINFO_ID; box.className = 'mb-4'; }
+        if (box.previousElementSibling !== anchor || !box.isConnected) anchor.after(box);
+        const key = `${vinfo.open ? 1 : 0}${vinfo.loading ? 1 : 0}${vinfo.data ? 1 : 0}${vinfo.error ? 1 : 0}`;
+        if (box.dataset.vid !== vid || box.dataset.state !== key) renderVideoInfo(box, key);
     }
 
     function addMoreFromBadges() {
@@ -11752,9 +11717,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             });
     }
 
-    // Cards not resolvable for free are resolved on hover: one request after a
-    // short intent delay, deduped via fetchVideoDeduped(). Bulk lookups would
-    // saturate the rate limit.
+    // Unresolved cards resolve on hover: one deduped request after a delay; bulk lookups hit the rate limit.
     function armMoreFromHoverResolve(card, row, slugId) {
         if (card.dataset.pmvMfArmed) return;
         card.dataset.pmvMfArmed = '1';
@@ -11779,21 +11742,13 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         card.addEventListener('pointerleave', () => clearTimeout(timer));
     }
 
-    // ---------------------------------------------------------------------
-    // Notifications
-    // ---------------------------------------------------------------------
-    // Playlist indicator per notification.
-    // /notifications has no thumbnails or data-video-id, only a "/video/<hex>"
-    // link. Resolution makes no API call: slugToApiId, reverse index, titleIndex
-    // (playlist videos only, so a hit means "in a playlist"). Idempotent: re-runs
-    // replace the badge only when the outcome changes.
-    //
-    // Thumbnail and tag chips for a notification's video, appended as a full-width
-    // block below the row. Idempotent: keyed by apiId.
+    // --- Notifications ---
+    // Playlist indicator per notification. /notifications has only a "/video/<hex>" link (no thumbnails, no data-video-id);
+    // resolved without API calls via slugToApiId, reverse index, titleIndex (playlist videos only: a hit = in a playlist).
+    // Thumbnail + tag chips go in a full-width block below the row. Both idempotent (badge redrawn only on change, preview keyed by apiId).
     function renderNotifPreview(card, apiId, meta) {
         const link = card.querySelector('a[href*="/video/"]');
-        // Sibling of the text block inside the justify-between row, filling its
-        // empty side.
+        // Sibling of the text block in the justify-between row, filling its empty side.
         const textBlock = link?.closest('.flex-1.min-w-0') || null;
         const container = textBlock?.parentElement || card.querySelector(':scope > div') || card;
         const existing = [...container.children].find(el => el.dataset?.pmvNotifPreview !== undefined);
@@ -11806,7 +11761,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         wrap.style.cssText = 'display:flex;gap:8px;align-items:center;flex-shrink:0;';
 
         if (meta.thumbnailUrl) {
-            // Clickable like the homepage card.
             const thumbLink = document.createElement('a');
             thumbLink.href = `/video/${apiId}`;
             wireNotifMarkAsRead(thumbLink);
@@ -11820,8 +11774,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             img.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
             thumbBox.appendChild(img);
 
-            // Hover preview: the <video> is created lazily on first hover,
-            // then paused/resumed.
+            // Hover preview: <video> created lazily on first hover, then paused/resumed.
             if (meta.previewUrl) {
                 let video = null;
                 thumbBox.addEventListener('mouseenter', () => {
@@ -11865,8 +11818,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         else container.appendChild(wrap);
     }
 
-    // Shared by getNotifInPlaylistBoxes and selectNotifsByTag. hex is the real
-    // video _id here; used as a fallback when the video is in no index.
+    // hex is the real video _id here; fallback when the video is in no index.
     function resolveNotifVideoApiId(link) {
         const hex = link?.getAttribute('href')
             ?.match(/\/video\/(?:[^?#\/]*_)?([0-9a-f]{24})(?:[?#\/]|$)/i)?.[1]?.toLowerCase();
@@ -11879,8 +11831,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return videoId || hex;
     }
 
-    // Opening the video also marks the notification read: click the real button,
-    // then navigate after a short delay so its request is not aborted.
+    // Opening also marks it read: click the real button, navigate after a delay so its request isn't aborted.
     function wireNotifMarkAsRead(link) {
         if (!link || link.dataset.pmvMarkReadWired) return;
         link.dataset.pmvMarkReadWired = '1';
@@ -11895,10 +11846,9 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         });
     }
 
-    // Failed lookups are parked for a while instead of retried on sight; retries
-    // would feed the rate limiting.
+    // Failed lookups are parked instead of retried on sight (retries feed the rate limiting).
     const LOOKUP_BACKOFF_MS = 60000;
-    const failedLookups = new Map(); // id -> timestamp to retry after
+    const failedLookups = new Map(); // id -> retry-after timestamp (ms)
 
     function lookupOnCooldown(id) {
         const until = failedLookups.get(id);
@@ -11915,8 +11865,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         if (hit) return Promise.resolve(hit);
         let p = pendingVideoApiFetches.get(apiId);
         if (!p) {
-            // Replaces the interceptor's deferred for this request; removed
-            // from the map only while it is still the entry.
+            // Replaces the interceptor's deferred for this request; deleted from the map only while still the entry.
             p = api(`/api/videos/${apiId}`).then(json => {
                 const v = json?.data || json;
                 if (v?._id) { indexVideoDetails([v]); rememberVideo(apiId, v); }
@@ -11949,8 +11898,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 || (State.reverse.has(hex) ? hex : null)
                 || (title && State.titleIndex.get(title))
                 || null;
-            // hex is the real video _id; fallback target for the
-            // thumbnail/tags fetch when no index hits.
+            // hex is the real video _id: fallback for the thumbnail/tags fetch when no index hits.
             const apiId = videoId || hex;
             const meta = State.videoMeta.get(apiId);
             if (meta) {
@@ -11963,7 +11911,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             const matching = [];
             if (videoId) State.playlists.forEach(p => { if (p.ids.has(videoId)) matching.push({ id: p.id, name: p.name }); });
             const key = matching.map(m => m.name).join('|');
-            // data-* survives Vue re-renders — used by the select button below.
+            // data-* survives Vue re-renders; the select button reads it.
             card.dataset.pmvInpl = matching.length ? '1' : '0';
 
             const existing = link.nextElementSibling?.dataset?.pmvNotifBadge !== undefined
@@ -11989,9 +11937,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         });
 
         if (toFetch.length) {
-            // Limited by the performance mode. Metadata is checked first and
-            // fetchVideoDeduped shares requests, since one video can appear
-            // in several notification rows.
+            // Limited by performance mode; metadata first, and fetchVideoDeduped shares requests (one video, several rows).
             settledWithLimit(toFetch, PMVX.perf().lookups, ({ card, apiId }) =>
                 (State.videoMeta.has(apiId) ? Promise.resolve() : fetchVideoDeduped(apiId))
                     .catch(() => noteLookupFailure(apiId))
@@ -12006,11 +11952,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         updateNotifSelectButton();
     }
 
-    // "Select in playlist": clicks the checkbox of every loaded notification whose
-    // video is in a playlist (clicking keeps Vue's v-model in sync); a second press
-    // deselects.
-    // Mounted next to the All/Unread pills and re-attached on every badge run,
-    // since Vue may drop it. Falls back to a fixed button on body.
+    // "Select in playlist": clicks the checkbox of each loaded notification whose video is in a playlist (keeps Vue's
+    // v-model in sync); again deselects. Next to the All/Unread pills, re-attached each run (Vue drops it); else fixed on body.
     function isNotifVideoInPlaylist(apiId) {
         for (const p of State.playlists.values()) {
             if (p.ids.has(apiId)) return true;
@@ -12018,8 +11961,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return false;
     }
 
-    // Resolved from State and the live DOM on each call, not from data-pmv-inpl,
-    // which can be stale mid-loop.
+    // Resolved from State and the live DOM per call, not data-pmv-inpl (can be stale mid-loop).
     function getNotifInPlaylistBoxes() {
         return [...document.querySelectorAll('div.group')]
             .map(card => {
@@ -12032,8 +11974,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             .filter(Boolean);
     }
 
-    // Clicks each matching checkbox one at a time with a frame in between, so Vue's
-    // re-render settles before the next card is queried.
+    // One checkbox per frame, so Vue's re-render settles before the next card is queried.
     async function clickNotifCheckboxesWhere(match, { target = true } = {}) {
         let guard = 300;
         while (guard-- > 0) {
@@ -12093,7 +12034,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         btn.textContent = `\u2713 In playlist (${boxes.length})`;
     }
 
-    // Keep the label (select/deselect) in sync with manual checkbox clicks.
+    // Keep the select/deselect label in sync with manual checkbox clicks.
     document.addEventListener('change', e => {
         if (e.target?.matches?.('input[type="checkbox"]') && document.getElementById('pmv-notif-selpl')) {
             updateNotifSelectButton();
@@ -12104,7 +12045,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         // Two "Recommended" h3s exist (mobile, desktop); use the visible one.
         const h3 = [...document.querySelectorAll('h3')].find(el => {
             if (el.textContent.trim() !== 'Recommended') return false;
-            // No boxes = inside a display:none ancestor (the hidden layout).
             return el.getClientRects().length > 0;
         });
         if (!h3) return;
@@ -12115,8 +12055,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
 
         const thumbDivs = [...container.querySelectorAll('.w-40')];
 
-        // The "+" goes on every card first: it needs only the card, not the
-        // cache or a resolved id.
+        // The "+" needs only the card, not the cache or a resolved id, so it goes on every card first.
         thumbDivs.forEach(thumbDiv => {
             const card = thumbDiv.parentElement;
             if (!card) return;
@@ -12126,7 +12065,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
 
         if (!State.ready) return;
 
-        // Split cards into: already known (skip/direct) and unknown (fetch needed)
         const toFetch = [];
         thumbDivs.forEach(thumbDiv => {
             const card = thumbDiv.parentElement;
@@ -12135,20 +12073,17 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             const slugId = resolveRecCardVideoId(card);
             if (!slugId) return;
 
-            // Try via the slugToApiId cache first
             const apiId = State.slugToApiId.get(slugId) || slugId;
 
             if (card.dataset.pmvRecChecked === apiId) return;
 
             if (isVideoInPlaylist(apiId) || State.reverse.has(apiId)) {
-                // Already known — place directly
                 placeRecBadge(card, apiId);
             } else if (!State.slugToApiId.has(slugId)) {
                 if (card.dataset.pmvRecFetching || lookupOnCooldown(slugId)) return;
                 card.dataset.pmvRecFetching = '1';
                 toFetch.push({ card, slugId });
             } else {
-                // Slug known but not in a playlist
                 placeRecBadge(card, apiId);
             }
         });
@@ -12169,7 +12104,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         );
     }
 
-    // Recommended playlist-filter pills use the site's own chip classes.
     const REC_CHIP_COLORS = {
         all: 'bg-orange-500/10 border-orange-500/30 text-orange-300',
         in: 'bg-green-500/10 border-green-500/30 text-green-300',
@@ -12180,14 +12114,13 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     }
 
     function addRecommendedFilter(h3El) {
-        // One-time: add filter buttons to the Recommended header row (the h3's
-        // parent).
+        // One-time: filter chips in the Recommended header row (the h3's parent).
         const headerRow = h3El.parentElement;
         if (!headerRow || headerRow.querySelector('#pmv-rec-filter')) return;
 
         const wrapper = document.createElement('div');
         wrapper.id = 'pmv-rec-filter';
-        // Same wrapper class the site uses for its own chip row in this header.
+        // The site's own chip-row wrapper class in this header.
         wrapper.className = 'flex items-center gap-1.5 flex-wrap';
         wrapper.style.marginLeft = '6px';
 
@@ -12214,7 +12147,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 document.querySelectorAll('#pmv-rec-filter button[data-pmv-rec-mode]').forEach(b => {
                     applyRecChipClass(b, b.dataset.pmvRecMode === mode);
                 });
-                // Reset pmvRecChecked so badges are recomputed
                 document.querySelectorAll('[data-pmv-rec-checked]').forEach(el => delete el.dataset.pmvRecChecked);
                 addRecommendedBadges();
             });
@@ -12222,21 +12154,19 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             wrapper.appendChild(btn);
         });
 
-        // Find the badge row in the header (where WiFi/ES/Personalized live)
+        // Badge row in the header (WiFi/ES/Personalized).
         const badgeRow = headerRow.querySelector('.flex.items-center.gap-1\\.5.flex-wrap');
         if (badgeRow) badgeRow.parentElement?.insertBefore(wrapper, badgeRow);
         else headerRow.appendChild(wrapper);
     }
 
-    // MutationObserver with rAF debounce. Changes inside own panels (ids pmv*),
-    // hidden players and the player control bar (re-renders constantly) do not
-    // start a run.
+    // rAF-debounced observer. Changes in own panels (ids pmv*), hidden players and the player control bar (constant re-renders) are ignored.
     function isNoiseMutation(m) {
         const t = m.target.nodeType === 1 ? m.target : m.target.parentElement;
         if (!t) return true;
         return !!(t.closest('[id^="pmv"]') || t.closest('.controls-bar-wrapper'));
     }
-    // One run per frame at most, spaced further apart in the lighter performance modes.
+    // At most one run per frame, spaced further apart in lighter performance modes.
     const scheduleObserverRun = PMVX.scheduler(() => observerRun());
     const observer = new MutationObserver(muts => {
         if (State.observerPaused) return;
@@ -12245,10 +12175,10 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     });
     function observerRun() {
         {
-            // The Recommended sidebar is SSR and must not be blocked by
-            // quietMode/rate limiting; own idempotent run.
+            // The Recommended sidebar is SSR and must not be blocked by quietMode/rate limiting; own idempotent run.
             try { addRecommendedBadges(); } catch {}
             try { addMoreFromBadges(); } catch {}
+            try { ensureVideoInfo(); } catch {}
             try { attachFilterButton(); } catch {}
             try { applyFilterToCards(false); } catch {}
             trackMediaElements();
@@ -12265,9 +12195,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Navigation
-    // ---------------------------------------------------------------------
+    // --- Navigation ---
 
     function enterQuietMode() {
         State.quietMode = true;
@@ -12304,17 +12232,10 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     }
 
 
-    // ---------------------------------------------------------------------
-    // Cached player repair
-    // ---------------------------------------------------------------------
-    // Nuxt keeps visited pages in a KeepAlive. A reactivated page's player is not
-    // remounted, and its <video> was emptied by the media sweep while detached, so
-    // it has no source.
-    // The player component exposes reloadSource() to restore it, so an empty player
-    // gets up to two nudges.
-    // Vue hides component instances in production builds; the player is found by
-    // walking the app's vnode tree (Suspense keeps its branch aside, hence its own
-    // step).
+    // --- Cached player repair ---
+    // Nuxt's KeepAlive doesn't remount a reactivated page's player, and the media sweep emptied its
+    // <video> while detached; reloadSource() restores it (up to two nudges). Production Vue hides
+    // instances, so the player is found by walking the vnode tree (Suspense keeps its branch aside).
     function findPlayerApi() {
         const root = document.querySelector('#__nuxt')?._vnode?.component;
         if (!root) return null;
@@ -12364,8 +12285,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         try { api.reloadSource(); } catch {}
     }
 
-    // Event-driven URL change detection: popstate plus a title MutationObserver
-    // (catches router pushes without popstate).
+    // URL change detection: popstate plus a title MutationObserver (router pushes skip popstate).
     function onUrlChange() {
         if (location.href === State.lastUrl) return;
         sweepDetachedMediaFor();
@@ -12373,13 +12293,10 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         if (location.pathname.startsWith('/video/')) videoHopsThisPage++;
         closeHud();
         hideQueueSidebarNow();
-        // Reset immediately so getCurrentVideoId() does not return the previous
-        // video's ID.
+        // Reset now so getCurrentVideoId() doesn't return the previous video's ID.
         State.currentVideoData = null;
-        // The seekbar preview's second player belongs to the previous video;
-        // the next hover rebuilds it.
+        // The seekbar preview's second player belongs to the previous video; the next hover rebuilds it.
         try { scrubHide(); scrubDrop(); } catch {}
-        // Pause the video on navigation away from video/playlist pages
         try {
             const v = getVideo();
             if (v && !v.paused && !inPlaceHandover) v.pause();
@@ -12396,7 +12313,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         }, 120);
         // Re-badge/re-filter the SSR Recommended sidebar after SPA navigation.
         kickRecommended();
-        // Notify the playlist-page filter of SPA navigation to a playlist
         if (location.pathname.startsWith('/playlists/')) {
             setTimeout(() => {
                 try { window.dispatchEvent(new CustomEvent('pmv:playlist-navigate')); } catch {}
@@ -12406,13 +12322,12 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
 
     window.addEventListener('popstate', onUrlChange);
 
-    // Catch Vue router navigation that doesn't fire popstate (history.pushState directly).
     new MutationObserver(onUrlChange).observe(
         document.querySelector('title') || document.head,
         { childList: true, characterData: true, subtree: true }
     );
 
-    // 2s heartbeat for volume enforcement and video element discovery only.
+    // 2s heartbeat: volume enforcement and video element discovery only.
     setInterval(() => {
         getVideo();
         updateNativePlaylistButtons();
@@ -12420,9 +12335,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     }, 2000);
 
 
-    // ---------------------------------------------------------------------
-    // Context menu
-    // ---------------------------------------------------------------------
+    // --- Context menu ---
     // Playlist menu for a video, opened by the "+" button on cards.
 
     function closeCtxMenu() {
@@ -12431,7 +12344,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
 
     function buildCtxMenu(videoId, x, y, target) {
         closeCtxMenu();
-        // Store the original event target so "Open in new tab" can find the link
+        // Kept so "Open in new tab" can find the card link.
         const _ctxTarget = target || null;
 
         const menu = document.createElement('div');
@@ -12453,7 +12366,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             'user-select:none',
         ].join(';');
 
-        // "Open in new tab" — at the top
         const openRow = document.createElement('div');
         openRow.style.cssText = [
             'display:flex',
@@ -12470,14 +12382,12 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         openRow.addEventListener('click', e => {
             e.stopPropagation();
             closeCtxMenu();
-            // Find the video card's href via the target that triggered the context menu
             const link = _ctxTarget?.closest('a[href*="/video/"]') ||
                          _ctxTarget?.closest('[data-video-id]')?.querySelector('a[href*="/video/"]');
             const href = link?.getAttribute('href');
             if (href) window.open(href, '_blank');
         });
 
-        // Arrow icon
         const openIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         openIcon.setAttribute('viewBox', '0 0 24 24'); openIcon.setAttribute('width', '14'); openIcon.setAttribute('height', '14');
         openIcon.setAttribute('fill', 'none'); openIcon.setAttribute('stroke', 'currentColor');
@@ -12490,7 +12400,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         openRow.appendChild(openLabel);
         menu.appendChild(openRow);
 
-        // Orange divider
         const orangeDivider = document.createElement('div');
         orangeDivider.style.cssText = 'height:1px;background:oklch(70.5% .213 47.604);opacity:0.35;margin:2px 0 6px;';
         menu.appendChild(orangeDivider);
@@ -12510,9 +12419,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 const colorHex = customStyle ? customStyle.color : FALLBACK_COLOR;
                 const activeRgb = hexToRgbStr(colorHex);
                 const inactiveRgb = mixToGrayStr(colorHex);
-                // Muted vs vivid contrast is in text and icon colour
-                // only: near gray when not in the playlist, vivid when
-                // it is.
+                // Contrast is in text and icon colour only: near gray when not in the playlist, vivid when in it.
                 const textColor = inPl ? `rgb(${activeRgb})` : `rgba(${inactiveRgb},0.75)`;
                 const hoverBg = `rgba(${inPl ? activeRgb : inactiveRgb},${inPl ? 0.12 : 0.06})`;
 
@@ -12535,8 +12442,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                     row.style.background = '';
                 });
 
-                // Left side: plus or checkmark in the playlist colour
-                // (green fallback), muted when not in the playlist.
                 const icon = document.createElement('span');
                 icon.style.cssText = 'width:14px;flex-shrink:0;font-size:12px;text-align:center;' +
                     (inPl ? `color:rgba(${activeRgb},1);` : `color:rgba(${inactiveRgb},0.5);`);
@@ -12549,8 +12454,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 row.appendChild(icon);
                 row.appendChild(label);
 
-                // The menu stays open: the row is busy while the change runs, then the menu is drawn
-                // again in place (a reject list change also moves the video out of other playlists).
+                // The menu stays open: the row is busy during the change, then the menu redraws in place
+                // (a reject list change also moves the video out of other playlists).
                 row.addEventListener('click', async e => {
                     e.stopPropagation();
                     if (row.dataset.busy) return;
@@ -12568,7 +12473,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                         scheduleBadges();
                         toast(ok ? '✓ ' + displayName : 'Add failed', ok ? 'green' : null);
                     }
-                    // Redrawn only if this menu is still the open one (a click outside closes it).
+                    // Redraw only if this menu is still open (a click outside closes it).
                     if (document.getElementById('pmv-ctx-menu') === menu) {
                         const btn = menu._pmvBtn;
                         buildCtxMenu(videoId, parseFloat(menu.style.left) || x, parseFloat(menu.style.top) || y, target);
@@ -12581,54 +12486,28 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             });
         }
 
-        // Correct position if the menu falls outside the viewport
         document.body.appendChild(menu);
         const rect = menu.getBoundingClientRect();
         if (rect.right > window.innerWidth)  menu.style.left = Math.max(0, window.innerWidth - rect.width - 8) + 'px';
         if (rect.bottom > window.innerHeight) menu.style.top  = Math.max(0, window.innerHeight - rect.height - 8) + 'px';
     }
 
-    // No right-click menu on cards any more: the "+" button on a card opens the same playlist menu.
-
-    // Close the menu on click outside it, or on scroll/escape
     document.addEventListener('click', e => {
         if (!e.target.closest('#pmv-ctx-menu')) closeCtxMenu();
     }, true);
     document.addEventListener('scroll', closeCtxMenu, true);
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCtxMenu(); }, true);
 
-    // ---------------------------------------------------------------------
-    // Seekbar preview
-    // ---------------------------------------------------------------------
-    // A frame above the player's time bar at the hovered time. Frames are prepared
-    // ahead; a hover never seeks.
-    //
-    // Two layers: the ten API frames (timelineThumbnails, kept by the interceptor)
-    // show immediately, nearest to the hovered time. Over them, frames from a cache
-    // built in the background once the real video plays, so a hover is a lookup and
-    // a drawImage.
-    //
-    // Cache construction:
-    // - Hidden players on the lowest rendition, via the site's own hls.js (its
-    //   instance's constructor) so the library loads once. Segments come from the
-    //   HTTP cache, so extra players cost CPU, not bandwidth.
-    // - A seek costs the decoding from the previous keyframe, so frames are taken
-    //   at keyframes. Their times are parsed from the TS segments (PES PTS of
-    //   random-access packets). Seeking slightly past the keyframe
-    //   (SCRUB_KEY_MARGIN) lands on it cheaply.
-    // - Gaps wider than SCRUB_GAP get a middle frame afterwards, widest first
-    //   (expensive mid-GOP seeks, done last).
-    // - Segments are processed coarse-to-fine across players so the whole bar fills
-    //   early.
-    // - Sources without TS segments (plain file, fMP4) fall back to one player
-    //   walking 2 s steps.
-    //
-    // The bar is matched on document mouse events (the div with
-    // onMousemove=handleProgressHover inside .controls-bar-wrapper, classes
-    // "relative cursor-pointer py-3 -my-3"), not by attaching to it, since Vue may
-    // rebuild it. The preview sits above the site's hover-time label.
-    //
-    // Setting: hybrid = live cache (default), frames = the API frames only, off.
+    // --- Seekbar preview ---
+    // Frame above the player's time bar at the hovered time; prepared ahead, a hover never seeks.
+    // Layers: the ten API frames (timelineThumbnails) show at once; over them a cache built in the background
+    // once the video plays. Cache: hidden players on the lowest rendition via the site's own hls.js constructor
+    // (segments from the HTTP cache: CPU, not bandwidth). Frames are taken at keyframes (a seek decodes from the
+    // previous one), timed from the TS segments (PES PTS of random-access packets); seeking SCRUB_KEY_MARGIN past
+    // one lands cheaply. Then gaps > SCRUB_GAP get a middle frame, widest first (costly mid-GOP seeks). Segments go
+    // coarse-to-fine across players; without TS (plain file, fMP4) one player walks 2 s steps.
+    // The bar (onMousemove=handleProgressHover) is matched on document mouse events, not attached to: Vue may rebuild it.
+    // Setting: hybrid = live cache (default), frames = API frames only, off.
     const SCRUB_KEY = 'pmv_scrub_preview_v1';
     const SCRUB_BAR_SELECTOR = '.controls-bar-wrapper .cursor-pointer.py-3';
     const SCRUB_W = 176;            // width of a landscape preview
@@ -12662,8 +12541,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         framesW: 0, framesH: 0, gapStall: 0,
     };
 
-    // Shape of the video: 16:9 and wider at a fixed width, portrait capped in
-    // height.
+    // 16:9 and wider at a fixed width; portrait capped in height.
     function scrubDims(video) {
         const ar = (video?.videoWidth && video?.videoHeight) ? video.videoWidth / video.videoHeight : 16 / 9;
         let w = SCRUB_W, h = Math.round(w / ar);
@@ -12671,8 +12549,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return { w, h };
     }
 
-    // The API frames of the playing video: from its own data once loaded, else from
-    // the page's strip (not during a fullscreen hand-over).
+    // API frames: from the video's own data once loaded, else the page's strip (not mid fullscreen hand-over).
     function scrubApiFrames() {
         return timelineFrames().filter(f => f.time !== null);
     }
@@ -12710,16 +12587,14 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             Scrub.ctx = canvas.getContext('2d');
             Scrub.label = label;
         }
-        // In fullscreen only children of the fullscreen element are visible, so
-        // the tip follows it.
+        // In fullscreen only the fullscreen element's children show, so the tip follows it.
         const root = getFullscreenRoot() || document.body;
         if (Scrub.tip.parentElement !== root) root.appendChild(Scrub.tip);
         return Scrub.tip;
     }
 
-    // Hidden players live in a display:none box on body: seeking and drawImage work
-    // there, and being attached keeps the media sweep (detached elements only) off
-    // them.
+    // Hidden players sit in a display:none box on body: seeking and drawImage work there, and
+    // being attached keeps the media sweep (detached elements only) off them.
     function ensureScrubGensRoot() {
         if (Scrub.gensRoot?.isConnected) return Scrub.gensRoot;
         if (!Scrub.gensRoot) {
@@ -12732,8 +12607,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return Scrub.gensRoot;
     }
 
-    // Current source: HLS when the site's hls.js instance has a URL, else the plain
-    // file. A blob: URL (MSE without an hls instance) has no second-player option.
+    // HLS when the site's hls.js has a URL, else the file; a blob: URL (MSE without hls) can't be reopened.
     function scrubSource() {
         const video = getVideo();
         if (!video) return null;
@@ -12778,10 +12652,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         ensureScrubGensRoot().appendChild(video);
         const g = { video, hls: null, fragTimes: new Map(), fragWaiters: new Map(), tapped: false };
         if (source.kind === 'hls') {
-            // The player's own fragment loader is tapped: bytes it loads
-            // anyway are parsed for keyframes (synchronously, before hls.js
-            // hands them to its worker), avoiding a second download.
-            // Without a tap, scrubBuildFromIndex fetches fragments itself.
+            // Tap the player's fragment loader: bytes it loads anyway are parsed for keyframes (synchronously,
+            // before hls.js hands them to its worker). Without a tap scrubBuildFromIndex fetches fragments itself.
             const Base = source.Hls.DefaultConfig?.loader;
             let fLoader;
             if (typeof Base === 'function') {
@@ -12802,10 +12674,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 };
                 g.tapped = true;
             }
-            // Lowest level only (the picture is 176px wide). Only the
-            // fragment at the seek position loads (maxBufferLength below
-            // fragment length), keeping memory flat; a walking player (no
-            // index) buffers everything.
+            // Lowest level only (preview is 176px wide). maxBufferLength below fragment length loads only the
+            // fragment at the seek position, keeping memory flat; a walking player (no index) buffers everything.
             const h = new source.Hls({
                 autoStartLoad: false, enableWorker: true,
                 startLevel: 0, capLevelToPlayerSize: true,
@@ -12857,9 +12727,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Taking a frame
-    // ---------------------------------------------------------------------
+    // --- Taking a frame ---
 
     const scrubSleep = ms => new Promise(r => setTimeout(r, ms));
     const scrubIdle = () => new Promise(r => (window.requestIdleCallback ? requestIdleCallback(r, { timeout: 200 }) : setTimeout(r, 16)));
@@ -12887,8 +12755,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return true;
     }
 
-    // Seeks a hidden player to t and keeps the frame. Returns false if the seek did
-    // not land.
+    // Seeks a hidden player to t and keeps the frame; false if the seek did not land.
     async function scrubGrab(g, t, live) {
         const video = g.video;
         const landed = await scrubSeek(video, t);
@@ -12908,8 +12775,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
 
     function scrubFramesFull() { return !Scrub.frames || Scrub.frames.t.length >= SCRUB_FRAMES_MAX; }
 
-    // Coarse-to-fine order (0, n/2, n/4, 3n/4, ...) so every stretch has a nearby
-    // frame early.
+    // Coarse-to-fine order (0, n/2, n/4, 3n/4, ...) so every stretch gets a nearby frame early.
     function scrubOrder(n) {
         const order = [];
         const done = new Uint8Array(n);
@@ -12921,12 +12787,9 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return order;
     }
 
-    // ---------------------------------------------------------------------
-    // Keyframe index from TS segments
-    // ---------------------------------------------------------------------
+    // --- Keyframe index from TS segments ---
 
-    // The level playlist as hls.js read it (fragments with url, start, duration);
-    // null if it never loads.
+    // Level playlist as hls.js read it (fragments with url, start, duration); null if it never loads.
     async function scrubLevelDetails(h, live) {
         for (let i = 0; i < 100; i++) {
             if (!live()) return null;
@@ -12938,9 +12801,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return null;
     }
 
-    // Keyframe times of one MPEG-TS segment: PTS of video PES packets with the
-    // random-access flag, placed on the media timeline like hls.js does. Null if
-    // not TS.
+    // Keyframe times of one MPEG-TS segment: PTS of random-access video PES packets, placed on the
+    // media timeline as hls.js does; null if not TS.
     function scrubParseTs(buf, fragStart) {
         const b = new Uint8Array(buf);
         const n = Math.floor(b.length / 188);
@@ -12994,8 +12856,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return keys.map(pts => fragStart + (pts - firstDts) / 90000);
     }
 
-    // Keyframe times by fragment sequence number from the tapped loader; waiters
-    // are notified.
+    // Keyframe times per fragment sequence number from the tapped loader; waiters are notified.
     function scrubTapFrag(g, frag, data) {
         if (!frag || typeof frag.sn !== 'number' || !(data instanceof ArrayBuffer) || !data.byteLength) return;
         const times = scrubParseTs(data, frag.start);
@@ -13004,8 +12865,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         if (waiters) { g.fragWaiters.delete(frag.sn); waiters.forEach(r => r(times)); }
     }
 
-    // Resolves with the fragment's keyframe times (null: not TS) or undefined on
-    // timeout.
+    // Resolves with the fragment's keyframe times (null: not TS), or undefined on timeout.
     function scrubWaitFragTimes(g, sn, ms) {
         if (g.fragTimes.has(sn)) return Promise.resolve(g.fragTimes.get(sn));
         return new Promise(resolve => {
@@ -13021,8 +12881,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         const details = await scrubLevelDetails(gens[0].hls, live);
         if (!details) throw new Error('no level');
         const frags = details.fragments;
-        // Fragments are dealt coarse-to-fine, each player taking the next
-        // unclaimed one; keyframes go in order within a fragment.
+        // Players claim fragments coarse-to-fine; keyframes go in order within a fragment.
         const order = scrubOrder(frags.length);
         let next = 0;
         let indexed = false;
@@ -13031,15 +12890,10 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             while (live() && next < order.length && !scrubFramesFull()) {
                 if (document.hidden) { await scrubSleep(250); continue; }
                 const frag = frags[order[next++]];
-                // Loading starts at this player's first fragment; each
-                // later seek makes hls.js fetch the fragment it lands
-                // in.
+                // Loading starts at this player's first fragment; each later seek makes hls.js fetch its fragment.
                 if (!g.started) { g.started = true; try { g.hls.startLoad(frag.start); } catch {} }
-                // The fragment start is a keyframe, so the first grab
-                // goes there; that makes the tapped player load it and
-                // deliver the rest of its keyframe times. If the tap
-                // yields nothing in time, the fragment is fetched
-                // separately.
+                // The first grab at the fragment start (a keyframe) makes the tapped player load it and deliver the
+                // rest of its keyframe times; if the tap yields nothing in time, the fragment is fetched separately.
                 let times;
                 let startGrabbed = false;
                 if (g.tapped) {
@@ -13060,7 +12914,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
                 if (startGrabbed) times = times.filter(t => t - frag.start > 0.15);
                 indexed = true;
                 if (times.length > perFragCap) {
-                    // Too many to keep them all: an even pick across the fragment.
+                    // Too many to keep: an even pick across the fragment.
                     const step = times.length / perFragCap;
                     times = Array.from({ length: perFragCap }, (_, i) => times[Math.floor(i * step)]);
                 }
@@ -13077,8 +12931,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         await scrubFillGaps(token, live, dur);
     }
 
-    // Fills the widest gaps first until none exceeds SCRUB_GAP or the cache is full
-    // (slow mid-GOP seeks, done last).
+    // Fills the widest gaps first until none exceeds SCRUB_GAP or the cache is full.
     async function scrubFillGaps(token, live, dur) {
         const gens = Scrub.gens;
         const gaps = () => {
@@ -13109,8 +12962,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         }
     }
 
-    // No index (plain file or fMP4): one player, 2 s steps, coarse-to-fine. Slower,
-    // but works.
+    // No index (plain file or fMP4): one player, 2 s steps, coarse-to-fine.
     async function scrubWalk(token, live, dur) {
         const g = Scrub.gens[0];
         if (!g) return;
@@ -13128,11 +12980,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Showing
-    // ---------------------------------------------------------------------
+    // --- Showing ---
 
-    // Nearest cached frame to t; null while there is none.
     function scrubCachedNear(t) {
         const f = Scrub.frames;
         if (!f || !f.t.length) return null;
@@ -13166,7 +13015,6 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         const { w, h } = scrubDims(video);
         tip.style.width = w + 'px';
         tip.style.height = h + 'px';
-        // Centered on the cursor, kept within the bar's span.
         const left = Math.max(rect.left, Math.min(rect.right - w, clientX - w / 2));
         tip.style.left = Math.round(left) + 'px';
         tip.style.top = Math.round(rect.top - SCRUB_LIFT - h) + 'px';
@@ -13197,9 +13045,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
 
         if (!Scrub.visible) {
             Scrub.visible = true;
-            // The site hides controls after idle seconds without a mouse
-            // event, and Vue may drop the bar; the tip must not outlive
-            // either.
+            // The site hides controls after idle seconds and Vue may drop the bar; the tip must not outlive either.
             Scrub.watch = setInterval(() => {
                 if (!bar.isConnected) { scrubHide(); return; }
                 if (!ownStrip && bar.closest('.controls-bar-wrapper')?.classList.contains('controls-hidden')) scrubHide();
@@ -13210,8 +13056,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     document.addEventListener('mousemove', e => {
         if (scrubMode() === 'off') return;
         const target = e.target instanceof Element ? e.target : null;
-        // During a drag-seek the preview follows the pointer anywhere, via the
-        // bar it started on.
+        // During a drag-seek the preview follows the pointer anywhere, via the bar it started on.
         const bar = target?.closest(SCRUB_BAR_SELECTOR) || target?.closest('#pmv-scrub-zone') || Scrub.dragBar;
         if (!bar) { if (Scrub.visible) scrubHide(); return; }
         if (Scrub.dragSeek && Scrub.dragBar === bar) {
@@ -13236,9 +13081,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
     document.addEventListener('mouseleave', () => scrubHide());
     document.addEventListener('fullscreenchange', () => scrubHide());
 
-    // ---------------------------------------------------------------------
-    // Hotkeys
-    // ---------------------------------------------------------------------
+    // --- Hotkeys ---
     // Every key is remappable to a built-in action or a playlist. One table drives dispatch and the cheat sheet.
     const KEYBIND_KEY = 'pmv_keybindings_v1';
 
@@ -13248,11 +13091,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         volume100: { label: 'Set volume to 100%', run: () => setVolume100() },
         nextVideo: {
             label: 'Next video (Up next when it has items; the playlist itself on a playlist page)', run: () => {
-                // Up next takes over "next" while it has something
-                // ahead; the played item becomes history above the new
-                // one. Otherwise returns false so the site's N advances
-                // its playlist. On playlist pages the playlist owns
-                // "next" and Up next is left alone.
+                // Up next takes "next" while it has something ahead (the played item becomes history); otherwise
+                // false lets the site's N advance. On playlist pages the playlist owns "next".
                 syncQueueCursor();
                 const next = isPlaylistPage() ? null : smartQueueItems[queueCursor + 1];
                 if (next) {
@@ -13306,9 +13146,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         skipBack10: { label: 'Skip back 10s', run: () => seekVideoBy(-10) },
         toggleFavourite: {
             label: 'Favourite / unfavourite', run: () => {
-                // While fullscreen runs ahead of the page, the on-page
-                // button belongs to the previous video, so the call is
-                // made directly.
+                // Fullscreen may run ahead of the page (the on-page button is the previous video's), so call directly.
                 if (staleFullscreenHref) { toggleFavouriteViaApi(); return; }
                 const btn = findFavouriteButton();
                 if (!btn) { toast('No favourite button on this page'); return; }
@@ -13326,15 +13164,12 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         addToQueue: { label: 'Add current video to Up next', run: () => addCurrentVideoToQueue() },
         openVideoPage: {
             label: 'Open video page in a new tab', run: () => {
-                // For playlist pages, where the playing video has no
-                // page URL. Uses the playlist buttons' id resolution
-                // (API _id or mapped slug), never a poster asset id;
-                // prefers the slug form when known.
+                // For playlist pages (the playing video has no page URL). Uses the playlist buttons' id resolution
+                // (API _id or mapped slug, never a poster asset id), slug form preferred.
                 const id = getCurrentVideoId();
                 if (!id) { toast('No video'); return; }
                 const href = knownHrefForId(id) || `/video/${id}`;
-                // Synchronous within the key event: a popup opened
-                // after an await loses user activation.
+                // Synchronous in the key event: a popup opened after an await loses user activation.
                 window.open(href, '_blank', 'noopener,noreferrer');
             }
         },
@@ -13353,8 +13188,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
             const raw = localStorage.getItem(KEYBIND_KEY);
             if (raw) return JSON.parse(raw);
         } catch {}
-        // First run: only built-in actions. Playlist keys stay unbound; assign
-        // them in settings (Assign hotkeys).
+        // First run: built-in actions only; playlist keys are assigned in settings (Assign hotkeys).
         const defaults = JSON.parse(JSON.stringify(DEFAULT_KEYBINDINGS));
         try { localStorage.setItem(KEYBIND_KEY, JSON.stringify(defaults)); } catch {}
         return defaults;
@@ -13366,9 +13200,8 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         try { document.querySelectorAll('#pmv-page-playlists [data-pmv-pl-btn]').forEach(b => syncPageBtnKey(b, b.dataset.pmvPlBtn)); } catch {}
     }
 
-    // On playlist pages the playlist owns "next" (the site's N); elsewhere the next
-    // Up next item, else the first Recommended card that is neither current nor
-    // rejected. The synthetic N bypasses this script's key dispatcher.
+    // Playlist pages: the playlist owns "next" (the site's N). Elsewhere the next Up next item, else the first
+    // Recommended card that is neither current nor rejected. The synthetic N bypasses our key dispatcher.
     let dispatchingSyntheticNext = false;
     function skipToNextVideo(currentId) {
         if (isPlaylistPage()) {
@@ -13399,17 +13232,14 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return false;
     }
 
-    // Reject key: add to the reject list (addToPlaylist removes it from other
-    // lists), then skip to the next video. On an already rejected video it removes
-    // it, without skipping.
+    // Reject key: reject (addToPlaylist drops other lists) and skip; on a rejected video, un-reject without skipping.
     async function rejectCurrentVideo() {
         const videoId = getCurrentVideoId();
         if (!videoId) { toast('No video'); return; }
         await toggleRejectVideo(videoId, { skip: true });
     }
 
-    // Shared by the reject key and the ✕ on cards: toggles reject-list membership.
-    // Only the key skips. Resolves to the new state, or null if nothing changed.
+    // Reject key and card ✕: toggle reject-list membership (only the key skips); resolves to the new state or null.
     async function toggleRejectVideo(videoId, { skip = false } = {}) {
         const rejectId = rejectPlaylistId && State.playlists.has(rejectPlaylistId) ? rejectPlaylistId : null;
         if (!rejectId) { toast('No reject list chosen (Settings \u2192 Reject list)'); return null; }
@@ -13434,22 +13264,19 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         return true;
     }
 
-    // After ✕ on a card: "Tag video", a small popup to give the rejected video a tag on the site
-    // (usually why it was rejected). Same calls as the site's own Vote on Tags modal:
+    // Tag-popup after ✕: tag the rejected video, with the calls of the site's Vote on Tags modal:
     //   GET  /api/videos/<id>/tags/stats    -> data.tags [{ tag, userVote }]
     //   POST /api/videos/<id>/tags/suggest  { tag, tagType: 'general' }                      new tag, +1 vote
     //   POST /api/videos/<id>/tags/vote     { tag, voteType: 'upvote', tagType: 'general' }  existing tag
-    // Voting again on a tag you already upvoted would remove the vote, so that case is left alone.
+    // Voting again on an upvoted tag removes the vote, so that case is skipped.
     const TAG_AFTER_REJECT_KEY = 'pmv_tag_after_reject_v1';
     const TAG_RECENT_KEY = 'pmv_tag_recent_v1';
     const TAG_MAX_LEN = 50; // the site's limit for general tags
     const TAG_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"></path><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"></circle></svg>';
     function tagAfterReject() { try { return localStorage.getItem(TAG_AFTER_REJECT_KEY) !== '0'; } catch { return true; } }
     function setTagAfterReject(on) { try { localStorage.setItem(TAG_AFTER_REJECT_KEY, on ? '1' : '0'); } catch {} }
-    // Performer chips' sparkle (the site's own icon for stars/models).
     const STAR_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/></svg>';
-    // General tags and stars/models go through the same endpoints, told apart by tagType; the site's
-    // length limits are 50 and 100.
+    // Tags and stars/models share the endpoints, told apart by tagType; site length limits 50 and 100.
     const TAG_KINDS = {
         general: { recentKey: TAG_RECENT_KEY, max: TAG_MAX_LEN, stats: 'tags', meta: 'tags', noun: 'tag', icon: TAG_SVG, pre: '#' },
         stars: { recentKey: 'pmv_star_recent_v1', max: 100, stats: 'stars', meta: 'starsTags', noun: 'model', icon: STAR_SVG, pre: '' },
@@ -13468,7 +13295,7 @@ a:hover .pmv-thumbx[data-small="1"], .group:hover .pmv-thumbx[data-small="1"], d
         } catch {}
     }
 
-    // The site's vocabulary per kind for autocomplete, loaded once on first use.
+    // The site's vocabulary per kind for autocomplete, loaded once.
     const popularTagsP = {};
     function popularTags(kind = 'general') {
         const type = kind === 'stars' ? 'stars' : 'general';
@@ -13580,11 +13407,8 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return Array.isArray(list) ? list : [];
     }
 
-    // Compact tag menu: the video's tags (click = upvote, again = remove your upvote), plus an input
-    // with autocomplete and recent tags for adding. Used after a reject ("Tag video") and by the tag
-    // button in the action bar under the video ("Tags"). Opens under (or above) the rect it was
-    // opened from (the card itself may be hidden by the filter by then); align 'right' lines up the
-    // right edges. Closes on Esc, ✕, or a click outside; stays open for more tags.
+    // Tag-popup: the video's tags (click = upvote, again = unvote) plus an input with autocomplete and recent
+    // tags. Opens at the given rect (the card may be hidden by then); closes on Esc, ✕ or an outside click.
     function openTagPopup(id, rect, title, { heading = 'Tag video', align = 'left', toggleEl = null, kind = 'general' } = {}) {
         closeTagPopup();
         ensureTagPopStyle();
@@ -13628,7 +13452,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
                 const c = document.createElement('button');
                 c.type = 'button';
                 c.className = 'tp-chip';
-                const by = tagHiddenBy(t);
+                const by = tagHiddenBy(t, kind);
                 c.textContent = (by ? '\u2298 ' : '+ ') + K.pre + t;
                 if (by) c.dataset.hide = '1';
                 c.title = by ? `Add this ${K.noun} \u2014 your filter hides videos with it (\u2298 ${by})` : `Add this ${K.noun}`;
@@ -13647,7 +13471,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
                 c.className = 'tp-chip';
                 const up = t.userVote === 'upvote', down = t.userVote === 'downvote';
                 c.dataset.vote = up ? 'up' : down ? 'down' : '';
-                const by = tagHiddenBy(t.tag);
+                const by = tagHiddenBy(t.tag, kind);
                 if (by) c.dataset.hide = '1';
                 c.innerHTML = `${by ? '\u2298 ' : up ? '\u2713 ' : ''}${K.pre}${escHtml(t.tag)}<span class="tp-n">${escHtml(t.score ?? 0)}</span>`;
                 c.title = `${t.upvotes ?? 0} up \u2022 ${t.downvotes ?? 0} down \u2014 ` + (up ? 'click to remove your upvote' : 'click to upvote')
@@ -13700,7 +13524,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
                 o.type = 'button';
                 o.className = 'tp-opt';
                 const i = t.toLowerCase().indexOf(q);
-                const by = tagHiddenBy(t);
+                const by = tagHiddenBy(t, kind);
                 o.innerHTML = (by ? '<span class="tp-ban">\u2298</span>' : '') + escHtml(t.slice(0, i)) + '<b>' + escHtml(t.slice(i, i + q.length)) + '</b>' + escHtml(t.slice(i + q.length));
                 if (by) { o.dataset.hide = '1'; o.title = `Your filter hides videos with this tag (\u2298 ${by})`; }
                 o.onmousedown = e => e.preventDefault();
@@ -13721,7 +13545,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
             try {
                 const r = await tagVideoOnSite(id, tag, kind);
                 rememberTag(tag, kind);
-                const by = tagHiddenBy(tag);
+                const by = tagHiddenBy(tag, kind);
                 const nm = K.pre + tag;
                 say((r === 'added' ? `${nm} added with +1 vote` : r === 'voted' ? `Upvoted ${nm}` : `You already upvoted ${nm}`)
                     + (by ? ` \u2014 your filter now hides this video (\u2298 ${by})` : ''));
@@ -13761,8 +13585,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         }
         pop._pmvClose = close;
 
-        // Below the anchor when it fits, otherwise above; kept inside the viewport. Redone when the
-        // tag list arrives (it changes the height).
+        // Below the anchor if it fits, else above, within the viewport; redone when the tag list changes the height.
         let above = null;
         function place() {
             const w = pop.offsetWidth, h = pop.offsetHeight;
@@ -13789,8 +13612,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return pop;
     }
 
-    // Toggle for any playlist mapped to any key (press again within 3s to confirm
-    // removal). A key mapped to the reject list uses rejectCurrentVideo.
+    // Toggle a mapped playlist (press again within 3 s to confirm removal); the reject list uses rejectCurrentVideo.
     async function handlePlaylistHotkey(playlistId) {
         if (isRejectList(playlistId)) return rejectCurrentVideo();
         const videoId = getCurrentVideoId();
@@ -13823,9 +13645,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         toast('✓ ' + plName + (wasRejected ? ' (removed from reject list)' : ''), 'green');
     }
 
-    // Returns false when the binding declined the key; anything else (a Promise
-    // included) means it took it. Decided synchronously, since it settles whether
-    // the site's handler may still run.
+    // false = the binding declined the key; decided synchronously, as it settles whether the site's handler runs.
     function runBinding(binding) {
         if (!binding) return false;
         if (binding.action === 'playlist') {
@@ -13843,12 +13663,8 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return false;
     }
 
-    // Bound keys are exclusive: this listens on window in the capture phase and,
-    // once a binding takes the key, stopImmediatePropagation keeps the site's
-    // handler (F, space, J, arrows, 0-9, N) and later listeners from seeing it.
-    // Ctrl/Alt/Cmd presses are browser chords and never hotkeys. An action can
-    // decline by returning false from run() ("next" does when Up next has nothing
-    // ahead).
+    // Bound keys are exclusive: capture phase on window + stopImmediatePropagation hides them from the site
+    // (F, space, J, arrows, 0-9, N). Ctrl/Alt/Cmd chords are never hotkeys; run() returning false declines.
     window.addEventListener('keydown', e => {
         if (e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
         if (dispatchingSyntheticNext) return;
@@ -13865,24 +13681,14 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         e.stopImmediatePropagation();
     }, true);
 
-    // ---------------------------------------------------------------------
-    // Player keys
-    // ---------------------------------------------------------------------
-    // The site's player shortcuts (F, space, J, arrows, 0-9) are bound in its
-    // player's onMounted and dropped in onUnmounted; after an in-page hop
-    // (router.push) their handler can stop working. The same shortcuts are
-    // implemented here directly on the <video> and are assignable like other
-    // hotkeys.
-    // Listens on window in the bubble phase and stands down when the site already
-    // handled the key (preventDefault). User-bound keys are swallowed earlier, in
-    // the capture phase.
-    // Volume keys are omitted: the HUD holds volume at 100%.
+    // --- Player keys ---
+    // The site binds its player keys (F, space, J, arrows, 0-9) in onMounted; after a router.push hop they can
+    // stop working, so they are reimplemented on the <video> (bubble phase; stand down on preventDefault).
+    // Volume keys omitted: the HUD holds volume at 100%.
     function playerFullscreenTarget() {
         const video = getVideo();
         if (!video) return null;
-        // The wrapper the site itself fullscreens (.hls-player-wrapper), so its
-        // fullscreenchange bookkeeping stays correct. Not the <video>, which
-        // drops their controls; panels mount into document.fullscreenElement.
+        // Fullscreen the site's wrapper (.hls-player-wrapper), not the <video>, so its fullscreenchange bookkeeping and controls hold.
         return video.closest('.hls-player-wrapper')
             || video.closest('[class*="player"], [class*="video-container"]')
             || video.parentElement || video;
@@ -13917,7 +13723,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         d: 'seekForward5',
     };
 
-    // Cheat sheet entries, built from the table above.
     function playerKeyRows() {
         const shown = key => key === ' ' ? 'Space'
             : key === 'arrowleft' ? '←'
@@ -13934,8 +13739,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return rows;
     }
 
-    // When the site's own switch disables its shortcuts, these stay out of the way
-    // too.
+    // If the site's own switch disables its shortcuts, these stand down too.
     function siteShortcutsDisabled() {
         try {
             return JSON.parse(localStorage.getItem(SITE_PREFS_KEY) || 'null')?.disableKeyboardShortcuts === true;
@@ -13948,16 +13752,14 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         const tag = e.target?.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return false;
         if (keybindings[e.key.toLowerCase()]) return false;   // a custom binding wins
-        // Only where the page has a player; card hover previews are <video>
-        // elements too.
+        // Only where the page has a player; card hover previews are <video> too.
         if (!/^\/(video|playlists)\//.test(location.pathname)) return false;
         if (siteShortcutsDisabled()) return false;
         return !!getVideo();
     }
 
-    // Fullscreen is taken over in the capture phase: the site's F can fail after an
-    // in-page hop (a stale handler calls preventDefault and targets a detached
-    // wrapper). stopImmediatePropagation avoids two handlers racing.
+    // Fullscreen is taken in the capture phase: the site's F can fail after an in-page hop (a stale handler
+    // calls preventDefault on a detached wrapper). stopImmediatePropagation avoids two racing handlers.
     document.addEventListener('keydown', e => {
         if (e.key.toLowerCase() !== 'f' || !playerKeysApply(e)) return;
         e.preventDefault();
@@ -13965,8 +13767,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         toggleVideoFullscreen();
     }, true);
 
-    // The other keys only act where nothing else did: the site's handler normally
-    // still reaches them, so this is a safety net for when it is gone.
+    // Other keys only act if nothing else did: a safety net for when the site's handler is gone.
     window.addEventListener('keydown', e => {
         if (e.defaultPrevented) return;
         const key = e.key.toLowerCase();
@@ -13983,8 +13784,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
 
         const action = BUILTIN_ACTIONS[PLAYER_KEY_DEFAULTS[key]];
         if (!action) return;
-        // Synchronous within the key event: a fullscreen request after an await
-        // loses user activation.
+        // Synchronous: a fullscreen request after an await loses user activation.
         e.preventDefault();
         try { action.run(); } catch {}
     });
@@ -14004,10 +13804,8 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return null;
     }
 
-    // ---------------------------------------------------------------------
-    // Hotkey cheat sheet
-    // ---------------------------------------------------------------------
-    // Lists all hotkeys from `keybindings`, so it stays correct after remaps.
+    // --- Hotkey cheat sheet ---
+    // Built from `keybindings`, so it stays correct after remaps.
     function toggleHotkeyCheatSheet() {
         const existing = document.getElementById('pmv-hotkeys');
         if (existing) { existing.remove(); return; }
@@ -14052,18 +13850,14 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         }), 0);
     }
 
-    // Only the bottom strip of the screen opens the HUD on mousemove, avoiding
-    // conflicts with the queue sidebar hover (right edge). The "i" key shows it
-    // regardless.
+    // Only the bottom strip opens the HUD on mousemove (the right edge is the queue sidebar's); "i" works anywhere.
     const HUD_BOTTOM_ZONE_PX = 300;
 
     document.addEventListener('mousemove', e => {
         if (!document.fullscreenElement || State.quietMode) return;
-        // Stay out of the way while the cursor is over the open queue sidebar
-        // (380px wide, much larger than its 24px trigger strip).
+        // Not over the open queue sidebar (380px wide, much larger than its 24px trigger strip).
         if (State.queueSidebarVisible && State.queueOverlayEl?.matches(':hover')) return;
-        // Over the seek bar (the site's or the HUD's own strip) the preview
-        // takes priority; the panel does not open there and closes if open.
+        // Over a seek bar (the site's or the HUD's strip) the Seekbar-preview wins; the panel closes there.
         const target = e.target instanceof Element ? e.target : null;
         if (target && (target.closest(SCRUB_BAR_SELECTOR) || target.closest('#pmv-scrub-zone'))) {
             if (State.hud) closeHud();
@@ -14076,9 +13870,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         if (!State.quietMode) showHud();
     });
 
-    // ---------------------------------------------------------------------
-    // Init
-    // ---------------------------------------------------------------------
+    // --- Init ---
 
     function init() {
         const hasCache = loadCache();
@@ -14091,12 +13883,10 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         getVideo();
         forceVolume100({ silent: true });
         onPossibleVideoChange();
-        // The header button works on title/rating/length, so it is created
-        // before the playlist cache arrives.
+        // Before the playlist cache: the header filter only needs title/rating/length.
         try { attachFilterButton(); } catch {}
         try { applyFilterToCards(); } catch {}
-        // The bar is placed off the header row's box; reposition it when that
-        // box moves.
+        // The bar is positioned off the header row's box.
         window.addEventListener('resize', () => { hdrDirty = true; try { ensureHeaderBar(); } catch {} });
         // Written as early as possible: the site reads its page size at init.
         try { syncSitePrefs(); } catch {}
@@ -14122,8 +13912,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
 
     }
 
-    // The fetch interceptor is already active from document-start. init() needs the
-    // DOM: wait for "load" so Vue is ready (it fires in background tabs too).
+    // Fetch interceptor is live from document-start; init() waits for "load" (also fires in background tabs).
     if (document.readyState === 'complete') {
         init();
     } else {
@@ -14139,7 +13928,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     const SETTINGS_KEY = 'pmvbpf_settings_v1';
     const PANEL_PAGES = ['/', '/browse', '/popular', '/trending', '/search',
                          '/discover', '/all-videos', '/watch', '/watch-new'];
-    // Prefix-matched pages (dynamic id segment), e.g. a creator's upload grid.
     const PANEL_PREFIX_PAGES = ['/profile/'];
     const HIDE_ATTR   = 'data-pmvbpf-hidden';
 
@@ -14158,9 +13946,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         (document.head || document.documentElement).appendChild(style);
     })();
 
-    // ---------------------------------------------------------------------
-    // Playlist cache
-    // ---------------------------------------------------------------------
+    // --- Playlist cache ---
 
     let playlistsMap = new Map();
     let reverseMap   = new Map();
@@ -14196,7 +13982,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         } catch { return false; }
     }
 
-    // Same-window cache-ready event from the core (faster than the storage event).
+    // Same-window event from the core; faster than the storage event.
     window.addEventListener('pmv:cache-ready', () => {
         loadCache();
         if (playlistFilterMode !== 'any') applyFilter();
@@ -14206,7 +13992,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         if (e.key === CACHE_KEY) { loadCache(); if (playlistFilterMode !== 'any') applyFilter(); }
     });
 
-    // Playlists that count toward in/not-in. Empty = any playlist.
+    // Playlists that count for in/not-in; empty = any playlist.
     let selectedPlaylistIds = [];
     (function loadPickerSettings() {
         try {
@@ -14228,20 +14014,17 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
             memberOf = s?.reverse?.size ? s.reverse.get(videoId) : reverseMap.get(videoId);
         } catch { memberOf = reverseMap.get(videoId); }
         if (!memberOf || !memberOf.size) return false;
-        if (!selectedPlaylistIds.length) return true; // empty selection = any playlist
+        if (!selectedPlaylistIds.length) return true;
         return selectedPlaylistIds.some(id => memberOf.has(id));
     }
 
-    // ---------------------------------------------------------------------
-    // Fetch interceptor
-    // ---------------------------------------------------------------------
-    // Records the last /api/videos URL and indexes thumbnail -> video id.
+    // --- Fetch interceptor ---
 
     const thumbToId = new Map();
     let lastApiUrl  = null;
     let lastApiPage = 1;
 
-    // Shared with the other modules (first to load defines it): one JSON parse per response.
+    // PMVX.resJson is shared (first module defines it): one JSON parse per response.
     const pmvResJson = PMVX.resJson || (PMVX.resJson = res => {
         if (!res.__pmvJson) {
             try { res.__pmvJson = res.clone().json(); }
@@ -14274,7 +14057,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
                     indexVideos(json?.data?.videos || json?.videos || json?.data || []);
                 }).catch(() => {});
             }
-            // Playlist-detail responses also carry thumbnailUrl -> _id mappings.
+            // Playlist-detail responses carry thumbnailUrl -> _id too.
             if (/\/api\/playlists\/[a-f0-9]{24}/.test(rawUrl)) {
                 pmvResJson(res).then(json => {
                     const details = json?.data?.videoDetails || json?.videoDetails || [];
@@ -14295,9 +14078,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         });
     }
 
-    // ---------------------------------------------------------------------
-    // Reading cards
-    // ---------------------------------------------------------------------
+    // --- Reading cards ---
 
     function getVideoId(card) {
         if (card.dataset.videoId) return card.dataset.videoId;
@@ -14305,7 +14086,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         const huds = PMVX.state;
         if (img?.src) {
             const clean = img.src.split('?')[0];
-            // Resolution order: own interceptor cache, core thumbnailIndex, core titleIndex, raw URL hex.
             if (thumbToId.has(clean)) return thumbToId.get(clean);
             if (huds?.thumbnailIndex?.has(clean)) return huds.thumbnailIndex.get(clean);
             const alt = img.alt?.trim().toLowerCase();
@@ -14342,19 +14122,13 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return all;
     }
 
-    // ---------------------------------------------------------------------
-    // Filter state
-    // ---------------------------------------------------------------------
+    // --- Filter state ---
 
     let playlistFilterMode = 'any';
-    // Staged values, shown by the chips. Committed by the site's Apply button where the page has one
-    // (homepage filter menu), otherwise straight away.
+    // Staged; committed by the site's Apply where there is one (homepage), otherwise at once.
     let pendingMode = 'any';
 
-    // ---------------------------------------------------------------------
-    // Mode
-    // ---------------------------------------------------------------------
-    // Filters only cards already loaded; the observer below re-filters new batches.
+    // --- Mode ---
 
     PMVX.filterChecks.push(() => playlistFilterMode !== 'any' && isFilterPage() && !PMVX.playlistFilterExempt());
 
@@ -14366,7 +14140,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         applyFilter();
     }
 
-    // Commits the staged mode and playlist selection.
     function commitPending() {
         if (pendingIds.join(',') !== selectedPlaylistIds.join(',')) {
             selectedPlaylistIds = pendingIds.slice();
@@ -14381,15 +14154,12 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         }
         return null;
     }
-    // Stage on pages with the site's Apply button, apply immediately elsewhere.
     function stagedChange() {
         if (nativeApplyBtn()) updateBtnStyles();
         else commitPending();
     }
 
-    // ---------------------------------------------------------------------
-    // Apply filter
-    // ---------------------------------------------------------------------
+    // --- Apply filter ---
 
     function applyFilter() {
         if (!isFilterPage()) return 0;
@@ -14402,7 +14172,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         const cards = getAllCards();
         let visible = 0, hidden = 0;
 
-        // Off on the favourites views: everything there would count as "in a playlist" or not.
+        // Off on favourites views, where every card would count as in (or not in) a playlist.
         const off = playlistFilterMode === 'any' || PMVX.playlistFilterExempt();
         cards.forEach(card => {
             if (off) {
@@ -14412,7 +14182,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
             const id = getVideoId(card);
             if (!id) { card.removeAttribute(HIDE_ATTR); return; }
             const inAny = isInPlaylist(id);
-            // Cards just acted on stay until the filter is applied again.
             const show  = (playlistFilterMode === 'in' ? inAny : !inAny) || PMVX.isActed(id);
             if (show) { card.removeAttribute(HIDE_ATTR); visible++; }
             else      { card.setAttribute(HIDE_ATTR, '1'); hidden++; }
@@ -14422,9 +14191,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return visible;
     }
 
-    // ---------------------------------------------------------------------
-    // Counter
-    // ---------------------------------------------------------------------
+    // --- Counter ---
 
     function updateCounter(shown, hidden) {
         const el = document.getElementById('pmvbpf-counter');
@@ -14438,10 +14205,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Observer
-    // ---------------------------------------------------------------------
-    // Re-filters when Vue renders new cards.
+    // --- Observer ---
 
     new MutationObserver(muts => {
         if (playlistFilterMode === 'any') return;
@@ -14459,13 +14223,9 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         if (hasNew) requestAnimationFrame(applyFilter);
     }).observe(document.body, { childList: true, subtree: true });
 
-    // ---------------------------------------------------------------------
-    // UI injection
-    // ---------------------------------------------------------------------
-    // Chips in the site's filter row (the "Content:" chips), same shape and colours. One chip cycles
-    // Any → Not in playlist → In playlist → Any; a second one opens an inline list of the playlists
-    // that count. On the homepage the choice is staged until the site's Apply button and is stored
-    // with a saved filter (see the saved-search hooks below).
+    // --- UI injection ---
+    // Chips in the site's "Content:" row: one cycles Any → Not in → In playlist, one lists the playlists
+    // that count. On the homepage the choice waits for the site's Apply and is stored with saved filters.
 
     let injected = false;
 
@@ -14500,7 +14260,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
 
     function injectButtons() {
         if (injected || !isFilterPage()) return;
-        // Already there (e.g. an SPA navigation reset the flag but the row survived): keep one set.
+        // SPA navigation can reset the flag while the row survives: keep one set.
         const ids = ['pmvbpf-sep', 'pmvbpf-btn-in', 'pmvbpf-btn-pick', 'pmvbpf-counter', 'pmvbpf-panel'];
         ids.forEach(id => [...document.querySelectorAll('#' + id)].slice(1).forEach(el => el.remove()));
         if (document.getElementById('pmvbpf-btn-in')?.isConnected) { injected = true; updateBtnStyles(); return; }
@@ -14580,7 +14340,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         NF_renderChips = renderChips;
         renderChips();
         window.addEventListener('pmv:cache-ready', renderChips);
-        // Full width directly under the native row, inside the site's filter menu.
         if (row.parentElement) row.parentElement.insertBefore(panel, row.nextSibling);
 
         const counter = Object.assign(document.createElement('span'), { id: 'pmvbpf-counter' });
@@ -14594,7 +14353,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     }
     let NF_renderChips = null;
 
-    // Colours per state via data-state: inline styles are lost when Vue re-renders, data-* is not.
+    // State colours via data-state: Vue re-renders drop inline styles, not data-*.
     function injectPanelStyle() {
         if (document.getElementById('pmvbpf-panel-style')) return;
         const st = document.createElement('style');
@@ -14656,12 +14415,9 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         }
     }, true);
 
-    // ---------------------------------------------------------------------
-    // Saved filters
-    // ---------------------------------------------------------------------
-    // Saving a filter in the site's menu stores this choice with it, as filters.pmvxPlaylists
-    // ({ mode, ids }), and locally under the filter's name in case the server drops the extra key.
-    // Loading that saved filter restores it; a saved filter without one turns this filter off.
+    // --- Saved filters ---
+    // Saved as filters.pmvxPlaylists ({ mode, ids }), plus locally by name in case the server drops it.
+    // Loading a saved filter without it turns this filter off.
 
     const SAVED_KEY = 'pmvbpf_saved_v1';
     const SAVED_FIELD = 'pmvxPlaylists';
@@ -14676,7 +14432,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return pendingMode === 'any' ? null : { mode: pendingMode, ids: pendingIds.slice() };
     }
 
-    // Called from the fetch wrapper for POST /api/saved-searches. Returns the response.
     async function saveWithPlaylists(orig, ctx, args) {
         const init = args[1] || {};
         let body;
@@ -14700,7 +14455,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         else if (json?.data?._id) savedList = [json.data, ...savedList.filter(s => s._id !== json.data._id)];
     }
 
-    // A click on an entry in the site's saved-filter list (name + summary + delete button).
+    // Click on an entry in the site's saved-filter list.
     document.addEventListener('click', e => {
         if (!isFilterPage()) return;
         if (e.target.closest('button')) return; // delete / cancel
@@ -14718,14 +14473,13 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         }, 0);
     }, true);
 
-    // Re-inject the buttons if Vue replaces the filter row.
     new MutationObserver(() => {
         if (!isFilterPage() || document.getElementById('pmvbpf-btn-in')) return;
         injected = false;
         injectButtons();
     }).observe(document.body, { childList: true, subtree: true });
 
-    // SPA navigation: reset state and re-inject.
+    // SPA navigation: reset and re-inject.
     let lastUrl = location.href;
     function onNav() {
         if (location.href === lastUrl) return;
@@ -14741,7 +14495,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     history.pushState = function (...a) { _push(...a); setTimeout(onNav, 0); };
     window.addEventListener('popstate', onNav);
 
-    // Retry injection until the row and playlist cache are available.
     let retryTimer = null, retryCount = 0;
     function scheduleRetry() {
         if (retryTimer) return;
@@ -14762,24 +14515,17 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
 (function () {
     'use strict';
 
-    // ---------------------------------------------------------------------
-    // Header search
-    // ---------------------------------------------------------------------
-    // The site's search popout ("Search everything...") gets a panel right below it: where to search
-    // (everything, title, tags, stars, creator, music), suggestions from the site's own autocomplete,
-    // include/exclude chips, filters and recent searches. A search goes to /search with the parameters
-    // that page reads itself (q, tags, stars, creator, musicArtist); the rest (sort, length, rating,
-    // quality, ratio, upload date, exclusions, title-only) stays in the page URL and is added to the
-    // page's API calls by the fetch wrapper below. /api/videos/search (used when there is text) ignores
-    // rating, quality, ratio and date, so those are applied to its results here.
-    // Plain text in "Everything" with no chips or filters is left to the site.
+    // --- Header search ---
+    // Panel under the site's search popout. /search reads q, tags, stars, creator, musicArtist itself; other
+    // params stay in the page URL and the fetch wrapper adds them to its API calls. /api/videos/search ignores
+    // rating, quality, ratio and date, so those are applied here. Plain "Everything" text is left to the site.
 
     const SCOPE_KEY  = 'pmvx_search_scope_v1';
     const FILTER_KEY = 'pmvx_search_filters_v1';
     const FOPEN_KEY  = 'pmvx_search_filters_open_v1';
     const RECENT_KEY = 'pmvx_search_recent_v1';
     const RECENT_MAX = 8;
-    const DUR_MAX = 30; // minutes; the slider's top end means "no maximum"
+    const DUR_MAX = 30; // minutes; slider's top end = no maximum
 
     const SCOPES = [
         { id: 'all',     label: 'Everything', ph: 'Search everything...' },
@@ -14826,14 +14572,12 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     let filtersOpen = !!load(FOPEN_KEY, false);
     let terms = [];       // [{ kind, name, neg }]
     let sugg = [];        // [{ kind, name, count }]
-    let hi = -1;          // highlighted suggestion
+    let hi = -1;
     let lastSearchFetch = 0;
 
     const isDefaultFilters = f => Object.keys(F_DEFAULT).every(k => f[k] === F_DEFAULT[k]);
 
-    // ---------------------------------------------------------------------
-    // Query <-> URL, and the /search page's API calls
-    // ---------------------------------------------------------------------
+    // --- Query <-> URL, and the /search page's API calls ---
     function buildParams(st) {
         const p = new URLSearchParams();
         if (st.text) p.set('q', st.text);
@@ -14858,8 +14602,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return p;
     }
 
-    // Page-URL parameters the /search page does not read itself; copied into its API calls when missing
-    // there (so the page's own filters, once set, win).
+    // Params /search does not read itself; added to its API calls only when missing (the page's own win).
     const EXTRA_KEYS = ['sort', 'durationMin', 'durationMax', 'minRating', 'minHeight', 'aspect', 'uploadDateFrom',
                         'excludeTags', 'excludeStars', 'excludeCreators'];
     function pageExtras() {
@@ -14944,9 +14687,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         } catch { return res; }
     };
 
-    // ---------------------------------------------------------------------
-    // The site's popout
-    // ---------------------------------------------------------------------
+    // --- The site's popout ---
     let container = null, mo = null, wasOpen = false;
     function findContainer() {
         if (container?.isConnected) return container;
@@ -14975,9 +14716,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         if (x && !x.matches('[aria-label="Search"]')) x.click();
     }
 
-    // ---------------------------------------------------------------------
-    // Panel
-    // ---------------------------------------------------------------------
+    // --- Panel ---
     const SVG_STAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/></svg>';
     const SVG_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
     const SVG_BAN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>';
@@ -15087,24 +14826,20 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         injectStyle();
         panel = mk('div'); panel.id = 'pmvsx';
         panel.setAttribute('data-pmvx-search', '1');
-        // The site closes (and clears) its search on any click outside its own box: keep ours inside it.
+        // The site closes and clears its search on any click outside its box: keep ours inside.
         panel.addEventListener('click', e => { e.stopPropagation(); if (dd && !dd.contains(e.target) && !e.target.closest('.pmvsx-selbtn')) closeDd(); });
-        // Keep the caret in the site's input while clicking chips and rows.
+        // Keep the caret in the site's input.
         panel.addEventListener('mousedown', e => { if (!e.target.closest('input')) e.preventDefault(); });
 
         const body = mk('div', 'pmvsx-body');
-        // Where to search
         const secScope = mk('div');
         const scopeLab = mk('div', 'pmvsx-lab', 'Search in');
         el.scopeHint = mk('span', 'r');
         scopeLab.appendChild(el.scopeHint);
         el.scopes = mk('div', 'pmvsx-row');
         secScope.append(scopeLab, el.scopes);
-        // Chips
         el.terms = mk('div', 'pmvsx-row');
-        // Suggestions / recent
         el.list = mk('div');
-        // Filters
         const secF = mk('div');
         const fRow = mk('div', 'pmvsx-row');
         el.ftoggle = mk('button', 'pmvsx-ftoggle'); el.ftoggle.type = 'button';
@@ -15132,7 +14867,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return panel;
     }
 
-    // Filter body: sort dropdown, length slider, chip rows.
     let dd = null;
     function closeDd() { if (dd) { dd.remove(); dd = null; el.sortBtn?.setAttribute('data-open', '0'); } }
     function chipRow(items, get, set) {
@@ -15154,7 +14888,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return lab;
     }
     function buildFilterBody(fb) {
-        // Sort
         const sel = mk('div', 'pmvsx-sel');
         el.sortBtn = mk('button', 'pmvsx-selbtn'); el.sortBtn.type = 'button';
         const st = mk('span', 't');
@@ -15169,7 +14902,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
                 row.onclick = () => { F.sort = o.v; save(FILTER_KEY, F); closeDd(); renderFilters(); };
                 dd.appendChild(row);
             });
-            panel.appendChild(dd); // inside the panel, so the site does not see an outside click
+            panel.appendChild(dd); // inside the panel: no outside click for the site
             const r = el.sortBtn.getBoundingClientRect();
             dd.style.left = Math.max(8, Math.min(r.left, innerWidth - 228)) + 'px';
             const h = dd.getBoundingClientRect().height;
@@ -15180,7 +14913,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         section(fb, 'Sort by', sel);
         fRenders.push(() => { st.textContent = (SORTS.find(o => o.v === F.sort) || SORTS[0]).t; });
 
-        // Length: dual slider with presets
         const wrap = mk('div');
         const pillRow = mk('div', 'pmvsx-pillrow'); const pill = mk('span', 'pmvsx-pill range'); pillRow.appendChild(pill);
         const slider = mk('div', 'pmvsx-slider'); const fill = mk('div', 'fill');
@@ -15303,7 +15035,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return { text: t, kind, neg };
     }
 
-    // Suggestions from the site's autocomplete (cached, debounced, last request wins).
+    // Site autocomplete: cached, debounced, last request wins.
     const acCache = new Map();
     async function acFetch(url) {
         if (acCache.has(url)) return acCache.get(url);
@@ -15421,7 +15153,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         save(RECENT_KEY, rec.slice(0, RECENT_MAX));
     }
 
-    // What a search would be right now: chips plus the input (as a chip when it is a tag/star/... ).
+    // Current search: chips plus the input (as a chip when prefixed).
     function snapshot() {
         const p = parseInput(nativeInput()?.value || '');
         const list = terms.map(t => ({ ...t }));
@@ -15429,7 +15161,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         if (p.text) { if (p.kind) addTerm(list, p.kind, p.text, p.neg); else text = p.text; }
         return { text, scope: p.kind ? 'all' : scope, terms: list, f: { ...F } };
     }
-    // Plain text in Everything without chips or filters: the site's own search.
     const isPlain = st => !st.terms.length && st.scope !== 'title' && isDefaultFilters(st.f);
     function renderGo() {
         if (!el.go) return;
@@ -15462,9 +15193,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return true;
     }
 
-    // ---------------------------------------------------------------------
-    // Open / close / placement
-    // ---------------------------------------------------------------------
+    // --- Open / close / placement ---
     let followUntil = 0;
     function place() {
         if (!panel || panel.dataset.open !== '1') return;
@@ -15503,7 +15232,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         if (open) show(); else hide();
     }
 
-    // Keys in the site's input (capture: before the site's own Enter/Escape handlers).
+    // Capture: before the site's own Enter/Escape handlers.
     window.addEventListener('keydown', e => {
         const inp = nativeInput();
         if (!inp || e.target !== inp || !isOpen() || e.isComposing) return;
@@ -15527,7 +15256,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
             stop(); closeDd(); hi = -1; renderList();
         }
     }, true);
-    // The site's magnifier button.
     window.addEventListener('click', e => {
         const btn = e.target?.closest?.('button[aria-label="Search"]');
         if (!btn || !findContainer()?.contains(btn) || !isOpen()) return;
@@ -15539,7 +15267,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     }, true);
     window.addEventListener('resize', () => { closeDd(); place(); });
 
-    // The header can be re-rendered by Vue: re-find the box (cheap) and pick up a missed open/close.
+    // Vue may re-render the header: re-find the box and catch a missed open/close.
     findContainer();
     syncOpen();
     setInterval(() => { findContainer(); syncOpen(); }, 1000);
@@ -15549,21 +15277,14 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
 (function () {
     'use strict';
 
-    // ---------------------------------------------------------------------
-    // Tag menu
-    // ---------------------------------------------------------------------
-    // On a video page a click on a tag, a star (model) or a music chip under the player opens a menu
-    // instead of leaving the page: require or exclude it in the site-wide filter, go on to where the
-    // chip normally leads (search results, or the star's profile), and that tag's / star's / song's
-    // videos in one column of cards in the site's own style, with sort and more on scroll.
-    // Ctrl/Cmd/Shift/middle click keep the site's own link.
-    // Videos: stars from /api/models/<slug> (the profile page's call, which knows aliases), falling
-    // back to /api/videos?stars= (exact tag); tags and music from /api/videos. The "_pmvx" marker keeps
-    // these calls out of the browse module's pagination.
+    // --- Tag menu ---
+    // Tag, star and music chips open a menu instead of navigating; Ctrl/Cmd/Shift/middle click keep the link.
+    // Stars load from /api/models/<slug> (knows aliases), else /api/videos?stars= (exact tag).
+    // The "_pmvx" marker keeps these calls out of the browse module's pagination.
 
     const SORT_KEY = 'pmvx_star_sort_v2';
     const PAGE = 16;
-    // The profile page's sort options; `alt` is the same order on /api/videos.
+    // Profile page sort values; `alt` is the same order on /api/videos.
     const SORTS = [
         { v: '-releaseDate',    alt: '-uploadDate',     t: 'Newest' },
         { v: 'releaseDate',     alt: 'uploadDate',      t: 'Oldest' },
@@ -15590,7 +15311,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     const qparam = (a, k) => { try { return new URL(a.getAttribute('href') || '', location.origin).searchParams.get(k) || ''; } catch { return ''; } };
     const textOf = a => ((a.querySelector('.truncate')?.textContent || a.textContent || '').replace(/\s+/g, ' ').trim());
 
-    // Chip kinds under the player. read(a) -> { name, term, title, ... } or null.
+    // Chips under the player. read(a) -> { name, term, title, ... } or null.
     const KINDS = {
         tag: {
             sel: 'a[href^="/search?tags="]', icon: SVG_HASH, what: 'tag', go: 'Search results',
@@ -15614,6 +15335,36 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     };
     const ANY_SEL = Object.values(KINDS).map(k => k.sel).join(', ');
     const kindOf = a => Object.keys(KINDS).find(k => a.matches(KINDS[k].sel)) || null;
+
+    // Card chips: buttons in the card link titled "Search for: …"; music reads "Artist - Song" (split on the
+    // first " - "). The "+N" button has another title and stays native.
+    const CARD_CHIP_SEL = 'a[href^="/video/"] button[title^="Search for:"]';
+    function readCardChip(b) {
+        const txt = (b.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!txt) return null;
+        if (txt[0] === '#') {
+            const t = txt.slice(1).trim();
+            return t ? { kind: 'tag', item: { name: t, title: '#' + t, term: t, href: '/search?' + new URLSearchParams({ tags: t }) } } : null;
+        }
+        if (!b.querySelector('svg') && !/green/.test(b.className)) return null;
+        const i = txt.indexOf(' - ');
+        const artist = (i > 0 ? txt.slice(0, i) : txt).trim(), song = (i > 0 ? txt.slice(i + 3) : '').trim();
+        if (!artist) return null;
+        const q = { musicArtist: artist }; if (song) q.musicSong = song;
+        return { kind: 'music', item: { name: artist, title: song ? `${artist} – ${song}` : artist, term: artist, artist, song, href: '/search?' + new URLSearchParams(q) } };
+    }
+    // Player links count only on video pages (a /model/ link elsewhere is plain navigation).
+    function chipAt(target) {
+        const b = target?.closest?.(CARD_CHIP_SEL);
+        if (b) { const r = readCardChip(b); return r ? { el: b, ...r } : null; }
+        // Also in the video info on playlist pages (#pmv-vinfo).
+        if (!isVideoPage() && !target?.closest?.('#pmv-vinfo')) return null;
+        const a = target?.closest?.(ANY_SEL);
+        if (!a) return null;
+        const kind = kindOf(a);
+        const item = kind && KINDS[kind].read(a);
+        return item ? { el: a, kind, item } : null;
+    }
 
     const isVideoPage = () => /^\/video\//.test(location.pathname);
     const currentVideoId = () => PMVX.state?.currentVideoId || location.pathname.match(/([a-f0-9]{24})\/?$/i)?.[1] || null;
@@ -15721,9 +15472,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         } catch { return []; }
     }
 
-    // ---------------------------------------------------------------------
-    // Data
-    // ---------------------------------------------------------------------
+    // --- Data ---
     async function getJson(url) {
         const res = await window.fetch(url, { credentials: 'include' });
         if (!res.ok) throw new Error('http ' + res.status);
@@ -15758,9 +15507,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         return fromVideos(`stars=${enc(it.name)}`, page);
     }
 
-    // ---------------------------------------------------------------------
-    // Menu
-    // ---------------------------------------------------------------------
+    // --- Menu ---
     let pop = null, anchor = null, cur = null, el = {};
 
     function close() {
@@ -15789,12 +15536,13 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         pop.style.top = Math.max(HEADER + 6, top) + 'px';
     }
 
-    function filterState() { try { return PMVX.tagFilter?.state(cur.item.term) || null; } catch { return null; } }
+    function filterState() { try { return PMVX.tagFilter?.state(cur.item.term, cur.kind) || null; } catch { return null; } }
     function setFilter(next) {
         if (!PMVX.tagFilter || !cur) return;
         const label = cur.kind === 'tag' ? '#' + cur.item.name : cur.item.name;
-        const res = PMVX.tagFilter.set(cur.item.term, next);
-        PMVX.toast?.(res === 'include' ? `+ ${label} required in filter` : res === 'exclude' ? `− ${label} excluded in filter` : `${label} removed from filter`,
+        const res = PMVX.tagFilter.set(cur.item.term, next, cur.kind);
+        const where = cur.kind === 'star' ? 'model filter' : 'filter';
+        PMVX.toast?.(res === 'include' ? `+ ${label} required in ${where}` : res === 'exclude' ? `− ${label} excluded in ${where}` : `${label} removed from ${where}`,
             res === 'exclude' ? 'red' : res === 'include' ? 'green' : null);
         renderFilter();
     }
@@ -15813,7 +15561,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         injectStyle();
         anchor = a;
         const K = KINDS[kind];
-        cur = { kind, item, href: a.getAttribute('href'), musicMode: item.song ? 'song' : 'artist', src: null, page: 0, total: null, star: null,
+        cur = { kind, item, href: item.href || a.getAttribute('href'), musicMode: item.song ? 'song' : 'artist', src: null, page: 0, total: null, star: null,
                 seen: new Set(), shown: 0, seq: 0, loading: false, more: true, error: false };
         pop = mk('div'); pop.id = 'pmvst'; pop.dataset.kind = kind;
         pop.setAttribute('data-pmvx-tag-menu', '1');
@@ -15829,7 +15577,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         head.append(el.av, who, x);
 
         const acts = mk('div', 'pmvst-acts');
-        // Filter: require / exclude (click again to remove); music filters on the artist.
+        // Click again to remove; music filters on the artist.
         if (PMVX.tagFilter) {
             const row = mk('div', 'pmvst-row');
             row.appendChild(mk('span', 'pmvst-lab', 'Filter'));
@@ -15841,7 +15589,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
             row.append(el.inc, el.exc);
             acts.appendChild(row);
         }
-        // Where the chip normally leads.
         const row2 = mk('div', 'pmvst-row');
         row2.appendChild(mk('span', 'pmvst-lab', 'Open'));
         const go = mk('a', 'pmvst-go'); go.href = cur.href || '#';
@@ -15855,7 +15602,6 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         };
         row2.appendChild(go);
         acts.appendChild(row2);
-        // Sort, and for music: this song or everything by the artist.
         const row3 = mk('div', 'pmvst-row');
         row3.appendChild(mk('span', 'pmvst-lab', 'Videos'));
         const sel = mk('select', 'pmvst-sort'); sel.title = 'Sort';
@@ -16016,23 +15762,20 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
         if (c.more && el.body && el.body.scrollHeight <= el.body.clientHeight + 100) load();
     }
 
-    // ---------------------------------------------------------------------
-    // Wiring
-    // ---------------------------------------------------------------------
+    // --- Wiring ---
     window.addEventListener('click', e => {
-        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || !isVideoPage()) return;
-        const a = e.target?.closest?.(ANY_SEL);
-        if (!a || a.closest('#pmvst')) return;
-        const kind = kindOf(a);
-        const item = kind && KINDS[kind].read(a);
-        if (!item) return;
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+        if (e.target?.closest?.('#pmvst')) return;
+        const c = chipAt(e.target);
+        if (!c) return;
+        // Also keeps the card's link from navigating.
         e.preventDefault();
         e.stopImmediatePropagation();
-        if (pop && anchor === a) { close(); return; }
-        open(a, kind, item);
+        if (pop && anchor === c.el) { close(); return; }
+        open(c.el, c.kind, c.item);
     }, true);
     document.addEventListener('pointerdown', e => {
-        if (!pop || pop.contains(e.target) || e.target?.closest?.(ANY_SEL)) return;
+        if (!pop || pop.contains(e.target) || chipAt(e.target)) return;
         // Toasts and the queue panel stay usable without closing the menu.
         if (e.target?.closest?.('#pmv-toast, #pmv-queue-floating')) return;
         close();
@@ -16040,7 +15783,7 @@ ${P} .tp-msg[data-err]{color:rgb(255,110,110);}`;
     window.addEventListener('keydown', e => { if (pop && e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(); } }, true);
     window.addEventListener('resize', () => place());
     window.addEventListener('scroll', e => { if (pop && !pop.contains(e.target)) place(); }, { passive: true, capture: true });
-    // Another filter change (filter panel, another tab) shows in the open menu.
+    // Filter changes elsewhere (panel, other tab) show in the open menu.
     window.addEventListener('storage', () => renderFilter());
     // Close on navigation, or when its chip is gone.
     let lastPath = location.pathname;

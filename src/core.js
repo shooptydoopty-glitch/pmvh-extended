@@ -1,12 +1,8 @@
-// ---------------------------------------------------------------------
-// Core
-// ---------------------------------------------------------------------
-// Shared namespace for the modules below (cache state, watch history,
-// cross-module hooks). Kept off `window` on purpose.
+// --- Core ---
+// Shared namespace for cross-module state and hooks; kept off `window` on purpose.
 const PMVX = {};
 
-// The script runs at document-start so the fetch interceptors see the
-// site's first API calls; modules that touch the DOM wait for <body>.
+// Runs at document-start so the fetch interceptors see the first API calls; DOM code waits for <body>.
 function whenBody(fn) {
     if (document.body) { fn(); return; }
     const root = document.documentElement;
@@ -19,10 +15,8 @@ function whenBody(fn) {
     mo.observe(root, { childList: true });
 }
 
-// ---------------------------------------------------------------------
-// Performance mode (Settings): how often pages are rescanned, visual
-// effects, and how many background requests run at once.
-// ---------------------------------------------------------------------
+// --- Performance mode (Settings): how often pages are rescanned, visual ---
+// effects and concurrent background requests.
 const PERF_KEY = 'pmv_perf_v1';
 const PERF_MODES = {
     smooth:   { scanMs: 0,   effects: true,  lookups: 3 },
@@ -39,8 +33,7 @@ PMVX.setPerfMode = mode => {
     applyEffectsMode();
 };
 
-// Without effects: no backdrop blur, transitions or animations in the
-// script's UI, and none of the site's own blur and pulsing badges either.
+// No effects: no blur, transitions or animations in our UI, nor the site's blur and pulsing badges.
 function applyEffectsMode() {
     const id = 'pmvx-reduced-effects';
     const existing = document.getElementById(id);
@@ -61,9 +54,8 @@ function applyEffectsMode() {
 }
 applyEffectsMode();
 
-// Videos the user just acted on (saved, removed, rejected). Filters keep showing them until the
-// filter is applied again or the page changes, so an action never makes a card vanish under the
-// cursor. Each filter module calls clearActed() when the user re-applies it.
+// Acted-on videos stay visible until a filter is re-applied (clearActed) or the page changes,
+// so a card never vanishes under the cursor.
 let actedPath = location.pathname;
 PMVX.acted = new Set();
 function actedFresh() {
@@ -73,8 +65,7 @@ PMVX.markActed = id => { if (!id) return; actedFresh(); PMVX.acted.add(id); };
 PMVX.isActed = id => { actedFresh(); return !!id && PMVX.acted.has(id); };
 PMVX.clearActed = () => PMVX.acted.clear();
 
-// Filter terms: "=term" matches only as a whole word ("=ch" hits "ch" and "big ch", not
-// "challenge"); any other term matches anywhere in the text. Texts and terms are lower case.
+// "=term" matches a whole word only ("=ch" not "challenge"); other terms match anywhere. Lower case.
 const termWordRes = new Map();
 PMVX.termMatch = (hay, term) => {
     if (!hay || !term) return false;
@@ -90,15 +81,12 @@ PMVX.termMatch = (hay, term) => {
     }
     return hay.includes(term);
 };
-// Smart quotes from macOS / iOS keyboards count as plain quotes.
 PMVX.plainQuotes = s => String(s ?? '').replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"').replace(/[\u2018\u2019\u201A\u201B]/g, "'");
 PMVX.termLabel = term => (term && term.length > 1 && term[0] === '=') ? term.slice(1) : term;
 PMVX.isWordTerm = term => !!term && term.length > 1 && term[0] === '=';
 
-// Card filters register a check here; true while any of them can hide cards on this page.
-// Where an in/not-in-playlist filter would hide (nearly) everything: a playlist's own page and
-// the favourites views (profile Favorites tab, the homepage Favorites pill or content chip).
-// Checked per card, so the DOM lookup is cached for 250 ms.
+// Playlist pages and favourites views, where in/not-in-playlist filters would hide nearly everything.
+// Called per card, so cached for 250 ms.
 let pfxAt = 0, pfxVal = false;
 PMVX.playlistFilterExempt = () => {
     const now = performance.now();
@@ -117,12 +105,10 @@ PMVX.playlistFilterExempt = () => {
     pfxVal = v;
     return v;
 };
-// The playlist whose page this is (its own videos are always "in" it), or null.
 PMVX.currentPlaylistPageId = () => location.pathname.match(/^\/playlists\/([a-f0-9]{24})/i)?.[1] || null;
 
 PMVX.apiTaps = [];
-// Content flags [API key, label]: the site's own moderation list first (Nudity = hasExplicitContent),
-// then three that only some lists carry. Order matters: the flag cache stores them as bits.
+// [API key, label]. Order matters: the flag cache stores them as bits.
 PMVX.contentFlags = [
     ['hasExplicitContent', 'Nudity'], ['hasGayContent', 'Gay'], ['hasTransContent', 'Trans'],
     ['hasExtremeContent', 'Extreme'], ['hasVoiceOver', 'Voice-over'], ['isRemix', 'Remix'],
@@ -132,7 +118,7 @@ PMVX.contentFlags = [
 PMVX.filterChecks = [];
 PMVX.anyCardFilterActive = () => PMVX.filterChecks.some(fn => { try { return !!fn(); } catch { return false; } });
 
-// Coalesces calls into one run per frame, spaced at least `scanMs` apart.
+// One run per frame, at least `scanMs` apart.
 PMVX.scheduler = fn => {
     let pending = false, last = 0;
     return () => {

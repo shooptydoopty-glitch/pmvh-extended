@@ -14,6 +14,8 @@
 
 <br>
 
+> **New in 1.2.87:** a playlist score from your own filters · a playlist check on video pages · *More about this video* on playlist pages · Up next from the header on any page · separate model filters · the tag menu on every card's tags.
+
 **PMVH Extended** turns [PMVHaven](https://pmvhaven.com) into a proper playlist tool. See at a glance what you have already saved, add videos in one click, line up what plays next, and filter videos and playlists by their tags — all inside the site you already use, styled to fit right in.
 
 <table>
@@ -23,8 +25,8 @@
 <td width="33%" valign="top"><b>Up next queue</b><br>Your own queue next to Recommended, auto-refilled with videos that match your taste.</td>
 </tr>
 <tr>
-<td valign="top"><b>Filter by tags</b><br>Hide videos and even whole playlists by tags, performers, rating, length or watch status — and see what was hidden, and why.</td>
-<td valign="top"><b>Better playlist pages</b><br>Search tags and performers in the queue, sort it, and skip filtered videos while playing.</td>
+<td valign="top"><b>Filter by tags</b><br>Hide videos and even whole playlists by tags, models, rating, length or watch status — and see what was hidden, and why. Playlists get a score for how well they fit.</td>
+<td valign="top"><b>Better playlist pages</b><br>Search tags and performers in the queue, sort it, skip filtered videos while playing, and open the video's models and playlists in place.</td>
 <td valign="top"><b>Tags and models in one click</b><br>Vote on a video's tags and models, or add new ones, from a compact menu. Remappable hotkeys and <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd> too.</td>
 </tr>
 </table>
@@ -95,9 +97,12 @@ A frame preview follows the mouse along the seek bar, in normal and fullscreen m
 
 Line up videos from any card or with a hotkey. The queue lives next to *Recommended* and in the header, survives reloads, and <kbd>N</kbd> follows it.
 
-<img src="docs/screenshots/05-up-next.png" alt="Up next queue next to the player" width="440">
-
-*① The Up next queue sits above Recommended; rows show your playlists, and why your filter would hide a video. ② Clear the videos you already played (it asks once more first). ③ Bring back an earlier queue — cleared or replaced queues are kept for 14 days.*
+<table>
+<tr>
+<td width="50%" valign="top"><img src="docs/screenshots/05-up-next.png" alt="Up next queue next to the player"><br><sub>① The Up next queue sits above Recommended; rows show your playlists, and why your filter would hide a video. ② Clear the videos you already played (a second click confirms, then an Undo toast). ③ Bring back an earlier queue — cleared or replaced queues are kept for 14 days.</sub></td>
+<td width="50%" valign="top"><img src="docs/screenshots/26-up-next-popout.png" alt="Up next from the header"><br><sub>① Up next in the header, with the number of queued videos. ② The same queue on any page; play a video from it and Up next docks next to the player.</sub></td>
+</tr>
+</table>
 
 <details>
 <summary>More</summary>
@@ -134,6 +139,7 @@ Your saved searches sit right next to *More Filters*, and on the homepage the si
 *① The funnel in the header opens the filter. ② On/off switch. ③ Content flags: click to hide, again for only these, again to clear. ④ Copy the filter from the playlist pages.*
 
 - Terms, content flags, rating, length, playlists, watched status and one of your saved searches; an on/off switch keeps your settings.
+- Models have their own *Exclude models* / *Require models* lists; plain terms match titles, uploaders, tags and music.
 - Content flags are the site's own (Nudity, Gay, Trans, Extreme, Voice-over, Remix, Promo, Seizure warning) plus Funscript, Vertical and Music. Flags a list does not include are looked up in batches of 100 and remembered; a video whose flag is still unknown is never hidden.
 - Put a term in quotes, or click it, to match only the whole word: `"ch"` no longer hits *challenge*.
 - Click a tag, star or song under the player to require or exclude it in the filter (the quick menu).
@@ -150,7 +156,7 @@ The site's search box in the header gets a panel right below it. Choose where to
 - Shortcuts while typing: `#tag`, `*star`, `@creator`; a leading `-` excludes (`-#tag`).
 - Results open on the site's own search page, so its own filters keep working on top.
 
-**Quick menu.** On a video page, clicking a tag, star or song under the player opens a small menu instead of leaving the page: require or exclude it in the filter, go on to the search results (or the star's profile) as usual, and browse its videos right there — in the site's own card style, with playlist badges, watched marks, an Up next button on each and more as you scroll. <kbd>Ctrl</kbd>/<kbd>⌘</kbd>-click still follows the link.
+**Quick menu.** Clicking a tag, star or song under the player — or a tag or song chip on any video card — opens a small menu instead of leaving the page: require or exclude it in the filter, go on to the search results (or the star's profile) as usual, and browse its videos right there — in the site's own card style, with playlist badges, watched marks, an Up next button on each and more as you scroll. <kbd>Ctrl</kbd>/<kbd>⌘</kbd>-click still follows the link.
 
 <table>
 <tr>
@@ -170,11 +176,17 @@ The queue search finally looks at **tags, performers and descriptions**, not jus
 </tr>
 </table>
 
+**More about this video.** Under the playing video, one click opens what the video page would show: its models, the playlists it is in (with the playlist check below) and more from the uploader — without leaving the playlist.
+
+<img src="docs/screenshots/25-more-info.png" alt="More about this video on a playlist page" width="620">
+
+*① More about this video, under the player. ② Models. ③ Playlists with this video, with overlap and score. ④ More from the uploader, with playlist badges and card buttons.*
+
 <details>
 <summary>More</summary>
 
 - Drawer: excluded and required tags, default terms that apply in every playlist, in / not in playlist (the playlist you are viewing does not count), watched/unwatched, content flags, rating and duration sliders, saved search. Changes apply on <kbd>Enter</kbd> or *Filters*.
-- Search syntax: `-term`, `"two words"`, `!in`, `!out`, `!in:name`, `!out:name`, `!seen`, `!unseen`.
+- Search syntax: `-term`, `"two words"`, `=word` (whole word), `!in`, `!out`, `!in:name`, `!out:name`, `!seen`, `!unseen`.
 - **Filter-aware playback**: next and auto-advance skip hidden videos, and the *Up Next* preview shows the real next video. <kbd>N</kbd> follows the sort order.
 - *Fetch all* loads the complete playlist; deep links (`?index=N`) open at the right video even beyond the first page.
 
@@ -184,11 +196,19 @@ The queue search finally looks at **tags, performers and descriptions**, not jus
 
 On `/playlists`, filter playlists **by what is inside them**: hide a playlist when more than, say, 10 % of its videos carry a tag you don't like. Every card shows how many of its videos you already have — so *0 % overlap* means nothing but new videos.
 
+Each scanned playlist also gets a **score**: the share of its videos that pass your filters (green 70+, yellow 40+, red below), so you can see how well it fits before you open it.
+
 ![Playlist browser with overlap badges](docs/screenshots/14-playlists-browser.png)
-*① Filters button with on/off and a summary. ② Overlap with your own playlists on every card. ③ Follow a playlist straight from its card.*
+*① Filters button with on/off and a summary. ② Overlap with your own playlists on every card. ③ Score from your filters. Hover a card to follow the playlist straight from it.*
 
 ![Playlist filter panel](docs/screenshots/15-playlists-filter-panel.png)
 *① Exclude a tag above a share of the videos; the count shows how many playlists on the page it removes. ② Scan page / Auto-scan. ③ Result. ④ Your playlist counted for the overlap badge.*
+
+**On video pages too.** *Playlists with this video* gets a Scan button: it shows how much of each playlist you already have, its score, and which ones fail your filters — handy for finding the next playlist to follow.
+
+<img src="docs/screenshots/24-mini-checker.png" alt="Playlist check on a video page" width="620">
+
+*① Scan, with the result next to it. ② Overlap with your playlists. ③ The site's video count turns purple: in your playlists / total. ④ Score; ⊘ marks a playlist that fails your filters (⑤, dimmed).*
 
 <details>
 <summary>More</summary>
@@ -267,9 +287,13 @@ node build.js   # writes pmvh-extended.user.js
 |------|----------|
 | `src/header.js` | Userscript metadata |
 | `src/core.js` | Shared namespace, startup and performance helpers |
-| `src/filter.js` | Playlist-page filter and the `/playlists` filter |
-| `src/hud.js` | Playlist cache, badges, HUD, Up next, site-wide filter, settings, hotkeys, seekbar preview |
+| `src/filter/` | Playlist-page filter (`01`–`05`), the `/playlists` filter (`06`) and the playlist check on video pages (`07`) |
+| `src/hud/` | Playlist cache and API (`01`–`02`), settings and hotkey editor (`03`–`05`), Up next (`06`–`07`), player, HUD and playlist buttons (`08`–`10`), site-wide filter (`11`), homepage and pagination (`12`), badges (`13`), notifications and menus (`14`–`15`), seekbar preview (`16`), hotkeys (`17`), startup (`18`) |
 | `src/browse.js` | In / not-in-playlist filter in the site's filter menu, stored with saved filters |
+| `src/search.js` | Search panel under the site's search box |
+| `src/tagmenu.js` | Menu for tag, star and music chips |
+
+The files in `src/filter/` and `src/hud/` are joined in file-name order inside one function each, so they share their top-level names. The script runs as one file because userscript managers install one file.
 
 Bug reports and pull requests are welcome. How the screenshots were made is described in [docs/screenshots](docs/screenshots/README.md).
 

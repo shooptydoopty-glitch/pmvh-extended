@@ -6,7 +6,6 @@
     const SETTINGS_KEY = 'pmvbpf_settings_v1';
     const PANEL_PAGES = ['/', '/browse', '/popular', '/trending', '/search',
                          '/discover', '/all-videos', '/watch', '/watch-new'];
-    // Prefix-matched pages (dynamic id segment), e.g. a creator's upload grid.
     const PANEL_PREFIX_PAGES = ['/profile/'];
     const HIDE_ATTR   = 'data-pmvbpf-hidden';
 
@@ -25,9 +24,7 @@
         (document.head || document.documentElement).appendChild(style);
     })();
 
-    // ---------------------------------------------------------------------
-    // Playlist cache
-    // ---------------------------------------------------------------------
+    // --- Playlist cache ---
 
     let playlistsMap = new Map();
     let reverseMap   = new Map();
@@ -63,7 +60,7 @@
         } catch { return false; }
     }
 
-    // Same-window cache-ready event from the core (faster than the storage event).
+    // Same-window event from the core; faster than the storage event.
     window.addEventListener('pmv:cache-ready', () => {
         loadCache();
         if (playlistFilterMode !== 'any') applyFilter();
@@ -73,7 +70,7 @@
         if (e.key === CACHE_KEY) { loadCache(); if (playlistFilterMode !== 'any') applyFilter(); }
     });
 
-    // Playlists that count toward in/not-in. Empty = any playlist.
+    // Playlists that count for in/not-in; empty = any playlist.
     let selectedPlaylistIds = [];
     (function loadPickerSettings() {
         try {
@@ -95,20 +92,17 @@
             memberOf = s?.reverse?.size ? s.reverse.get(videoId) : reverseMap.get(videoId);
         } catch { memberOf = reverseMap.get(videoId); }
         if (!memberOf || !memberOf.size) return false;
-        if (!selectedPlaylistIds.length) return true; // empty selection = any playlist
+        if (!selectedPlaylistIds.length) return true;
         return selectedPlaylistIds.some(id => memberOf.has(id));
     }
 
-    // ---------------------------------------------------------------------
-    // Fetch interceptor
-    // ---------------------------------------------------------------------
-    // Records the last /api/videos URL and indexes thumbnail -> video id.
+    // --- Fetch interceptor ---
 
     const thumbToId = new Map();
     let lastApiUrl  = null;
     let lastApiPage = 1;
 
-    // Shared with the other modules (first to load defines it): one JSON parse per response.
+    // PMVX.resJson is shared (first module defines it): one JSON parse per response.
     const pmvResJson = PMVX.resJson || (PMVX.resJson = res => {
         if (!res.__pmvJson) {
             try { res.__pmvJson = res.clone().json(); }
@@ -141,7 +135,7 @@
                     indexVideos(json?.data?.videos || json?.videos || json?.data || []);
                 }).catch(() => {});
             }
-            // Playlist-detail responses also carry thumbnailUrl -> _id mappings.
+            // Playlist-detail responses carry thumbnailUrl -> _id too.
             if (/\/api\/playlists\/[a-f0-9]{24}/.test(rawUrl)) {
                 pmvResJson(res).then(json => {
                     const details = json?.data?.videoDetails || json?.videoDetails || [];
@@ -162,9 +156,7 @@
         });
     }
 
-    // ---------------------------------------------------------------------
-    // Reading cards
-    // ---------------------------------------------------------------------
+    // --- Reading cards ---
 
     function getVideoId(card) {
         if (card.dataset.videoId) return card.dataset.videoId;
@@ -172,7 +164,6 @@
         const huds = PMVX.state;
         if (img?.src) {
             const clean = img.src.split('?')[0];
-            // Resolution order: own interceptor cache, core thumbnailIndex, core titleIndex, raw URL hex.
             if (thumbToId.has(clean)) return thumbToId.get(clean);
             if (huds?.thumbnailIndex?.has(clean)) return huds.thumbnailIndex.get(clean);
             const alt = img.alt?.trim().toLowerCase();
@@ -209,19 +200,13 @@
         return all;
     }
 
-    // ---------------------------------------------------------------------
-    // Filter state
-    // ---------------------------------------------------------------------
+    // --- Filter state ---
 
     let playlistFilterMode = 'any';
-    // Staged values, shown by the chips. Committed by the site's Apply button where the page has one
-    // (homepage filter menu), otherwise straight away.
+    // Staged; committed by the site's Apply where there is one (homepage), otherwise at once.
     let pendingMode = 'any';
 
-    // ---------------------------------------------------------------------
-    // Mode
-    // ---------------------------------------------------------------------
-    // Filters only cards already loaded; the observer below re-filters new batches.
+    // --- Mode ---
 
     PMVX.filterChecks.push(() => playlistFilterMode !== 'any' && isFilterPage() && !PMVX.playlistFilterExempt());
 
@@ -233,7 +218,6 @@
         applyFilter();
     }
 
-    // Commits the staged mode and playlist selection.
     function commitPending() {
         if (pendingIds.join(',') !== selectedPlaylistIds.join(',')) {
             selectedPlaylistIds = pendingIds.slice();
@@ -248,15 +232,12 @@
         }
         return null;
     }
-    // Stage on pages with the site's Apply button, apply immediately elsewhere.
     function stagedChange() {
         if (nativeApplyBtn()) updateBtnStyles();
         else commitPending();
     }
 
-    // ---------------------------------------------------------------------
-    // Apply filter
-    // ---------------------------------------------------------------------
+    // --- Apply filter ---
 
     function applyFilter() {
         if (!isFilterPage()) return 0;
@@ -269,7 +250,7 @@
         const cards = getAllCards();
         let visible = 0, hidden = 0;
 
-        // Off on the favourites views: everything there would count as "in a playlist" or not.
+        // Off on favourites views, where every card would count as in (or not in) a playlist.
         const off = playlistFilterMode === 'any' || PMVX.playlistFilterExempt();
         cards.forEach(card => {
             if (off) {
@@ -279,7 +260,6 @@
             const id = getVideoId(card);
             if (!id) { card.removeAttribute(HIDE_ATTR); return; }
             const inAny = isInPlaylist(id);
-            // Cards just acted on stay until the filter is applied again.
             const show  = (playlistFilterMode === 'in' ? inAny : !inAny) || PMVX.isActed(id);
             if (show) { card.removeAttribute(HIDE_ATTR); visible++; }
             else      { card.setAttribute(HIDE_ATTR, '1'); hidden++; }
@@ -289,9 +269,7 @@
         return visible;
     }
 
-    // ---------------------------------------------------------------------
-    // Counter
-    // ---------------------------------------------------------------------
+    // --- Counter ---
 
     function updateCounter(shown, hidden) {
         const el = document.getElementById('pmvbpf-counter');
@@ -305,10 +283,7 @@
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Observer
-    // ---------------------------------------------------------------------
-    // Re-filters when Vue renders new cards.
+    // --- Observer ---
 
     new MutationObserver(muts => {
         if (playlistFilterMode === 'any') return;
@@ -326,13 +301,9 @@
         if (hasNew) requestAnimationFrame(applyFilter);
     }).observe(document.body, { childList: true, subtree: true });
 
-    // ---------------------------------------------------------------------
-    // UI injection
-    // ---------------------------------------------------------------------
-    // Chips in the site's filter row (the "Content:" chips), same shape and colours. One chip cycles
-    // Any → Not in playlist → In playlist → Any; a second one opens an inline list of the playlists
-    // that count. On the homepage the choice is staged until the site's Apply button and is stored
-    // with a saved filter (see the saved-search hooks below).
+    // --- UI injection ---
+    // Chips in the site's "Content:" row: one cycles Any → Not in → In playlist, one lists the playlists
+    // that count. On the homepage the choice waits for the site's Apply and is stored with saved filters.
 
     let injected = false;
 
@@ -367,7 +338,7 @@
 
     function injectButtons() {
         if (injected || !isFilterPage()) return;
-        // Already there (e.g. an SPA navigation reset the flag but the row survived): keep one set.
+        // SPA navigation can reset the flag while the row survives: keep one set.
         const ids = ['pmvbpf-sep', 'pmvbpf-btn-in', 'pmvbpf-btn-pick', 'pmvbpf-counter', 'pmvbpf-panel'];
         ids.forEach(id => [...document.querySelectorAll('#' + id)].slice(1).forEach(el => el.remove()));
         if (document.getElementById('pmvbpf-btn-in')?.isConnected) { injected = true; updateBtnStyles(); return; }
@@ -447,7 +418,6 @@
         NF_renderChips = renderChips;
         renderChips();
         window.addEventListener('pmv:cache-ready', renderChips);
-        // Full width directly under the native row, inside the site's filter menu.
         if (row.parentElement) row.parentElement.insertBefore(panel, row.nextSibling);
 
         const counter = Object.assign(document.createElement('span'), { id: 'pmvbpf-counter' });
@@ -461,7 +431,7 @@
     }
     let NF_renderChips = null;
 
-    // Colours per state via data-state: inline styles are lost when Vue re-renders, data-* is not.
+    // State colours via data-state: Vue re-renders drop inline styles, not data-*.
     function injectPanelStyle() {
         if (document.getElementById('pmvbpf-panel-style')) return;
         const st = document.createElement('style');
@@ -523,12 +493,9 @@
         }
     }, true);
 
-    // ---------------------------------------------------------------------
-    // Saved filters
-    // ---------------------------------------------------------------------
-    // Saving a filter in the site's menu stores this choice with it, as filters.pmvxPlaylists
-    // ({ mode, ids }), and locally under the filter's name in case the server drops the extra key.
-    // Loading that saved filter restores it; a saved filter without one turns this filter off.
+    // --- Saved filters ---
+    // Saved as filters.pmvxPlaylists ({ mode, ids }), plus locally by name in case the server drops it.
+    // Loading a saved filter without it turns this filter off.
 
     const SAVED_KEY = 'pmvbpf_saved_v1';
     const SAVED_FIELD = 'pmvxPlaylists';
@@ -543,7 +510,6 @@
         return pendingMode === 'any' ? null : { mode: pendingMode, ids: pendingIds.slice() };
     }
 
-    // Called from the fetch wrapper for POST /api/saved-searches. Returns the response.
     async function saveWithPlaylists(orig, ctx, args) {
         const init = args[1] || {};
         let body;
@@ -567,7 +533,7 @@
         else if (json?.data?._id) savedList = [json.data, ...savedList.filter(s => s._id !== json.data._id)];
     }
 
-    // A click on an entry in the site's saved-filter list (name + summary + delete button).
+    // Click on an entry in the site's saved-filter list.
     document.addEventListener('click', e => {
         if (!isFilterPage()) return;
         if (e.target.closest('button')) return; // delete / cancel
@@ -585,14 +551,13 @@
         }, 0);
     }, true);
 
-    // Re-inject the buttons if Vue replaces the filter row.
     new MutationObserver(() => {
         if (!isFilterPage() || document.getElementById('pmvbpf-btn-in')) return;
         injected = false;
         injectButtons();
     }).observe(document.body, { childList: true, subtree: true });
 
-    // SPA navigation: reset state and re-inject.
+    // SPA navigation: reset and re-inject.
     let lastUrl = location.href;
     function onNav() {
         if (location.href === lastUrl) return;
@@ -608,7 +573,6 @@
     history.pushState = function (...a) { _push(...a); setTimeout(onNav, 0); };
     window.addEventListener('popstate', onNav);
 
-    // Retry injection until the row and playlist cache are available.
     let retryTimer = null, retryCount = 0;
     function scheduleRetry() {
         if (retryTimer) return;

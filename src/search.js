@@ -1,24 +1,17 @@
 (function () {
     'use strict';
 
-    // ---------------------------------------------------------------------
-    // Header search
-    // ---------------------------------------------------------------------
-    // The site's search popout ("Search everything...") gets a panel right below it: where to search
-    // (everything, title, tags, stars, creator, music), suggestions from the site's own autocomplete,
-    // include/exclude chips, filters and recent searches. A search goes to /search with the parameters
-    // that page reads itself (q, tags, stars, creator, musicArtist); the rest (sort, length, rating,
-    // quality, ratio, upload date, exclusions, title-only) stays in the page URL and is added to the
-    // page's API calls by the fetch wrapper below. /api/videos/search (used when there is text) ignores
-    // rating, quality, ratio and date, so those are applied to its results here.
-    // Plain text in "Everything" with no chips or filters is left to the site.
+    // --- Header search ---
+    // Panel under the site's search popout. /search reads q, tags, stars, creator, musicArtist itself; other
+    // params stay in the page URL and the fetch wrapper adds them to its API calls. /api/videos/search ignores
+    // rating, quality, ratio and date, so those are applied here. Plain "Everything" text is left to the site.
 
     const SCOPE_KEY  = 'pmvx_search_scope_v1';
     const FILTER_KEY = 'pmvx_search_filters_v1';
     const FOPEN_KEY  = 'pmvx_search_filters_open_v1';
     const RECENT_KEY = 'pmvx_search_recent_v1';
     const RECENT_MAX = 8;
-    const DUR_MAX = 30; // minutes; the slider's top end means "no maximum"
+    const DUR_MAX = 30; // minutes; slider's top end = no maximum
 
     const SCOPES = [
         { id: 'all',     label: 'Everything', ph: 'Search everything...' },
@@ -65,14 +58,12 @@
     let filtersOpen = !!load(FOPEN_KEY, false);
     let terms = [];       // [{ kind, name, neg }]
     let sugg = [];        // [{ kind, name, count }]
-    let hi = -1;          // highlighted suggestion
+    let hi = -1;
     let lastSearchFetch = 0;
 
     const isDefaultFilters = f => Object.keys(F_DEFAULT).every(k => f[k] === F_DEFAULT[k]);
 
-    // ---------------------------------------------------------------------
-    // Query <-> URL, and the /search page's API calls
-    // ---------------------------------------------------------------------
+    // --- Query <-> URL, and the /search page's API calls ---
     function buildParams(st) {
         const p = new URLSearchParams();
         if (st.text) p.set('q', st.text);
@@ -97,8 +88,7 @@
         return p;
     }
 
-    // Page-URL parameters the /search page does not read itself; copied into its API calls when missing
-    // there (so the page's own filters, once set, win).
+    // Params /search does not read itself; added to its API calls only when missing (the page's own win).
     const EXTRA_KEYS = ['sort', 'durationMin', 'durationMax', 'minRating', 'minHeight', 'aspect', 'uploadDateFrom',
                         'excludeTags', 'excludeStars', 'excludeCreators'];
     function pageExtras() {
@@ -183,9 +173,7 @@
         } catch { return res; }
     };
 
-    // ---------------------------------------------------------------------
-    // The site's popout
-    // ---------------------------------------------------------------------
+    // --- The site's popout ---
     let container = null, mo = null, wasOpen = false;
     function findContainer() {
         if (container?.isConnected) return container;
@@ -214,9 +202,7 @@
         if (x && !x.matches('[aria-label="Search"]')) x.click();
     }
 
-    // ---------------------------------------------------------------------
-    // Panel
-    // ---------------------------------------------------------------------
+    // --- Panel ---
     const SVG_STAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/></svg>';
     const SVG_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
     const SVG_BAN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>';
@@ -326,24 +312,20 @@
         injectStyle();
         panel = mk('div'); panel.id = 'pmvsx';
         panel.setAttribute('data-pmvx-search', '1');
-        // The site closes (and clears) its search on any click outside its own box: keep ours inside it.
+        // The site closes and clears its search on any click outside its box: keep ours inside.
         panel.addEventListener('click', e => { e.stopPropagation(); if (dd && !dd.contains(e.target) && !e.target.closest('.pmvsx-selbtn')) closeDd(); });
-        // Keep the caret in the site's input while clicking chips and rows.
+        // Keep the caret in the site's input.
         panel.addEventListener('mousedown', e => { if (!e.target.closest('input')) e.preventDefault(); });
 
         const body = mk('div', 'pmvsx-body');
-        // Where to search
         const secScope = mk('div');
         const scopeLab = mk('div', 'pmvsx-lab', 'Search in');
         el.scopeHint = mk('span', 'r');
         scopeLab.appendChild(el.scopeHint);
         el.scopes = mk('div', 'pmvsx-row');
         secScope.append(scopeLab, el.scopes);
-        // Chips
         el.terms = mk('div', 'pmvsx-row');
-        // Suggestions / recent
         el.list = mk('div');
-        // Filters
         const secF = mk('div');
         const fRow = mk('div', 'pmvsx-row');
         el.ftoggle = mk('button', 'pmvsx-ftoggle'); el.ftoggle.type = 'button';
@@ -371,7 +353,6 @@
         return panel;
     }
 
-    // Filter body: sort dropdown, length slider, chip rows.
     let dd = null;
     function closeDd() { if (dd) { dd.remove(); dd = null; el.sortBtn?.setAttribute('data-open', '0'); } }
     function chipRow(items, get, set) {
@@ -393,7 +374,6 @@
         return lab;
     }
     function buildFilterBody(fb) {
-        // Sort
         const sel = mk('div', 'pmvsx-sel');
         el.sortBtn = mk('button', 'pmvsx-selbtn'); el.sortBtn.type = 'button';
         const st = mk('span', 't');
@@ -408,7 +388,7 @@
                 row.onclick = () => { F.sort = o.v; save(FILTER_KEY, F); closeDd(); renderFilters(); };
                 dd.appendChild(row);
             });
-            panel.appendChild(dd); // inside the panel, so the site does not see an outside click
+            panel.appendChild(dd); // inside the panel: no outside click for the site
             const r = el.sortBtn.getBoundingClientRect();
             dd.style.left = Math.max(8, Math.min(r.left, innerWidth - 228)) + 'px';
             const h = dd.getBoundingClientRect().height;
@@ -419,7 +399,6 @@
         section(fb, 'Sort by', sel);
         fRenders.push(() => { st.textContent = (SORTS.find(o => o.v === F.sort) || SORTS[0]).t; });
 
-        // Length: dual slider with presets
         const wrap = mk('div');
         const pillRow = mk('div', 'pmvsx-pillrow'); const pill = mk('span', 'pmvsx-pill range'); pillRow.appendChild(pill);
         const slider = mk('div', 'pmvsx-slider'); const fill = mk('div', 'fill');
@@ -542,7 +521,7 @@
         return { text: t, kind, neg };
     }
 
-    // Suggestions from the site's autocomplete (cached, debounced, last request wins).
+    // Site autocomplete: cached, debounced, last request wins.
     const acCache = new Map();
     async function acFetch(url) {
         if (acCache.has(url)) return acCache.get(url);
@@ -660,7 +639,7 @@
         save(RECENT_KEY, rec.slice(0, RECENT_MAX));
     }
 
-    // What a search would be right now: chips plus the input (as a chip when it is a tag/star/... ).
+    // Current search: chips plus the input (as a chip when prefixed).
     function snapshot() {
         const p = parseInput(nativeInput()?.value || '');
         const list = terms.map(t => ({ ...t }));
@@ -668,7 +647,6 @@
         if (p.text) { if (p.kind) addTerm(list, p.kind, p.text, p.neg); else text = p.text; }
         return { text, scope: p.kind ? 'all' : scope, terms: list, f: { ...F } };
     }
-    // Plain text in Everything without chips or filters: the site's own search.
     const isPlain = st => !st.terms.length && st.scope !== 'title' && isDefaultFilters(st.f);
     function renderGo() {
         if (!el.go) return;
@@ -701,9 +679,7 @@
         return true;
     }
 
-    // ---------------------------------------------------------------------
-    // Open / close / placement
-    // ---------------------------------------------------------------------
+    // --- Open / close / placement ---
     let followUntil = 0;
     function place() {
         if (!panel || panel.dataset.open !== '1') return;
@@ -742,7 +718,7 @@
         if (open) show(); else hide();
     }
 
-    // Keys in the site's input (capture: before the site's own Enter/Escape handlers).
+    // Capture: before the site's own Enter/Escape handlers.
     window.addEventListener('keydown', e => {
         const inp = nativeInput();
         if (!inp || e.target !== inp || !isOpen() || e.isComposing) return;
@@ -766,7 +742,6 @@
             stop(); closeDd(); hi = -1; renderList();
         }
     }, true);
-    // The site's magnifier button.
     window.addEventListener('click', e => {
         const btn = e.target?.closest?.('button[aria-label="Search"]');
         if (!btn || !findContainer()?.contains(btn) || !isOpen()) return;
@@ -778,7 +753,7 @@
     }, true);
     window.addEventListener('resize', () => { closeDd(); place(); });
 
-    // The header can be re-rendered by Vue: re-find the box (cheap) and pick up a missed open/close.
+    // Vue may re-render the header: re-find the box and catch a missed open/close.
     findContainer();
     syncOpen();
     setInterval(() => { findContainer(); syncOpen(); }, 1000);

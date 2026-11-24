@@ -13,13 +13,12 @@ The images in this folder were taken in headless Chromium (Playwright) at 1440×
 - Playlist hotkeys in the shots are letters (Q, W, E, S), not digits: digits seek within the video.
 - Ads were hidden and every image was checked by hand before committing.
 
-## Annotation style
+## HTML recreations
 
-Annotations are drawn in the page itself right before each screenshot, positioned from the target elements' bounding boxes, and removed afterwards.
+`00-hero.png`, `24-mini-checker.png`, `25-more-info.png` and `26-up-next-popout.png` are not screenshots: they are HTML recreations built from the script's own markup and CSS (the same Tailwind classes) with demo data and placeholder thumbnails, rendered in the same headless Chromium. The real pages show live titles, uploaders and playlist names that could not be neutralised reliably.
 
-- Highlight boxes: 2.5 px solid cyan `#22d3ee`, 8 px rounded corners, outer glow `0 0 0 4px rgba(34,211,238,.25)`.
-- Numbered callouts: a filled cyan circle (24 px, black bold number) at the top-left corner of each box; the numbers match the legend in the README captions. Newer shots rely on the numbers and captions alone.
-- Labels: a pill with a dark `#0b1220` background, cyan border and white 13.5 px text, next to the box or connected to it by a dashed leader line.
-- Where the script's UI is small in the shot, the rest of the page is dimmed by 25–35 %.
+## Style
 
-`00-hero.png` is an HTML composition of three unannotated screenshots, rendered at 2× and downscaled to 1600×800.
+- Annotations are drawn in the page right before each screenshot, positioned from the target elements' bounding boxes: a 3.5 px orange `#f97316` box with a soft glow, a numbered orange badge at its top-left corner (the numbers match the README captions), and a spotlight that dims the rest of the shot. Where only a button is numbered, the panel it opens is kept out of the dimming.
+- Each image is then placed on a dark backdrop with a colour glow per area (orange for playlists and Up next, red for filters, purple for `/playlists`, indigo for the player and HUD, green for settings and keys), with a short label and heading above it.
+- Some older shots kept their original capture and had their annotations converted to this style.

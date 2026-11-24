@@ -1,21 +1,14 @@
 (function () {
     'use strict';
 
-    // ---------------------------------------------------------------------
-    // Tag menu
-    // ---------------------------------------------------------------------
-    // On a video page a click on a tag, a star (model) or a music chip under the player opens a menu
-    // instead of leaving the page: require or exclude it in the site-wide filter, go on to where the
-    // chip normally leads (search results, or the star's profile), and that tag's / star's / song's
-    // videos in one column of cards in the site's own style, with sort and more on scroll.
-    // Ctrl/Cmd/Shift/middle click keep the site's own link.
-    // Videos: stars from /api/models/<slug> (the profile page's call, which knows aliases), falling
-    // back to /api/videos?stars= (exact tag); tags and music from /api/videos. The "_pmvx" marker keeps
-    // these calls out of the browse module's pagination.
+    // --- Tag menu ---
+    // Tag, star and music chips open a menu instead of navigating; Ctrl/Cmd/Shift/middle click keep the link.
+    // Stars load from /api/models/<slug> (knows aliases), else /api/videos?stars= (exact tag).
+    // The "_pmvx" marker keeps these calls out of the browse module's pagination.
 
     const SORT_KEY = 'pmvx_star_sort_v2';
     const PAGE = 16;
-    // The profile page's sort options; `alt` is the same order on /api/videos.
+    // Profile page sort values; `alt` is the same order on /api/videos.
     const SORTS = [
         { v: '-releaseDate',    alt: '-uploadDate',     t: 'Newest' },
         { v: 'releaseDate',     alt: 'uploadDate',      t: 'Oldest' },
@@ -42,7 +35,7 @@
     const qparam = (a, k) => { try { return new URL(a.getAttribute('href') || '', location.origin).searchParams.get(k) || ''; } catch { return ''; } };
     const textOf = a => ((a.querySelector('.truncate')?.textContent || a.textContent || '').replace(/\s+/g, ' ').trim());
 
-    // Chip kinds under the player. read(a) -> { name, term, title, ... } or null.
+    // Chips under the player. read(a) -> { name, term, title, ... } or null.
     const KINDS = {
         tag: {
             sel: 'a[href^="/search?tags="]', icon: SVG_HASH, what: 'tag', go: 'Search results',
@@ -66,6 +59,36 @@
     };
     const ANY_SEL = Object.values(KINDS).map(k => k.sel).join(', ');
     const kindOf = a => Object.keys(KINDS).find(k => a.matches(KINDS[k].sel)) || null;
+
+    // Card chips: buttons in the card link titled "Search for: …"; music reads "Artist - Song" (split on the
+    // first " - "). The "+N" button has another title and stays native.
+    const CARD_CHIP_SEL = 'a[href^="/video/"] button[title^="Search for:"]';
+    function readCardChip(b) {
+        const txt = (b.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!txt) return null;
+        if (txt[0] === '#') {
+            const t = txt.slice(1).trim();
+            return t ? { kind: 'tag', item: { name: t, title: '#' + t, term: t, href: '/search?' + new URLSearchParams({ tags: t }) } } : null;
+        }
+        if (!b.querySelector('svg') && !/green/.test(b.className)) return null;
+        const i = txt.indexOf(' - ');
+        const artist = (i > 0 ? txt.slice(0, i) : txt).trim(), song = (i > 0 ? txt.slice(i + 3) : '').trim();
+        if (!artist) return null;
+        const q = { musicArtist: artist }; if (song) q.musicSong = song;
+        return { kind: 'music', item: { name: artist, title: song ? `${artist} – ${song}` : artist, term: artist, artist, song, href: '/search?' + new URLSearchParams(q) } };
+    }
+    // Player links count only on video pages (a /model/ link elsewhere is plain navigation).
+    function chipAt(target) {
+        const b = target?.closest?.(CARD_CHIP_SEL);
+        if (b) { const r = readCardChip(b); return r ? { el: b, ...r } : null; }
+        // Also in the video info on playlist pages (#pmv-vinfo).
+        if (!isVideoPage() && !target?.closest?.('#pmv-vinfo')) return null;
+        const a = target?.closest?.(ANY_SEL);
+        if (!a) return null;
+        const kind = kindOf(a);
+        const item = kind && KINDS[kind].read(a);
+        return item ? { el: a, kind, item } : null;
+    }
 
     const isVideoPage = () => /^\/video\//.test(location.pathname);
     const currentVideoId = () => PMVX.state?.currentVideoId || location.pathname.match(/([a-f0-9]{24})\/?$/i)?.[1] || null;
@@ -173,9 +196,7 @@
         } catch { return []; }
     }
 
-    // ---------------------------------------------------------------------
-    // Data
-    // ---------------------------------------------------------------------
+    // --- Data ---
     async function getJson(url) {
         const res = await window.fetch(url, { credentials: 'include' });
         if (!res.ok) throw new Error('http ' + res.status);
@@ -210,9 +231,7 @@
         return fromVideos(`stars=${enc(it.name)}`, page);
     }
 
-    // ---------------------------------------------------------------------
-    // Menu
-    // ---------------------------------------------------------------------
+    // --- Menu ---
     let pop = null, anchor = null, cur = null, el = {};
 
     function close() {
@@ -241,12 +260,13 @@
         pop.style.top = Math.max(HEADER + 6, top) + 'px';
     }
 
-    function filterState() { try { return PMVX.tagFilter?.state(cur.item.term) || null; } catch { return null; } }
+    function filterState() { try { return PMVX.tagFilter?.state(cur.item.term, cur.kind) || null; } catch { return null; } }
     function setFilter(next) {
         if (!PMVX.tagFilter || !cur) return;
         const label = cur.kind === 'tag' ? '#' + cur.item.name : cur.item.name;
-        const res = PMVX.tagFilter.set(cur.item.term, next);
-        PMVX.toast?.(res === 'include' ? `+ ${label} required in filter` : res === 'exclude' ? `− ${label} excluded in filter` : `${label} removed from filter`,
+        const res = PMVX.tagFilter.set(cur.item.term, next, cur.kind);
+        const where = cur.kind === 'star' ? 'model filter' : 'filter';
+        PMVX.toast?.(res === 'include' ? `+ ${label} required in ${where}` : res === 'exclude' ? `− ${label} excluded in ${where}` : `${label} removed from ${where}`,
             res === 'exclude' ? 'red' : res === 'include' ? 'green' : null);
         renderFilter();
     }
@@ -265,7 +285,7 @@
         injectStyle();
         anchor = a;
         const K = KINDS[kind];
-        cur = { kind, item, href: a.getAttribute('href'), musicMode: item.song ? 'song' : 'artist', src: null, page: 0, total: null, star: null,
+        cur = { kind, item, href: item.href || a.getAttribute('href'), musicMode: item.song ? 'song' : 'artist', src: null, page: 0, total: null, star: null,
                 seen: new Set(), shown: 0, seq: 0, loading: false, more: true, error: false };
         pop = mk('div'); pop.id = 'pmvst'; pop.dataset.kind = kind;
         pop.setAttribute('data-pmvx-tag-menu', '1');
@@ -281,7 +301,7 @@
         head.append(el.av, who, x);
 
         const acts = mk('div', 'pmvst-acts');
-        // Filter: require / exclude (click again to remove); music filters on the artist.
+        // Click again to remove; music filters on the artist.
         if (PMVX.tagFilter) {
             const row = mk('div', 'pmvst-row');
             row.appendChild(mk('span', 'pmvst-lab', 'Filter'));
@@ -293,7 +313,6 @@
             row.append(el.inc, el.exc);
             acts.appendChild(row);
         }
-        // Where the chip normally leads.
         const row2 = mk('div', 'pmvst-row');
         row2.appendChild(mk('span', 'pmvst-lab', 'Open'));
         const go = mk('a', 'pmvst-go'); go.href = cur.href || '#';
@@ -307,7 +326,6 @@
         };
         row2.appendChild(go);
         acts.appendChild(row2);
-        // Sort, and for music: this song or everything by the artist.
         const row3 = mk('div', 'pmvst-row');
         row3.appendChild(mk('span', 'pmvst-lab', 'Videos'));
         const sel = mk('select', 'pmvst-sort'); sel.title = 'Sort';
@@ -468,23 +486,20 @@
         if (c.more && el.body && el.body.scrollHeight <= el.body.clientHeight + 100) load();
     }
 
-    // ---------------------------------------------------------------------
-    // Wiring
-    // ---------------------------------------------------------------------
+    // --- Wiring ---
     window.addEventListener('click', e => {
-        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || !isVideoPage()) return;
-        const a = e.target?.closest?.(ANY_SEL);
-        if (!a || a.closest('#pmvst')) return;
-        const kind = kindOf(a);
-        const item = kind && KINDS[kind].read(a);
-        if (!item) return;
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+        if (e.target?.closest?.('#pmvst')) return;
+        const c = chipAt(e.target);
+        if (!c) return;
+        // Also keeps the card's link from navigating.
         e.preventDefault();
         e.stopImmediatePropagation();
-        if (pop && anchor === a) { close(); return; }
-        open(a, kind, item);
+        if (pop && anchor === c.el) { close(); return; }
+        open(c.el, c.kind, c.item);
     }, true);
     document.addEventListener('pointerdown', e => {
-        if (!pop || pop.contains(e.target) || e.target?.closest?.(ANY_SEL)) return;
+        if (!pop || pop.contains(e.target) || chipAt(e.target)) return;
         // Toasts and the queue panel stay usable without closing the menu.
         if (e.target?.closest?.('#pmv-toast, #pmv-queue-floating')) return;
         close();
@@ -492,7 +507,7 @@
     window.addEventListener('keydown', e => { if (pop && e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(); } }, true);
     window.addEventListener('resize', () => place());
     window.addEventListener('scroll', e => { if (pop && !pop.contains(e.target)) place(); }, { passive: true, capture: true });
-    // Another filter change (filter panel, another tab) shows in the open menu.
+    // Filter changes elsewhere (panel, other tab) show in the open menu.
     window.addEventListener('storage', () => renderFilter());
     // Close on navigation, or when its chip is gone.
     let lastPath = location.pathname;
